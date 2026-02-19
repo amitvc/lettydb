@@ -134,11 +134,13 @@ namespace letty {
     }
 
     Token Lexer::make_string() {
-        std::string value;
         advance();
+        // Capture start position and use substr instead of char-by-char append
+        size_t start = curr_pos;
         while (!has_ended() && peek() != '\'') {
-            value += advance();
+            advance();
         }
+        std::string value(input_.substr(start, curr_pos - start));
 
 		// Check if we hit the end of the file without finding a closing quote
 		if (has_ended()) {
@@ -166,24 +168,24 @@ namespace letty {
      * @return Token of type INT_LITERAL, FLOAT_LITERAL with the numeric string
      */
     Token Lexer::make_numbers() {
-        std::string number;
+        size_t start = curr_pos;
         bool is_float = false;
         while (!has_ended() && isdigit(peek())) {
-            number += advance();
+            advance();
         }
 
         if (!has_ended() && peek() == '.') {
-            // Check if there is a digit after the dot
             if (curr_pos + 1 < input_.size() && isdigit(input_[curr_pos + 1])) {
                 is_float = true;
-                number += advance(); // consume the dot
+                advance(); // consume the dot
                 while (!has_ended() && isdigit(peek())) {
-                    number += advance();
+                    advance();
                 }
             }
         }
 
-        return {is_float ? TokenType::FLOAT_LITERAL : TokenType::INT_LITERAL, number};
+        std::string number(input_.substr(start, curr_pos - start));
+        return {is_float ? TokenType::FLOAT_LITERAL : TokenType::INT_LITERAL, std::move(number)};
     }
 
     /**
@@ -197,22 +199,24 @@ namespace letty {
      * @return Token of appropriate keyword type or IDENTIFIER
      */
     Token Lexer::make_key_or_identifier() {
-        std::string text;
+        // Use substr instead of char-by-char append
+        size_t start = curr_pos;
         while (!has_ended() && (std::isalnum(peek()) || peek() == '_')) {
-            text += advance();
+            advance();
         }
+        std::string text(input_.substr(start, curr_pos - start));
 
+        // Uppercase in-place for keyword lookup
         std::string upper_text = text;
         std::transform(upper_text.begin(), upper_text.end(), upper_text.begin(),
                        [](unsigned char c){ return std::toupper(c); });
 
-
         auto it = keyword_map().find(upper_text);
         if (it != keyword_map().end()) {
-            return {it->second, text};
+            return {it->second, std::move(text)};
         }
 
-        return {TokenType::IDENTIFIER, text};
+        return {TokenType::IDENTIFIER, std::move(text)};
     }
 
     char Lexer::advance() {
@@ -242,11 +246,12 @@ namespace letty {
      */
     std::vector<Token> Lexer::tokenize() {
         std::vector<Token> tokens;
+        tokens.reserve(16);  // Typical INSERT has ~13 tokens
         Token token;
         do {
             token = next_token();
-            tokens.push_back(token);
-        } while (token.type != TokenType::EOF_FILE);
+            tokens.push_back(std::move(token));
+        } while (tokens.back().type != TokenType::EOF_FILE);
         return tokens;
     }
 

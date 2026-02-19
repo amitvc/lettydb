@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "catalog/catalog_manager.h"
 #include "storage/disk_manager.h"
+#include "buffer/buffer_pool_manager.h"
+#include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
 #include "storage/iam_manager.h"
 #include <cstdio>
@@ -12,9 +14,11 @@ class CatalogBootstrapTest : public ::testing::Test {
   void SetUp() override {
     std::remove("test_catalog.db");
     disk_manager = std::make_unique<DiskManager>("test_catalog.db");
-    extent_manager = std::make_unique<ExtentManager>(*disk_manager);
-    iam_manager = std::make_unique<IamManager>(*disk_manager, *extent_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*disk_manager, *iam_manager);
+    bpm = std::make_unique<BufferPoolManager>(
+        *disk_manager, 64, std::make_unique<LRUPageReplacer>());
+    extent_manager = std::make_unique<ExtentManager>(*bpm);
+    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager);
   }
 
   void TearDown() override {
@@ -22,6 +26,7 @@ class CatalogBootstrapTest : public ::testing::Test {
   }
 
   std::unique_ptr<DiskManager> disk_manager;
+  std::unique_ptr<BufferPoolManager> bpm;
   std::unique_ptr<ExtentManager> extent_manager;
   std::unique_ptr<IamManager> iam_manager;
   std::unique_ptr<CatalogManager> catalog_manager;

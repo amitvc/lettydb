@@ -1,10 +1,12 @@
 //
-// Simple integration test to verify sparse IAM functionality works
+// Simple integration test to verify list-based IAM and metadata pool functionality
 //
 
 #include <gtest/gtest.h>
 #include "storage/iam_manager.h"
 #include "storage/disk_manager.h"
+#include "buffer/buffer_pool_manager.h"
+#include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
 #include "common/logger.h"
 #include <filesystem>
@@ -12,90 +14,138 @@
 namespace letty {
 
 /**
- * Simple integration test for sparse IAM functionality
+ * Simple integration test for list-based IAM functionality
  */
-TEST(IamIntegrationTest, SparseIamBasicFunctionality) {
+TEST(IamIntegrationTest, ListBasedIamBasicFunctionality) {
     // Setup temporary database
     auto test_db_file = std::filesystem::temp_directory_path() / "iam_integration_test.db";
     
     try {
         // Initialize components
         DiskManager disk_manager(test_db_file.string());
-        ExtentManager extent_manager(disk_manager);
-        IamManager iam_manager(disk_manager, extent_manager);
-        
-        
+        BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
+        ExtentManager extent_manager(bpm);
+        bpm.flush_all_pages();  // Flush init pages for components still using DiskManager directly
+        IamManager iam_manager(bpm, extent_manager);
+
+        // Initialize metadata pool
+        iam_manager.init_metadata_pool(FIRST_METADATA_POOL_PAGE_ID);
+
         // Create a table's IAM chain
         page_id_t table_iam = iam_manager.create_iam_chain();
         ASSERT_NE(table_iam, INVALID_PAGE_ID);
         
-        // Test sparse allocation
-        page_id_t extent1 = iam_manager.allocate_extent_sparse(table_iam);
+        // Allocate some extents
+        page_id_t extent1 = iam_manager.allocate_extent_for_table(table_iam);
         EXPECT_NE(extent1, INVALID_PAGE_ID);
         
-        // Test regular allocation for comparison
-        page_id_t extent2 = iam_manager.allocate_extent(table_iam);
+        page_id_t extent2 = iam_manager.allocate_extent_for_table(table_iam);
         EXPECT_NE(extent2, INVALID_PAGE_ID);
         
-        // Both should be valid but different
+        // Both should be valid and different
         EXPECT_NE(extent1, extent2);
         
-        LOG_STORAGE_INFO("Basic sparse IAM integration test passed");
+        LOG_STORAGE_INFO("Basic list-based IAM integration test passed");
         
     } catch (...) {
-        // Cleanup
         if (std::filesystem::exists(test_db_file)) {
             std::filesystem::remove(test_db_file);
         }
         throw;
     }
     
-    // Cleanup
     if (std::filesystem::exists(test_db_file)) {
         std::filesystem::remove(test_db_file);
     }
 }
 
 /**
- * Test SparseIamPage structure basic functionality
+ * Test IAMPage structure basic functionality
  */
-TEST(IamIntegrationTest, SparseIamPageBasics) {
-    // Test SparseIamPage structure
-    SparseIamPage page;
-    page.extent_range_start = 1000;
+TEST(IamIntegrationTest, IAMPageBasics) {
+    // Test IAMPage structure
+    IAMPage page;
     
-    // Test coverage check
-    EXPECT_TRUE(page.covers_extent(1000));
-    EXPECT_TRUE(page.covers_extent(1500));
-    EXPECT_FALSE(page.covers_extent(999));
-    EXPECT_FALSE(page.covers_extent(1000 + SPARSE_MAX_BITS));
+    // Test initial state
+    EXPECT_EQ(page.extent_count, 0);
+    EXPECT_TRUE(page.has_space());
     
-    // Test bit offset calculation
-    EXPECT_EQ(page.get_bit_offset(1000), 0);
-    EXPECT_EQ(page.get_bit_offset(1001), 1);
-    EXPECT_EQ(page.get_bit_offset(1010), 10);
+    // Add some extents
+    EXPECT_TRUE(page.add_extent(100));
+    EXPECT_TRUE(page.add_extent(200));
+    EXPECT_TRUE(page.add_extent(300));
+    EXPECT_EQ(page.extent_count, 3);
     
-    LOG_STORAGE_INFO("SparseIamPage basics test passed");
+    // Test contains
+    EXPECT_TRUE(page.contains_extent(100));
+    EXPECT_TRUE(page.contains_extent(200));
+    EXPECT_TRUE(page.contains_extent(300));
+    EXPECT_FALSE(page.contains_extent(400));
+    
+    LOG_STORAGE_INFO("IAMPage basics test passed");
 }
 
 /**
- * Test range calculation function
+ * Test MetadataPoolDirectoryPage structure
  */
-TEST(IamIntegrationTest, RangeCalculation) {
-    auto test_db_file = std::filesystem::temp_directory_path() / "range_calc_test.db";
+TEST(IamIntegrationTest, MetadataPoolDirectoryPageBasics) {
+    MetadataPoolDirectoryPage header;
+    
+    // Initial state
+    EXPECT_EQ(header.slots_bitmap, 0);
+    EXPECT_EQ(header.find_free_slot(), 1);  // First available slot
+    
+    // Mark slots
+    header.mark_slot_used(1);
+    EXPECT_TRUE(header.is_slot_used(1));
+    EXPECT_EQ(header.find_free_slot(), 2);
+    
+    header.mark_slot_used(2);
+    header.mark_slot_used(3);
+    EXPECT_EQ(header.find_free_slot(), 4);
+    
+    // Free a slot
+    header.mark_slot_free(2);
+    EXPECT_EQ(header.find_free_slot(), 2);
+    
+    LOG_STORAGE_INFO("MetadataPoolDirectoryPage basics test passed");
+}
+
+/**
+ * Test multiple tables sharing metadata pool
+ */
+TEST(IamIntegrationTest, MultipleTablesSharePool) {
+    auto test_db_file = std::filesystem::temp_directory_path() / "multi_table_test.db";
     
     try {
         DiskManager disk_manager(test_db_file.string());
-        ExtentManager extent_manager(disk_manager);
-        IamManager iam_manager(disk_manager, extent_manager);
+        BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
+        ExtentManager extent_manager(bpm);
+        bpm.flush_all_pages();  // Flush init pages for components still using DiskManager directly
+        IamManager iam_manager(bpm, extent_manager);
+
+        iam_manager.init_metadata_pool(FIRST_METADATA_POOL_PAGE_ID);
         
-        // Test range calculation
-        EXPECT_EQ(iam_manager.calculate_sparse_range_start(0), 0);
-        EXPECT_EQ(iam_manager.calculate_sparse_range_start(SPARSE_MAX_BITS - 1), 0);
-        EXPECT_EQ(iam_manager.calculate_sparse_range_start(SPARSE_MAX_BITS), SPARSE_MAX_BITS);
-        EXPECT_EQ(iam_manager.calculate_sparse_range_start(SPARSE_MAX_BITS + 100), SPARSE_MAX_BITS);
+        // Create multiple tables
+        page_id_t table1_iam = iam_manager.create_iam_chain();
+        page_id_t table2_iam = iam_manager.create_iam_chain();
+        page_id_t table3_iam = iam_manager.create_iam_chain();
         
-        LOG_STORAGE_INFO("Range calculation test passed");
+        // All should be valid and from metadata pool
+        EXPECT_NE(table1_iam, INVALID_PAGE_ID);
+        EXPECT_NE(table2_iam, INVALID_PAGE_ID);
+        EXPECT_NE(table3_iam, INVALID_PAGE_ID);
+        
+        // All should be different
+        EXPECT_NE(table1_iam, table2_iam);
+        EXPECT_NE(table2_iam, table3_iam);
+        EXPECT_NE(table1_iam, table3_iam);
+        
+        // All should be in metadata pool extent
+        EXPECT_GE(table1_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
+        EXPECT_LE(table1_iam, FIRST_METADATA_POOL_PAGE_ID + METADATA_POOL_SLOTS);
+        
+        LOG_STORAGE_INFO("Multiple tables share pool test passed");
         
     } catch (...) {
         if (std::filesystem::exists(test_db_file)) {

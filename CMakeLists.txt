@@ -6,14 +6,30 @@ set(CMAKE_CXX_STANDARD 17)
 # Set debug flags when in Debug mode
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
-# Add spdlog
+# Add dependencies via FetchContent
 include(FetchContent)
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG v1.12.0
 )
-FetchContent_MakeAvailable(spdlog)
+FetchContent_Declare(
+    replxx
+    GIT_REPOSITORY https://github.com/AmokHuginnsson/replxx.git
+    GIT_TAG release-0.0.4
+)
+FetchContent_Declare(
+    json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+)
+FetchContent_Declare(
+    tabulate
+    GIT_REPOSITORY https://github.com/p-ranav/tabulate.git
+    GIT_TAG v1.5
+    DOWNLOAD_EXTRACT_TIMESTAMP true
+)
+FetchContent_MakeAvailable(spdlog replxx json tabulate)
 
 file(GLOB_RECURSE DB_SOURCES "src/*.cpp")
 file(GLOB_RECURSE DB_HEADERS "src/*.h")
@@ -22,7 +38,7 @@ file(GLOB_RECURSE DB_HEADERS "src/*.h")
 list(REMOVE_ITEM DB_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
 add_library(lettydb ${DB_SOURCES} ${DB_HEADERS})
-target_link_libraries(lettydb spdlog::spdlog)
+target_link_libraries(lettydb spdlog::spdlog replxx::replxx nlohmann_json::nlohmann_json tabulate::tabulate)
 
 # Create executable
 add_executable(lettydb_cli src/main.cpp)

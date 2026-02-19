@@ -8,8 +8,9 @@
 
 #include "catalog/catalog_defs.h"
 #include "catalog/schema.h"
-#include "storage/disk_manager.h"
+#include "buffer/buffer_pool_manager.h"
 #include "storage/iam_manager.h"
+#include "storage/tuple.h"
 
 namespace letty {
 
@@ -36,11 +37,12 @@ struct TableMetadata {
  * It manages and serves information about:
  * - Stores Table metadata when a table is created
  * - Given table name returns Table metadata
- * - TODO
+ *
+ * All page access goes through BufferPoolManager. No direct DiskManager calls.
  */
 class CatalogManager {
  public:
-  CatalogManager(DiskManager& disk_manager, IamManager& iam_manager);
+  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager);
 
   /**
    * @brief Initializes the catalog manager.
@@ -61,18 +63,47 @@ class CatalogManager {
    * @param name The name of the table.
    * @return Pointer to TableMetadata if found, nullptr otherwise.
    */
-  std::unique_ptr<TableMetadata> get_table(const std::string& name);
+  const TableMetadata* get_table(const std::string& name);
+
+  bool delete_table(const std::string &name);
+
+  /** Schema for sys_tables: {oid INT, name VARCHAR(32), first_page_id INT, column_count INT} */
+  static Schema sys_tables_schema();
+
+  /** Schema for sys_columns: {table_oid INT, name VARCHAR(32), type INT, length INT, offset INT} */
+  static Schema sys_columns_schema();
 
  private:
-  DiskManager& disk_manager_;
+  BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
+
+  /** In-memory cache of table metadata, keyed by table name.
+   *  Populated on create_table() and first get_table() miss.
+   *  Eliminates repeated full scans of sys_tables + sys_columns. */
+  std::unordered_map<std::string, TableMetadata> table_cache_;
 
   // Function to create the system tables if they don't exist
   void bootstrap();
-  
-  // Helper to insert a row into a table (by OID/PageID)
-  // For now, this might just handle the specific bootstrapping logic manually
-  void insert_tuple(page_id_t first_page_id, const char* data, uint32_t size);
+
+  /**
+   * @brief Gets the next available OID and increments the counter in the database header.
+   * @return The next available OID for a new table.
+   */
+  uint16_t get_next_oid();
+
+  /**
+   * @brief Inserts a tuple into a table, automatically finding a page with space.
+   *
+   * If no page has enough space, allocates a new extent for the table.
+   *
+   * @param iam_page_id The IAM page ID for the table.
+   * @param data The tuple data to insert.
+   * @param size The size of the tuple data.
+   * @return true if successful, false otherwise.
+   */
+  bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
+
+
 };
 
 }

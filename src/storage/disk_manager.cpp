@@ -3,87 +3,75 @@
 //
 
 #include "disk_manager.h"
+#include "common/logger.h"
 #include "storage/config.h"
-#include <iostream>
 #include <cassert>
 #include <utility>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 namespace letty {
 DiskManager::DiskManager(std::string db_file) : file_name_(std::move(db_file)) {
   assert(!file_name_.empty() && "Database file path cannot be empty");
-
-  // Open the file with flags for reading, writing, and binary mode.
-  db_file_.open(file_name_, std::ios::in | std::ios::out | std::ios::binary);
-
-  // If the file cannot be opened (e.g., because it doesn't exist), we create it.
-  if (!db_file_.is_open()) {
-
-	// The `trunc` flag creates file if it does not exist.
-	db_file_.open(file_name_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-	if (!db_file_.is_open()) {
-	  // We can't proceed without db file.
-	  throw std::runtime_error("FATAL: Failed to create or open database file: " + file_name_);
-	}
+  mode_t mode = S_IRUSR | S_IWUSR; // 0600
+  fd_ = open(file_name_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, mode);
+  if (fd_ == -1) {
+	throw std::runtime_error("FATAL: Failed to create or open database file: " + file_name_ + " error no : ( " + std::strerror(errno) + ")");
   }
+
+  LOG_STORAGE_INFO("Opening database file {}", file_name_);
 }
 
 DiskManager::~DiskManager() {
-  if (db_file_.is_open()) {
-	db_file_.flush(); // flush to disk
-	db_file_.close(); // close the db file
+  if (fd_ != -1) {
+	fsync(fd_);
+	close(fd_);
   }
 }
 
 IOResult DiskManager::write_page(page_id_t page_id, const char *page_data) {
-  if (!db_file_.is_open()) {
-	return IOResult::FILE_NOT_OPEN;
-  }
-
-  std::streampos offset = static_cast<std::streampos>(page_id) * PAGE_SIZE;
-  db_file_.seekp(offset, std::ios::beg);
-  if (db_file_.fail()) {
-	db_file_.clear(); // Clear error flags to allow further operations
-	return IOResult::SEEK_ERROR;
-  }
-
-  // Write exactly PAGE_SIZE bytes from the buffer to the file.
-  db_file_.write(page_data, PAGE_SIZE);
-  if (db_file_.fail()) {
-	db_file_.clear();
+  off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
+  ssize_t written = pwrite(fd_, page_data, PAGE_SIZE, offset);
+  if (written != PAGE_SIZE) {
 	return IOResult::WRITE_ERROR;
   }
 
-  // Ensure the data is physically written to disk and not just kept in an OS buffer.
-  // This is crucial for database durability.
-  db_file_.flush();
+  ++write_count_;
   return IOResult::SUCCESS;
 }
 
-IOResult DiskManager::read_page(letty::page_id_t page_id, char *page_data) {
-  if (!db_file_.is_open()) {
-	return IOResult::FILE_NOT_OPEN;
-  }
-
-  // Calculate the offset to seek to in the file.
-  std::streampos offset = static_cast<std::streampos>(page_id) * PAGE_SIZE;
-
-  // Move the file's "get" (read) pointer to the correct position.
-  db_file_.seekg(offset, std::ios::beg);
-  if (db_file_.fail()) {
-	// This can happen if we try to read a page that doesn't exist yet.
-	db_file_.clear(); // Clear error flags
-	return IOResult::SEEK_ERROR;
-  }
-
-  // Read exactly PAGE_SIZE bytes from the file into the buffer.
-  db_file_.read(page_data, PAGE_SIZE);
-  if (db_file_.fail()) {
-	// `gcount()` returns the number of bytes actually read.
-	// This check is useful for diagnosing reads past the end of the file.
-	db_file_.clear();
+IOResult DiskManager::read_page(page_id_t page_id, char *page_data) {
+  off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
+  ssize_t bytes_read = pread(fd_, page_data, PAGE_SIZE, offset);
+  if (bytes_read != PAGE_SIZE) {
 	return IOResult::READ_ERROR;
   }
+
+  ++read_count_;
   return IOResult::SUCCESS;
 }
+
+IOStats DiskManager::get_io_stats() const {
+  return {read_count_.load(), write_count_.load()};
 }
 
+void DiskManager::reset_io_stats() {
+  read_count_ = 0;
+  write_count_ = 0;
+}
+
+void DiskManager::sync() {
+  if (fd_ != -1) {
+    fsync(fd_);
+  }
+}
+
+page_id_t DiskManager::get_file_size_in_pages() {
+  struct stat st{};
+  if (fstat(fd_, &st) != 0) {
+    return 0;
+  }
+  return static_cast<page_id_t>(st.st_size / PAGE_SIZE);
+}
+}

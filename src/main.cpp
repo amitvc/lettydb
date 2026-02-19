@@ -6,28 +6,39 @@
 #include "common/logger.h"
 #include <iostream>
 
-int main() {
+int main(int argc, char* argv[]) {
     try {
+        // Parse arguments
+        std::string db_path = "letty.db";
+
+        for (int i = 1; i < argc; ++i) {
+            db_path = argv[i];
+        }
+
         // Initialize logging system
         letty::Logger::init("letty.log");
-        
+
         LOG_INFO("=== Letty Started ===");
         LOG_INFO("Version: 1.0.0");
         LOG_INFO("Build: " __DATE__ " " __TIME__);
-        
-        // Run the CLI
-        letty::LettyCli cli;
-        cli.Run();
-        
+	  	LOG_INFO("File Path: " + db_path);
+
+
+        {
+            letty::LettyCli cli(db_path);
+            cli.Run();
+        }
+
         LOG_INFO("=== Letty Shutting Down ===");
-        
-        // Cleanup logging
+
+        // Cleanup logging — must happen after all components are destroyed
         letty::Logger::shutdown();
-        
+
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         return 1;
     }
+	
     
     return 0;
 }

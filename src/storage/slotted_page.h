@@ -13,8 +13,8 @@ namespace letty {
  */
 #pragma pack(1)
 struct SlottedPageHeader {
-  //Log Sequence Number
-  lsn_t lsn = 0; // Future use.
+  //Log Sequence Number. Needed for crash recovery when we implement WAL
+  lsn_t lsn = 0;
   page_id_t next_page_id = INVALID_PAGE_ID;
   page_id_t prev_page_id = INVALID_PAGE_ID;
   uint16_t num_slots = 0;       // Number of slots currently allocated. Will also include deleted slots.
@@ -43,7 +43,6 @@ struct Slot {
  *
  *  +--------------------------------------------------------------+ 0
  *  | SlottedPageHeader (fixed-size)                               |
- *  |  - page_type                                                 |
  *  |  - lsn                                                       |
  *  |  - next_page_id / prev_page_id                               |
  *  |  - num_slots       (# slot entries allocated; includes holes)|

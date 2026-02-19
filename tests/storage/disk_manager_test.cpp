@@ -7,6 +7,7 @@
 #include "storage/config.h"
 #include "storage/error_codes.h"
 #include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <memory>
 using namespace letty;

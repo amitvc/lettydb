@@ -13,11 +13,16 @@
 namespace letty {
 
 
-#pragma pack(1) // turn off byte padding
+// Disable compiler-inserted alignment padding so struct layouts match
+// their on-disk byte offsets exactly. These structs are overlaid onto raw
+// page buffers via reinterpret_cast, so any padding would misalign fields
+// and corrupt reads/writes.
+// See: https://learn.microsoft.com/en-us/cpp/preprocessor/pack
+#pragma pack(push, 1)
 
 /**
  * @struct DatabaseHeader
- * @brief Page 0 for the database. This page contains information to locate GAM, System catalog IAM page,
+ * @brief Page 0 for the database. This page contains information to locate GAM, MetadataPool , System catalog IAM page,
  *  and other meta data about the database. This is the entry point to how database locates data stored on disk.
  *
  *  * Database Header Page (Page 0)
@@ -29,28 +34,35 @@ namespace letty {
  * Byte Offsets (PAGE_SIZE = 4096)
  *
  *  +--------------------------------------------------------------+ 0
- *  | signature[8]   ("LETTY\0\0\0")                                |
- *  |   - Identifies this file as a Letty database                |
+ *  | signature[8]   ("LETTYDB")                                   |
+ *  |   - Identifies this file as a Letty database                 |
  *  +--------------------------------------------------------------+ 8
  *  | version (uint32)                                             |
- *  |   - Database file format version                             |
+ *  |   - Database file format version (currently 2)               |
  *  +--------------------------------------------------------------+ 12
  *  | page_size (uint32)                                           |
  *  |   - Size of each page in bytes (e.g., 4096)                  |
  *  +--------------------------------------------------------------+ 16
- *  | total_pages (uint64)                                         |
- *  |   - Total number of pages allocated in the database file     |
- *  +--------------------------------------------------------------+ 24
  *  | gam_page_id (page_id_t)                                      |
  *  |   - Page ID of the Global Allocation Map (GAM)               |
  *  |   - Always page 1                                            |
- *  +--------------------------------------------------------------+ 28
+ *  +--------------------------------------------------------------+ 20
+ *  | metadata_pool_page_id (page_id_t)                            |
+ *  |   - First page of the metadata pool extent                   |
+ *  |   - Used to allocate IAM pages dynamically                   |
+ *  +--------------------------------------------------------------+ 24
  *  | sys_tables_iam_page (page_id_t)                              |
  *  |   - IAM page for system catalog: sys_tables                  |
- *  +--------------------------------------------------------------+ 32
+ *  |   - Dynamically allocated from metadata pool                 |
+ *  +--------------------------------------------------------------+ 28
  *  | sys_columns_iam_page (page_id_t)                             |
  *  |   - IAM page for system catalog: sys_columns                 |
- *  +--------------------------------------------------------------+ 36
+ *  |   - Dynamically allocated from metadata pool                 |
+ *  +--------------------------------------------------------------+ 32
+ *  | next_table_oid (uint16)                                      |
+ *  |   - Next available OID for user tables                       |
+ *  |   - System tables use OIDs 1-99, users start at 100          |
+ *  +--------------------------------------------------------------+ 34
  *  | padding                                                      |
  *  |   - Zero-filled                                              |
  *  |   - Reserved for future metadata                             |
@@ -65,20 +77,27 @@ namespace letty {
 struct DatabaseHeader {
   char signature[8];
   uint32_t version = 1;
-  uint32_t page_size = PAGE_SIZE; // 4096 bytes.
-  // This value gets updated as pages get allocated
-  uint64_t total_pages = 0;
+  // Page size stored for file validation and potential future support of variable page sizes.
+  // Standalone tools can use this to read db pages.
+  uint32_t page_size = PAGE_SIZE;
   // The GAM page is always the 2nd page in the file. Value is 1 since page 0 is db header page.
-  page_id_t gam_page_id = 1;
+  page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
-  // Points to the IAM page for the 'sys_tables' table (The Catalog of Tables)
-  page_id_t sys_tables_iam_page = 2;
+  // Points to the first metadata pool extent (for IAM pages and other metadata)
+  page_id_t metadata_pool_page_id = FIRST_METADATA_POOL_PAGE_ID;
 
-  // Points to the IAM page for the 'sys_columns' table (The Catalog of Columns)
-  page_id_t sys_columns_iam_page = 3;
+  // Points to the IAM page for the 'sys_tables' table (dynamically assigned from metadata pool)
+  page_id_t sys_tables_iam_page = INVALID_PAGE_ID;
 
-  // 8 (sig) + 4 (ver) + 4 (psize) + 8 (tpages) + 4 (gam) + 4 (sys_tables) + 4 (sys_cols) = 36 bytes
-  uint8_t padding[PAGE_SIZE - 36]; // Padding to ensure the header completely fills the page.
+  // Points to the IAM page for the 'sys_columns' table (dynamically assigned from metadata pool)
+  page_id_t sys_columns_iam_page = INVALID_PAGE_ID;
+
+  // Next available OID for user tables. System tables use OIDs 1-99.
+  // User tables start at 100 and increment from there.
+  uint16_t next_table_oid = 100;
+
+  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam) + 4 (meta_pool) + 4 (sys_tables) + 4 (sys_cols) + 2 (next_oid) = 34 bytes
+  uint8_t padding[PAGE_SIZE - 34]; // Padding to ensure the header completely fills the page.
 
   DatabaseHeader() {
 	  std::memset(signature, 0, sizeof(signature));  // zero pad the entire field
@@ -86,101 +105,176 @@ struct DatabaseHeader {
   }
 };
 
+static_assert(sizeof(DatabaseHeader) == PAGE_SIZE, 
+              "DatabaseHeader must be exactly PAGE_SIZE bytes");
+
 /**
  * @struct GAMPage
  * @brief Structure specifically for GAM (Global Allocation Map) pages.
  *
  * This struct overlays a raw 4KB page and is used ONLY for GAM pages.
  *
- * GAM Usage: Each bit represents an Extent (8 pages). 1 GAM page can track 
- * 32736 extents (~1GB of data). When the database grows beyond this, additional
+ * GAM Usage: Each bit represents an Extent (8 pages). 1 GAM page can track
+ * 32,720 extents (~1GB of data). When the database grows beyond this, additional
  * GAM pages are chained together.
  *
  * Layout:
- *  +--------------------------------------------------------------+ 4
- *  | next_bitmap_page_id (page_id_t)                              |
+ *  +--------------------------------------------------------------+ 0
+ *  | next_page_id (page_id_t)                                     |
  *  |   - Links to next GAM page when database exceeds capacity    |
- *  +--------------------------------------------------------------+ 8
+ *  +--------------------------------------------------------------+ 4
+ *  | first_free_bit_hint (uint16_t)                               |
+ *  |   - Hint for where to start searching for free bits          |
+ *  |   - Optimization to avoid O(n) linear scan                   |
+ *  +--------------------------------------------------------------+ 6
  *  | bitmap[BITMAP_ARRAY_SIZE]                                    |
  *  |   - Raw bitset payload tracking extent allocation            |
- *  |   - BITMAP_ARRAY_SIZE = PAGE_SIZE - 4 = 4092 bytes           |
- *  |   - bits_per_bitmap_page = 4092 * 8 = 32736 extents          |
- *  |   - pages_covered = 32736 extents * 8 pages/extent           |
- *  |                  = 261,888 pages (~1GB)                      |
+ *  |   - BITMAP_ARRAY_SIZE = PAGE_SIZE - 6 = 4090 bytes           |
+ *  |   - bits_per_bitmap_page = 4090 * 8 = 32,720 extents         |
+ *  |   - pages_covered = 32,720 extents * 8 pages/extent          |
+ *  |                  = 261,760 pages (~1GB)                      |
  *  +--------------------------------------------------------------+
  *
  */
 struct GAMPage {
   // Links GAM pages together when database grows beyond single page capacity
-  page_id_t next_bitmap_page_id = INVALID_PAGE_ID;
+  page_id_t next_page_id = INVALID_PAGE_ID;
+
+  // Hint for where to start searching for free bits (optimization)
+  // Updated on allocation (set to next bit) and deallocation (rewind if earlier)
+  uint16_t first_free_bit_hint = 0;
 
   // Bitmap tracking extent allocation (1 = allocated, 0 = free)
-  char bitmap[BITMAP_ARRAY_SIZE]; // 4092 bytes
+  char bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4090 = 4096 - (4 bytes PAGE_ID + 2 bytes hint)
 };
 
 /**
- * @struct SparseIamPage  
- * @brief Represents extent allocations for individual tables. This is Index allocation map implementation.
- * This implementation is an optimized version of IAM page implementation. It will only chain IAM pages which
- * are applicable for the table in consideration.
- *
- * Example: If a table has extents #100 and #200000, we create exactly 2 IAM pages:
- * - IAM-1: extent_range_start=0, covers extents 0-32639 (contains extent #100)  
- * - IAM-2: extent_range_start=196608, covers extents 196608-229247 (contains #200000)
+ * @struct MetadataPoolDirectoryPage
+ * @brief Directory page to track available slots in MetadataPool extent.
  * 
+ * A metadata pool extent holds multiple metadata pages (like IAM pages).
+ * Page 0 of the extent is this header, pages 1-7 are available slots.
+ *
  * Layout:
  *  +--------------------------------------------------------------+ 0
- *  | page_type (PageType::IAM)                                    |
+ *  | next_pool_page (page_id_t)                                   |
+ *  |   - Links to next metadata pool extent when this one is full |
  *  +--------------------------------------------------------------+ 4
- *  | next_bitmap_page_id (page_id_t)                              |
- *  +--------------------------------------------------------------+ 8
- *  | extent_range_start (uint64_t)                                |
- *  |   - First global extent index this page covers              |
- *  +--------------------------------------------------------------+ 16
- *  | bitmap[SPARSE_BITMAP_ARRAY_SIZE]                             |
- *  |   - Bitmap covering extents [range_start, range_start+32639]|
- *  +--------------------------------------------------------------+
- *
- * Benefits:
- * - Saves disk space for sparse tables
- * - Reduces IAM chain traversal time  
- * - Unified structure for all IAM operations
- * - No legacy compatibility overhead
+ *  | slots_bitmap (uint8_t)                                       |
+ *  |   - Bitmap tracking which slots (1-7) are used               |
+ *  |   - Bit 0 unused (Directory Page), bits 1-7 = slots          |
+ *  +--------------------------------------------------------------+ 5
+ *  | padding to fill page                                         |
+ *  +--------------------------------------------------------------+ 4096
  */
-struct SparseIamPage {
-  // Link to next IAM page in chain (may skip ranges)
-  page_id_t next_bitmap_page_id = INVALID_PAGE_ID;
+struct MetadataPoolDirectoryPage {
+  page_id_t next_pool_page = INVALID_PAGE_ID;  // 4 bytes
+  uint8_t slots_bitmap = 0;                     // 1 byte - bits 1-7 represent slots
+  char padding[PAGE_SIZE - 5];                  // Fill the rest of the page
   
+  static constexpr uint8_t NO_FREE_SLOT = 0;
+
   /**
-   * @brief Starting global extent index for this page's range.
-   * 
-   * This page's bitmap covers global extents from:
-   * [extent_range_start] to [extent_range_start + SPARSE_MAX_BITS - 1]
-   * 
-   * Example: If extent_range_start = 65408, this page covers
-   * global extents 65408 through 98111 (32704 extents total).
+   * @brief Find a free slot in this pool (1-7).
+   * @return Slot number (1-7) or NO_FREE_SLOT if no free slot.
    */
-  uint64_t extent_range_start = 0;
-  
-  // Bitmap array (slightly smaller due to range_start field)
-  char bitmap[SPARSE_BITMAP_ARRAY_SIZE]; // 4080 bytes = 32640 bits
-  
-  /**
-   * @brief Check if this page covers the given global extent index.
-   */
-  bool covers_extent(uint64_t global_extent_index) const {
-    return global_extent_index >= extent_range_start && 
-           global_extent_index < extent_range_start + SPARSE_MAX_BITS;
+  uint8_t find_free_slot() const {
+    for (uint8_t i = 1; i <= METADATA_POOL_SLOTS; ++i) {
+      if ((slots_bitmap & (1 << i)) == 0) {
+        return i;
+      }
+    }
+    return NO_FREE_SLOT;
   }
   
   /**
-   * @brief Convert global extent index to local bit offset in this page.
+   * @brief Mark a slot as used.
    */
-  size_t get_bit_offset(uint64_t global_extent_index) const {
-    return static_cast<size_t>(global_extent_index - extent_range_start);
+  void mark_slot_used(uint8_t slot) {
+    slots_bitmap |= (1 << slot);
+  }
+  
+  /**
+   * @brief Mark a slot as free.
+   */
+  void mark_slot_free(uint8_t slot) {
+    slots_bitmap &= ~(1 << slot);
+  }
+  
+  /**
+   * @brief Check if a slot is used.
+   */
+  bool is_slot_used(uint8_t slot) const {
+    return (slots_bitmap & (1 << slot)) != 0;
   }
 };
-#pragma pack()
+
+/**
+ * @struct IAMPage
+ * @brief Represents extent allocations for individual tables using a list of extent IDs.
+ * 
+ * This is a list-based implementation that stores extent IDs directly rather than
+ * using a bitmap. More space-efficient for tables with scattered or few extents.
+ *
+ * Layout:
+ *  +--------------------------------------------------------------+ 0
+ *  | next_page_id (page_id_t)                                     |
+ *  |   - Links to next IAM page when extent_count exceeds capacity|
+ *  +--------------------------------------------------------------+ 4
+ *  | extent_count (uint16_t)                                      |
+ *  |   - Number of valid entries in extent_ids array              |
+ *  +--------------------------------------------------------------+ 6
+ *  | reserved (uint16_t)                                          |
+ *  |   - Alignment padding                                        |
+ *  +--------------------------------------------------------------+ 8
+ *  | extent_ids[IAM_MAX_EXTENTS]                                  |
+ *  |   - Array of extent IDs owned by this table                  |
+ *  |   - Each entry is 4 bytes, max 1022 entries per page         |
+ *  +--------------------------------------------------------------+ 4096
+ *
+ * Benefits:
+ * - O(1) space per extent (4 bytes) vs O(32KB) for sparse bitmap ranges
+ * - Supports up to 1022 extents per page (~32 MB of data)
+ * - Simple iteration for table scans
+ */
+struct IAMPage {
+  page_id_t next_page_id = INVALID_PAGE_ID;  // 4 bytes
+  uint16_t extent_count = 0;                  // 2 bytes
+  uint16_t reserved = 0;                      // 2 bytes (alignment)
+  uint32_t extent_ids[IAM_MAX_EXTENTS];       // 4088 bytes = 1022 extent IDs
+  
+  /**
+   * @brief Add an extent to the list.
+   * @return true if added, false if list is full.
+   */
+  bool add_extent(uint32_t extent_id) {
+    if (extent_count >= IAM_MAX_EXTENTS) {
+      return false;
+    }
+    extent_ids[extent_count++] = extent_id;
+    return true;
+  }
+  
+  /**
+   * @brief Check if this page has room for another extent.
+   */
+  bool has_space() const {
+    return extent_count < IAM_MAX_EXTENTS;
+  }
+  
+  /**
+   * @brief Check if an extent is in this page's list.
+   */
+  bool contains_extent(uint32_t extent_id) const {
+    for (uint16_t i = 0; i < extent_count; ++i) {
+      if (extent_ids[i] == extent_id) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+#pragma pack(pop)
 
 /**
  * @class Bitmap

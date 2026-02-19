@@ -1,222 +1,347 @@
 #include "iam_manager.h"
+#include "slotted_page.h"
 #include "common/logger.h"
 #include <cstring>
 #include <new>
-#include <algorithm>
 
 namespace letty {
 
-IamManager::IamManager(DiskManager &disk_manager, ExtentManager &extent_manager)
-    : disk_manager_(disk_manager), extent_manager_(extent_manager) {}
+IamManager::IamManager(BufferPoolManager &buffer_pool, ExtentManager &extent_manager)
+    : buffer_pool_(buffer_pool), extent_manager_(extent_manager) {}
+
+page_id_t IamManager::get_metadata_pool_page_id() {
+  if (metadata_pool_page_id_ != INVALID_PAGE_ID) {
+    return metadata_pool_page_id_;
+  }
+
+  // Load from header page 0
+  Page* page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
+  if (!page) {
+    LOG_STORAGE_ERROR("Failed to fetch header page for metadata pool lookup");
+    return INVALID_PAGE_ID;
+  }
+
+  metadata_pool_page_id_ = reinterpret_cast<const DatabaseHeader*>(page->get_data())->metadata_pool_page_id;
+  buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
+  LOG_STORAGE_DEBUG("Cached metadata_pool_page_id = {}", metadata_pool_page_id_);
+  return metadata_pool_page_id_;
+}
+
+void IamManager::init_metadata_pool(page_id_t pool_page_id) {
+  LOG_STORAGE_DEBUG("Initializing metadata pool at page {}", pool_page_id);
+
+  Page* page = buffer_pool_.fetch_page(pool_page_id);
+  if (page == nullptr) {
+    LOG_STORAGE_ERROR("Failed to fetch metadata pool page {}", pool_page_id);
+    return;
+  }
+
+  auto* header = new(page->get_data()) MetadataPoolDirectoryPage();
+  header->next_pool_page = INVALID_PAGE_ID;
+  header->slots_bitmap = 0;
+
+  buffer_pool_.unpin_page(pool_page_id, true);
+
+  // Cache it immediately since we know the value
+  metadata_pool_page_id_ = pool_page_id;
+}
+
+page_id_t IamManager::allocate_metadata_page() {
+  LOG_STORAGE_DEBUG("Allocating metadata page from pool");
+
+  page_id_t pool_page_id = get_metadata_pool_page_id();
+  if (pool_page_id == INVALID_PAGE_ID) {
+    LOG_STORAGE_ERROR("No metadata pool available");
+    return INVALID_PAGE_ID;
+  }
+
+  page_id_t current_pool_page = pool_page_id;
+
+  // Traverse metadata pool chain looking for a free slot
+  while (current_pool_page != INVALID_PAGE_ID) {
+    Page* pool_page_obj = buffer_pool_.fetch_page(current_pool_page);
+    if (!pool_page_obj) {
+      LOG_STORAGE_ERROR("Failed to fetch metadata pool page {}", current_pool_page);
+      return INVALID_PAGE_ID;
+    }
+
+    auto* pool_header = reinterpret_cast<MetadataPoolDirectoryPage*>(pool_page_obj->get_data());
+    uint8_t free_slot = pool_header->find_free_slot();
+
+    if (free_slot != MetadataPoolDirectoryPage::NO_FREE_SLOT) {
+      pool_header->mark_slot_used(free_slot);
+      buffer_pool_.unpin_page(current_pool_page, true);
+
+      page_id_t allocated_page = current_pool_page + free_slot;
+      LOG_STORAGE_INFO("Allocated metadata page {} from pool (slot {})", allocated_page, free_slot);
+      return allocated_page;
+    }
+
+    // No free slot — advance or extend
+    page_id_t next_pool = pool_header->next_pool_page;
+    if (next_pool == INVALID_PAGE_ID) {
+      next_pool = extend_metadata_pool(pool_header, current_pool_page);
+      if (next_pool == INVALID_PAGE_ID) {
+        buffer_pool_.unpin_page(current_pool_page, false);
+        return INVALID_PAGE_ID;
+      }
+      buffer_pool_.unpin_page(current_pool_page, true);
+    } else {
+      buffer_pool_.unpin_page(current_pool_page, false);
+    }
+    current_pool_page = next_pool;
+  }
+
+  LOG_STORAGE_ERROR("Failed to allocate metadata page - no pool available");
+  return INVALID_PAGE_ID;
+}
+
+page_id_t IamManager::extend_metadata_pool(MetadataPoolDirectoryPage* current_header,
+										   page_id_t current_pool_page) {
+  page_id_t new_pool_extent = extent_manager_.allocate_extent();
+  if (new_pool_extent == INVALID_PAGE_ID) {
+    LOG_STORAGE_ERROR("Failed to allocate new metadata pool extent");
+    return INVALID_PAGE_ID;
+  }
+
+  // Initialize the new pool header page (placement-new requires raw API)
+  Page* new_page = buffer_pool_.fetch_page(new_pool_extent);
+  if (new_page == nullptr) {
+    LOG_STORAGE_ERROR("Failed to fetch new metadata pool page {}", new_pool_extent);
+    return INVALID_PAGE_ID;
+  }
+  auto* new_pool_header = new(new_page->get_data()) MetadataPoolDirectoryPage();
+  new_pool_header->next_pool_page = INVALID_PAGE_ID;
+  new_pool_header->slots_bitmap = 0;
+  buffer_pool_.unpin_page(new_pool_extent, true);
+
+  // Link current pool to the new one
+  current_header->next_pool_page = new_pool_extent;
+  LOG_STORAGE_INFO("Created new metadata pool extent at page {}", new_pool_extent);
+  return new_pool_extent;
+}
 
 page_id_t IamManager::create_iam_chain() {
-  // 1. Allocate a raw extent to hold the IAM page (and 7 wasted pages)
-  page_id_t new_extent_page = extent_manager_.allocate_extent();
-  if (new_extent_page == INVALID_PAGE_ID) {
+  LOG_STORAGE_DEBUG("Creating new IAM chain");
+
+  // Allocate a page from the metadata pool
+  page_id_t iam_page_id = allocate_metadata_page();
+  if (iam_page_id == INVALID_PAGE_ID) {
+    LOG_STORAGE_ERROR("Failed to allocate IAM page from metadata pool");
     return INVALID_PAGE_ID;
   }
 
-  // 2. Initialize the first page as a SparseIamPage covering range 0
-  char buffer[PAGE_SIZE] = {0};
-  auto iam_page = new(buffer) SparseIamPage();
-  iam_page->next_bitmap_page_id = INVALID_PAGE_ID;
-  iam_page->extent_range_start = 0; // First IAM page always covers range 0
-
-  // 3. Write to disk
-  if (disk_manager_.write_page(new_extent_page, buffer) != IOResult::SUCCESS) {
+  // Initialize as empty IAMPage — page already exists in the file,
+  // so use fetch_page (not new_page)
+  Page* page = buffer_pool_.fetch_page(iam_page_id);
+  if (page == nullptr) {
+    LOG_STORAGE_ERROR("Failed to fetch newly allocated IAM page {}", iam_page_id);
     return INVALID_PAGE_ID;
   }
 
-  return new_extent_page;
+  auto* iam_page = new(page->get_data()) IAMPage();
+  iam_page->next_page_id = INVALID_PAGE_ID;
+  iam_page->extent_count = 0;
+
+  buffer_pool_.unpin_page(iam_page_id, true);
+
+  LOG_STORAGE_INFO("Created new IAM chain at page {}", iam_page_id);
+  return iam_page_id;
 }
 
-page_id_t IamManager::allocate_extent(page_id_t iam_head_page_id) {
-  // All IAM operations now use the unified sparse implementation
-  return allocate_extent_sparse(iam_head_page_id);
-}
+page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
+  LOG_STORAGE_DEBUG("Allocating extent for IAM chain {}", iam_head_page_id);
 
-page_id_t IamManager::allocate_extent_sparse(page_id_t iam_head_page_id) {
-  LOG_STORAGE_DEBUG("Starting sparse extent allocation for IAM chain {}", iam_head_page_id);
-  
-  // 0. Validate input parameters
   if (iam_head_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Invalid IAM head page ID provided");
+    LOG_STORAGE_ERROR("Invalid IAM head page ID");
     return INVALID_PAGE_ID;
   }
-  
-  // 1. Allocate a physical extent from the global pool
+
+  // 1. Allocate a physical extent from ExtentManager
   page_id_t extent_start_page = extent_manager_.allocate_extent();
   if (extent_start_page == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate physical extent from ExtentManager");
+    LOG_STORAGE_ERROR("Failed to allocate physical extent");
     return INVALID_PAGE_ID;
   }
-  
-  // 2. Calculate the global extent index for this extent
-  uint64_t global_extent_index = static_cast<uint64_t>(extent_start_page) / EXTENT_SIZE;
-  LOG_STORAGE_DEBUG("Allocated physical extent starting at page {}, global index {}", 
-                   extent_start_page, global_extent_index);
-  
-  // 3. Find or create the appropriate IAM page for this extent
-  auto [iam_page_id, bit_offset] = find_or_create_iam_page_for_extent(
-      iam_head_page_id, global_extent_index);
-  
-  if (iam_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to find or create IAM page for extent {}", global_extent_index);
-    // TODO: Should ideally deallocate the extent from ExtentManager here
+
+  uint32_t extent_id = extent_id_from_page(extent_start_page);
+  LOG_STORAGE_DEBUG("Got extent {} (page {})", extent_id, extent_start_page);
+
+  // 2. Find the IAM page with space for this extent ID
+  page_id_t current_iam_page = iam_head_page_id;
+  page_id_t prev_iam_page = INVALID_PAGE_ID;
+
+  while (current_iam_page != INVALID_PAGE_ID) {
+    Page* iam_page_obj = buffer_pool_.fetch_page(current_iam_page);
+    if (!iam_page_obj) {
+      LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
+      return INVALID_PAGE_ID;
+    }
+
+    auto* iam_page = reinterpret_cast<IAMPage*>(iam_page_obj->get_data());
+
+    if (iam_page->has_space()) {
+      // Add the extent to this page in-place
+      iam_page->add_extent(extent_id);
+      buffer_pool_.unpin_page(current_iam_page, true);
+
+      LOG_STORAGE_INFO("Added extent {} to IAM page {} (now has {} extents)",
+                      extent_id, current_iam_page, iam_page->extent_count);
+
+      // Update hint: the new extent's first page is guaranteed to have space
+      last_page_hint_[iam_head_page_id] = extent_start_page;
+      return extent_start_page;
+    }
+
+    prev_iam_page = current_iam_page;
+    page_id_t next_iam = iam_page->next_page_id;
+    buffer_pool_.unpin_page(current_iam_page, false);
+    current_iam_page = next_iam;
+  }
+
+  // 3. No IAM page has space — allocate a new one
+  page_id_t new_iam_page_id = allocate_metadata_page();
+  if (new_iam_page_id == INVALID_PAGE_ID) {
+    LOG_STORAGE_ERROR("Failed to allocate new IAM page");
     return INVALID_PAGE_ID;
   }
-  
-  // 4. Mark the extent as allocated in the IAM page
-  char buffer[PAGE_SIZE];
-  if (disk_manager_.read_page(iam_page_id, buffer) != IOResult::SUCCESS) {
-    LOG_STORAGE_ERROR("Failed to read IAM page {} from disk", iam_page_id);
+
+  // Initialize new IAM page (placement-new requires raw API)
+  Page* new_page = buffer_pool_.fetch_page(new_iam_page_id);
+  if (new_page == nullptr) {
+    LOG_STORAGE_ERROR("Failed to fetch new IAM page {}", new_iam_page_id);
     return INVALID_PAGE_ID;
   }
-  
-  auto sparse_iam_page = reinterpret_cast<SparseIamPage*>(buffer);
-  Bitmap bitmap(sparse_iam_page->bitmap, SPARSE_MAX_BITS);
-  
-  // Verify the bit isn't already set (should never happen with correct ExtentManager)
-  if (bitmap.is_set(bit_offset)) {
-    LOG_STORAGE_ERROR("Extent {} already marked as allocated in IAM - data corruption?", 
-                     global_extent_index);
-    return INVALID_PAGE_ID;
+  auto* new_iam = new(new_page->get_data()) IAMPage();
+  new_iam->next_page_id = INVALID_PAGE_ID;
+  new_iam->add_extent(extent_id);
+  buffer_pool_.unpin_page(new_iam_page_id, true);
+
+  // Link it to the chain
+  if (prev_iam_page != INVALID_PAGE_ID) {
+    Page* prev_page_obj = buffer_pool_.fetch_page(prev_iam_page);
+    if (!prev_page_obj) {
+      LOG_STORAGE_ERROR("Failed to fetch previous IAM page {} for linking", prev_iam_page);
+      return extent_start_page;  // Extent allocated but IAM chain broken — log and return
+    }
+    reinterpret_cast<IAMPage*>(prev_page_obj->get_data())->next_page_id = new_iam_page_id;
+    buffer_pool_.unpin_page(prev_iam_page, true);
   }
-  
-  // Set the bit and write back to disk
-  bitmap.set(bit_offset);
-  if (disk_manager_.write_page(iam_page_id, buffer) != IOResult::SUCCESS) {
-    LOG_STORAGE_ERROR("Failed to write updated IAM page {} to disk", iam_page_id);
-    return INVALID_PAGE_ID;
-  }
-  
-  LOG_STORAGE_INFO("Successfully allocated extent {} (page {}) for table", 
-                  global_extent_index, extent_start_page);
+
+  LOG_STORAGE_INFO("Created new IAM page {} and added extent {}", new_iam_page_id, extent_id);
+
+  // Update hint: the new extent's first page is guaranteed to have space
+  last_page_hint_[iam_head_page_id] = extent_start_page;
   return extent_start_page;
 }
 
-page_id_t IamManager::create_sparse_iam_page(uint64_t extent_range_start) {
-  LOG_STORAGE_DEBUG("Creating sparse IAM page for extent range starting at {}", extent_range_start);
-  
-  // 1. Allocate a physical extent to hold the new IAM page
-  page_id_t new_extent_page = extent_manager_.allocate_extent();
-  if (new_extent_page == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate extent for new sparse IAM page");
+page_id_t IamManager::find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space) {
+  LOG_STORAGE_DEBUG("Finding page with {} bytes of space in IAM chain {}",
+                   required_space, iam_head_page_id);
+
+  if (iam_head_page_id == INVALID_PAGE_ID) {
+    LOG_STORAGE_ERROR("Invalid IAM head page ID");
     return INVALID_PAGE_ID;
   }
-  
-  // 2. Initialize the page as a SparseIamPage
-  char buffer[PAGE_SIZE] = {0};
-  auto sparse_iam_page = new(buffer) SparseIamPage();
-  sparse_iam_page->next_bitmap_page_id = INVALID_PAGE_ID;
-  sparse_iam_page->extent_range_start = extent_range_start;
-  
-  // 3. Write the initialized page to disk
-  if (disk_manager_.write_page(new_extent_page, buffer) != IOResult::SUCCESS) {
-    LOG_STORAGE_ERROR("Failed to write new sparse IAM page {} to disk", new_extent_page);
+
+  uint32_t total_needed = required_space + sizeof(Slot);
+
+  // Fast path: check cached hint page, then scan forward within its extent
+  auto hint_it = last_page_hint_.find(iam_head_page_id);
+  if (hint_it != last_page_hint_.end()) {
+    page_id_t result = find_hint_page(iam_head_page_id, total_needed);
+    if (result != INVALID_PAGE_ID) return result;
+
+    // Hint page full — scan forward in same extent
+    result = scan_extent_forward(iam_head_page_id, hint_it->second, total_needed);
+    if (result != INVALID_PAGE_ID) return result;
+
+    // No space in hint extent — signal caller to allocate a new extent
+    LOG_STORAGE_DEBUG("No space in hint extent, signaling new extent needed");
     return INVALID_PAGE_ID;
   }
-  
-  LOG_STORAGE_INFO("Created sparse IAM page {} covering extent range {}-{}", 
-                  new_extent_page, extent_range_start, 
-                  extent_range_start + SPARSE_MAX_BITS - 1);
-  return new_extent_page;
+
+  // No hint available (first insert) — full IAM chain scan
+  return scan_iam_chain(iam_head_page_id, total_needed);
 }
 
-std::tuple<page_id_t, size_t> IamManager::find_or_create_iam_page_for_extent(
-    page_id_t iam_head_page_id, uint64_t target_extent_index) {
-  
-  LOG_STORAGE_DEBUG("Finding IAM page for extent index {}", target_extent_index);
-  
-  // Calculate which range this extent should be in
-  uint64_t target_range_start = calculate_sparse_range_start(target_extent_index);
-  
-  page_id_t current_page_id = iam_head_page_id;
-  page_id_t prev_page_id = INVALID_PAGE_ID;
-  
-  while (current_page_id != INVALID_PAGE_ID) {
-    char buffer[PAGE_SIZE];
-    if (disk_manager_.read_page(current_page_id, buffer) != IOResult::SUCCESS) {
-      LOG_STORAGE_ERROR("Failed to read IAM page {} during traversal", current_page_id);
-      return {INVALID_PAGE_ID, 0};
-    }
-    
-    // All IAM pages are now SparseIamPage
-    auto sparse_page = reinterpret_cast<SparseIamPage*>(buffer);
-    uint64_t current_range_start = sparse_page->extent_range_start;
-    
-    LOG_STORAGE_DEBUG("Checking IAM page {} with range start {}", 
-                     current_page_id, current_range_start);
-    
-    // Case 1: Found the exact range we need
-    if (current_range_start == target_range_start) {
-      size_t bit_offset = target_extent_index - target_range_start;
-      LOG_STORAGE_DEBUG("Found existing IAM page {} for extent {}, bit offset {}", 
-                       current_page_id, target_extent_index, bit_offset);
-      return {current_page_id, bit_offset};
-    }
-    
-    // Case 2: Current range is beyond our target - need to insert before this page
-    if (current_range_start > target_range_start) {
-      LOG_STORAGE_DEBUG("Need to insert new IAM page before page {} (range {})", 
-                       current_page_id, current_range_start);
-      page_id_t new_page_id = create_sparse_iam_page(target_range_start);
-      if (new_page_id == INVALID_PAGE_ID) {
-        return {INVALID_PAGE_ID, 0};
-      }
-      
-      // Link the new page into the chain
-      char new_buffer[PAGE_SIZE];
-      if (disk_manager_.read_page(new_page_id, new_buffer) != IOResult::SUCCESS) {
-        LOG_STORAGE_ERROR("Failed to read newly created IAM page {}", new_page_id);
-        return {INVALID_PAGE_ID, 0};
-      }
-      
-      auto new_sparse_page = reinterpret_cast<SparseIamPage*>(new_buffer);
-      new_sparse_page->next_bitmap_page_id = current_page_id;
-      disk_manager_.write_page(new_page_id, new_buffer);
-      
-      // Update the previous page to point to the new page
-      if (prev_page_id != INVALID_PAGE_ID) {
-        char prev_buffer[PAGE_SIZE];
-        disk_manager_.read_page(prev_page_id, prev_buffer);
-        auto prev_page = reinterpret_cast<SparseIamPage*>(prev_buffer);
-        prev_page->next_bitmap_page_id = new_page_id;
-        disk_manager_.write_page(prev_page_id, prev_buffer);
-      }
-      
-      size_t bit_offset = target_extent_index - target_range_start;
-      LOG_STORAGE_INFO("Inserted new sparse IAM page {} for extent range {}", 
-                      new_page_id, target_range_start);
-      return {new_page_id, bit_offset};
-    }
-    
-    // Case 3: Continue to next page
-    prev_page_id = current_page_id;
-    current_page_id = sparse_page->next_bitmap_page_id;
+page_id_t IamManager::find_hint_page(page_id_t iam_head_page_id, uint32_t total_needed) {
+  page_id_t hint_page_id = last_page_hint_[iam_head_page_id];
+  Page* page = buffer_pool_.fetch_page(hint_page_id);
+  if (!page) return INVALID_PAGE_ID;
+
+  SlottedPage sp(page->get_data());
+  page_id_t result = INVALID_PAGE_ID;
+  if (sp.get_free_space() >= total_needed) {
+    LOG_STORAGE_DEBUG("Hint hit: page {} has {} bytes free", hint_page_id, sp.get_free_space());
+    result = hint_page_id;
   }
-  
-  // Case 4: Reached end of chain - append new page
-  LOG_STORAGE_DEBUG("Reached end of IAM chain, appending new page for range {}", target_range_start);
-  page_id_t new_page_id = create_sparse_iam_page(target_range_start);
-  if (new_page_id == INVALID_PAGE_ID) {
-    return {INVALID_PAGE_ID, 0};
-  }
-  
-  // Link the new page to the end of the chain
-  if (prev_page_id != INVALID_PAGE_ID) {
-    char prev_buffer[PAGE_SIZE];
-    if (disk_manager_.read_page(prev_page_id, prev_buffer) == IOResult::SUCCESS) {
-      auto prev_page = reinterpret_cast<SparseIamPage*>(prev_buffer);
-      prev_page->next_bitmap_page_id = new_page_id;
-      disk_manager_.write_page(prev_page_id, prev_buffer);
-    }
-  }
-  
-  size_t bit_offset = target_extent_index - target_range_start;
-  LOG_STORAGE_INFO("Appended new sparse IAM page {} for extent range {}", 
-                  new_page_id, target_range_start);
-  return {new_page_id, bit_offset};
+  buffer_pool_.unpin_page(hint_page_id, false);
+  return result;
 }
 
-} // namespace letty
+page_id_t IamManager::scan_extent_forward(page_id_t iam_head_page_id,
+                                          page_id_t hint_page_id,
+                                          uint32_t total_needed) {
+  page_id_t extent_start = (hint_page_id / EXTENT_SIZE) * EXTENT_SIZE;
+  for (int offset = static_cast<int>(hint_page_id - extent_start) + 1;
+       offset < EXTENT_SIZE; ++offset) {
+    page_id_t next_page_id = extent_start + offset;
+    Page* page = buffer_pool_.fetch_page(next_page_id);
+    if (!page) continue;
+
+    SlottedPage sp(page->get_data());
+    if (sp.get_free_space() >= total_needed) {
+      LOG_STORAGE_DEBUG("Forward scan hit: page {} has {} bytes free", next_page_id, sp.get_free_space());
+      last_page_hint_[iam_head_page_id] = next_page_id;
+      buffer_pool_.unpin_page(next_page_id, false);
+      return next_page_id;
+    }
+    buffer_pool_.unpin_page(next_page_id, false);
+  }
+  return INVALID_PAGE_ID;
+}
+
+page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_needed) {
+  page_id_t current_iam_page = iam_head_page_id;
+
+  while (current_iam_page != INVALID_PAGE_ID) {
+    Page* iam_page_obj = buffer_pool_.fetch_page(current_iam_page);
+    if (!iam_page_obj) {
+      LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
+      return INVALID_PAGE_ID;
+    }
+
+    auto* iam_page = reinterpret_cast<const IAMPage*>(iam_page_obj->get_data());
+
+    for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
+      page_id_t extent_start = first_page_of_extent(iam_page->extent_ids[i]);
+
+      for (int page_offset = 0; page_offset < EXTENT_SIZE; ++page_offset) {
+        page_id_t data_page_id = extent_start + page_offset;
+        Page* data_page = buffer_pool_.fetch_page(data_page_id);
+        if (!data_page) continue;
+
+        SlottedPage sp(data_page->get_data());
+        if (sp.get_free_space() >= total_needed) {
+          LOG_STORAGE_DEBUG("Found page {} with {} bytes free", data_page_id, sp.get_free_space());
+          last_page_hint_[iam_head_page_id] = data_page_id;
+          buffer_pool_.unpin_page(data_page_id, false);
+          buffer_pool_.unpin_page(current_iam_page, false);
+          return data_page_id;
+        }
+        buffer_pool_.unpin_page(data_page_id, false);
+      }
+    }
+
+    page_id_t next_iam = iam_page->next_page_id;
+    buffer_pool_.unpin_page(current_iam_page, false);
+    current_iam_page = next_iam;
+  }
+
+  LOG_STORAGE_DEBUG("No page found with sufficient space");
+  return INVALID_PAGE_ID;
+}
+
+}
+

@@ -12,6 +12,5 @@ enum class IOResult {
   IO_ERROR,
   WRITE_ERROR,
   READ_ERROR,
-  INVALID_PAGE
 };
 }
