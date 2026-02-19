@@ -74,7 +74,7 @@ void CatalogManager::bootstrap() {
                     std::string("sys_tables"),
                     static_cast<int32_t>(sys_tables_iam),
                     static_cast<int32_t>(4)});
-    st_tuple.serialize_into(st_schema, buf, PAGE_SIZE, &data_size);
+  st_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
     insert_into_table(sys_tables_iam, buf, data_size);
 
     // sys_tables entry for sys_columns
@@ -82,7 +82,7 @@ void CatalogManager::bootstrap() {
                     std::string("sys_columns"),
                     static_cast<int32_t>(sys_columns_iam),
                     static_cast<int32_t>(5)});
-    sc_tuple.serialize_into(st_schema, buf, PAGE_SIZE, &data_size);
+  sc_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
     insert_into_table(sys_tables_iam, buf, data_size);
 
     // 5. Insert column definitions into sys_columns table
@@ -92,7 +92,7 @@ void CatalogManager::bootstrap() {
     auto insert_col = [&](int32_t table_oid, const std::string& col_name,
                           int32_t type, int32_t length, int32_t offset) {
         Tuple col_tuple({table_oid, col_name, type, length, offset});
-        col_tuple.serialize_into(sc_schema, buf, PAGE_SIZE, &data_size);
+	  col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size);
         insert_into_table(sys_columns_iam, buf, data_size);
     };
 
@@ -321,7 +321,7 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
                        name,
                        static_cast<int32_t>(new_iam),
                        static_cast<int32_t>(schema.get_columns().size())});
-    table_tuple.serialize_into(st_schema, buf, PAGE_SIZE, &data_size);
+  table_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
 
     if (!insert_into_table(sys_tables_iam, buf, data_size)) {
         std::cerr << "Failed to insert table record into sys_tables" << std::endl;
@@ -337,7 +337,7 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
                          static_cast<int32_t>(col.get_type()),
                          static_cast<int32_t>(col.get_length()),
                          static_cast<int32_t>(col.get_offset())});
-        col_tuple.serialize_into(sc_schema, buf, PAGE_SIZE, &data_size);
+	  col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size);
 
         if (!insert_into_table(sys_columns_iam, buf, data_size)) {
             std::cerr << "Failed to insert column record into sys_columns" << std::endl;

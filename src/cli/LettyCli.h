@@ -22,7 +22,8 @@ class Executor;
 
 /**
  * @class LettyCli
- * @brief Interactive command-line interface for the Letty database
+ * @brief Interactive command-line interface for the Letty database. This is temporary CLI we are using until the project
+ * is complete.
  * 
  * The LettyCli class provides a command-line interface that allows
  * users to interact with the Letty database. It handles user input,
@@ -31,55 +32,31 @@ class Executor;
  * @par Usage Example:
  * @code
  * LettyCli cli;
- * cli.Run();  // Starts the interactive session
+ * cli.Run();
  * @endcode
  */
 class LettyCli {
 public:
-    /**
-     * @brief Constructs the CLI and initializes the database.
-     * @param db_path Path to the database file (default: "letty.db")
-     */
+
     explicit LettyCli(const std::string& db_path = "letty.db");
     
-    /**
-     * @brief Destructor - cleans up database resources
-     */
+
     ~LettyCli();
 
-    /**
-     * @brief Starts the interactive CLI session
-     */
-    /**
-     * @brief Starts the interactive CLI session
-     */
     void Run();
 
 private:
-    /**
-     * @brief Processes a single SQL command from user input
-     * @param input The raw SQL command string entered by the user
-     */
+
     void ProcessCommand(const std::string& input, bool quiet = false);
 
-    /**
-     * @brief Fallback interactive mode using std::getline for non-TTY (IDE) environments.
-     */
+
     void RunSimpleInteractive();
 
-    /**
-     * @brief Generates and returns the command prompt string
-     */
+
     std::string Prompt();
 
-    /**
-     * @brief Prints the help text listing available commands
-     */
     void PrintHelp();
     
-    /**
-     * @brief Formats SELECT results as a table
-     */
     void PrintResultTable(const std::vector<std::string>& column_names,
                           const std::vector<class Tuple>& rows,
                           const class Schema* schema);
@@ -101,4 +78,4 @@ private:
     replxx::Replxx rx_;
 };
 
-} // namespace letty
+}

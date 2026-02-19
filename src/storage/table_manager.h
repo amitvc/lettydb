@@ -68,16 +68,6 @@ class TableManager {
   uint32_t insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples);
 
   /**
-   * @brief Inserts raw data into a table (low-level).
-   *
-   * @param table_name The name of the table.
-   * @param data Raw tuple data.
-   * @param size Size of the data.
-   * @return true if successful, false otherwise.
-   */
-  bool insert_row_raw(const std::string& table_name, const char* data, uint32_t size);
-
-  /**
    * @brief Scans all rows in a table.
    *
    * Traverses the table's IAM chain, reads each SlottedPage, and
@@ -104,6 +94,16 @@ class TableManager {
   BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
   CatalogManager& catalog_manager_;
+
+  /**
+   * @brief Returns a page that can accept `needed_space` bytes, allocating a
+   *        new extent (and initializing it as a SlottedPage) if none exists.
+   *
+   * @param iam_head     The IAM chain head for the table.
+   * @param needed_space Minimum free bytes required (tuple size + slot overhead).
+   * @return Page ID of a writable page, or INVALID_PAGE_ID on failure.
+   */
+  page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space);
 };
 
 } // namespace letty

@@ -1,4 +1,4 @@
-PROJECT_NAME           = "MiniDB"
+PROJECT_NAME           = "LettyDB"
 PROJECT_BRIEF          = "A SQL-compliant database written in C++"
 OUTPUT_DIRECTORY       = @CMAKE_CURRENT_BINARY_DIR@/docs
 INPUT                  = @CMAKE_CURRENT_SOURCE_DIR@/src

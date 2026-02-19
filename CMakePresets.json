@@ -52,6 +52,12 @@
     {
       "name": "offline",
       "configurePreset": "offline"
+    },
+    {
+      "name": "docs",
+      "displayName": "Documentation",
+      "configurePreset": "debug",
+      "targets": ["docs"]
     }
   ],
   "testPresets": [

@@ -12,6 +12,23 @@ namespace letty {
 TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager)
     : buffer_pool_(buffer_pool), iam_manager_(iam_manager), catalog_manager_(catalog_manager) {}
 
+page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space) {
+  page_id_t pid = iam_manager_.find_page_with_space(iam_head, needed_space);
+  if (pid != INVALID_PAGE_ID) return pid;
+
+  // No existing page has room — grow the table by one extent
+  pid = iam_manager_.allocate_extent_for_table(iam_head);
+  if (pid == INVALID_PAGE_ID) return INVALID_PAGE_ID;
+
+  // Format the first page of the new extent as an empty SlottedPage
+  Page* pg = buffer_pool_.fetch_page(pid);
+  if (!pg) return INVALID_PAGE_ID;
+  SlottedPage(pg->get_data(), true);
+  buffer_pool_.unpin_page(pid, true);
+
+  return pid;
+}
+
 bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
   auto* table_meta = catalog_manager_.get_table(table_name);
   if (!table_meta) {
@@ -25,32 +42,21 @@ bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   // 1. Serialize the tuple into a stack buffer (no heap allocation)
   char buf[PAGE_SIZE];
   uint32_t data_size;
-  if (!tuple.serialize_into(meta.schema, buf, PAGE_SIZE, &data_size)) {
+  if (!tuple.serialize(meta.schema, buf, PAGE_SIZE, &data_size)) {
     std::cerr << "Tuple too large for page" << std::endl;
     return false;
   }
 
   page_id_t iam_page_id = meta.first_page_id;
 
-  // 2. Find a page with space
-  page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, data_size);
-
-  // 3. If no page has space, allocate a new extent
+  // 2. Get a page with room, allocating a new extent if needed
+  page_id_t target_page_id = acquire_page_for_insert(iam_page_id, data_size);
   if (target_page_id == INVALID_PAGE_ID) {
-    target_page_id = iam_manager_.allocate_extent_for_table(iam_page_id);
-    if (target_page_id == INVALID_PAGE_ID) {
-      std::cerr << "Failed to allocate new extent for table" << std::endl;
-      return false;
-    }
-
-    // Initialize the new page as a SlottedPage
-    Page* new_pg = buffer_pool_.fetch_page(target_page_id);
-    if (!new_pg) return false;
-    SlottedPage new_sp(new_pg->get_data(), true);
-    buffer_pool_.unpin_page(target_page_id, true);
+    std::cerr << "Failed to find or allocate a page for table" << std::endl;
+    return false;
   }
 
-  // 4. Fetch the target page, insert the tuple, unpin dirty
+  // 3. Fetch the target page, insert the tuple, unpin dirty
   Page* page = buffer_pool_.fetch_page(target_page_id);
   if (!page) return false;
 
@@ -85,7 +91,7 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
     // Serialize tuple
     char buf[PAGE_SIZE];
     uint32_t data_size;
-    if (!tuple.serialize_into(schema, buf, PAGE_SIZE, &data_size)) {
+    if (!tuple.serialize(schema, buf, PAGE_SIZE, &data_size)) {
       std::cerr << "Tuple too large for page" << std::endl;
       break;
     }
@@ -106,20 +112,11 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
       current_page_id = INVALID_PAGE_ID;
     }
 
-    // Find a page with space
-    page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, data_size);
-
+    // Get a page with room, allocating a new extent if needed
+    page_id_t target_page_id = acquire_page_for_insert(iam_page_id, data_size);
     if (target_page_id == INVALID_PAGE_ID) {
-      target_page_id = iam_manager_.allocate_extent_for_table(iam_page_id);
-      if (target_page_id == INVALID_PAGE_ID) {
-        std::cerr << "Failed to allocate new extent for table" << std::endl;
-        break;
-      }
-      // Initialize the new page as a SlottedPage
-      Page* new_pg = buffer_pool_.fetch_page(target_page_id);
-      if (!new_pg) break;
-      SlottedPage new_sp(new_pg->get_data(), true);
-      buffer_pool_.unpin_page(target_page_id, true);
+      std::cerr << "Failed to find or allocate a page for table" << std::endl;
+      break;
     }
 
     // Fetch and pin the target page — keep it pinned for subsequent tuples
@@ -145,45 +142,6 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
   }
 
   return inserted;
-}
-
-bool TableManager::insert_row_raw(const std::string& table_name, const char* data, uint32_t size) {
-  auto* table_meta = catalog_manager_.get_table(table_name);
-  if (!table_meta) {
-    std::cerr << "Table not found: " << table_name << std::endl;
-    return false;
-  }
-
-  page_id_t iam_page_id = table_meta->first_page_id;
-
-  page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, size);
-
-  if (target_page_id == INVALID_PAGE_ID) {
-    target_page_id = iam_manager_.allocate_extent_for_table(iam_page_id);
-    if (target_page_id == INVALID_PAGE_ID) {
-      std::cerr << "Failed to allocate new extent for table: " << table_name << std::endl;
-      return false;
-    }
-
-    Page* new_pg = buffer_pool_.fetch_page(target_page_id);
-    if (!new_pg) return false;
-    SlottedPage new_sp(new_pg->get_data(), true);
-    buffer_pool_.unpin_page(target_page_id, true);
-  }
-
-  Page* page = buffer_pool_.fetch_page(target_page_id);
-  if (!page) return false;
-
-  SlottedPage sp(page->get_data());
-  int32_t slot_id = sp.insert_tuple(data, size);
-  if (slot_id < 0) {
-    std::cerr << "Failed to insert tuple into page " << target_page_id << std::endl;
-    buffer_pool_.unpin_page(target_page_id, false);
-    return false;
-  }
-
-  buffer_pool_.unpin_page(target_page_id, true);
-  return true;
 }
 
 bool TableManager::scan_table(const std::string& table_name,
@@ -259,4 +217,4 @@ bool TableManager::scan_table_tuples(const std::string& table_name,
   });
 }
 
-} // namespace letty
+}

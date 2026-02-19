@@ -110,16 +110,7 @@ class Tuple {
    * @param[out] out_size The size of the serialized data.
    * @return true if serialization succeeded, false if buffer too small.
    */
-  bool serialize_into(const Schema& schema, char* buf, uint32_t buf_size, uint32_t* out_size) const;
-
-  /**
-   * @brief Serializes the tuple to a heap-allocated byte buffer.
-   *
-   * @param schema The table schema defining column types and offsets.
-   * @param[out] out_size The size of the serialized data.
-   * @return Pointer to the serialized data (caller must delete[]).
-   */
-  char* serialize(const Schema& schema, uint32_t* out_size) const;
+  bool serialize(const Schema& schema, char* buf, uint32_t buf_size, uint32_t* out_size) const;
 
   /**
    * @brief Deserializes a tuple from a raw byte buffer.
