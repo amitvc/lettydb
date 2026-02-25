@@ -2,42 +2,45 @@
 
 #include "storage_def.h"
 #include "config.h"
-#include <vector>
-#include <string_view>
+#include <optional>
+
 
 namespace letty {
 
 /**
  * @struct SlottedPageHeader
- * @brief Header for slotted page.
+ * @brief Fixed-size header at the start of every slotted page.
  */
-#pragma pack(1)
+#pragma pack(push, 1)
 struct SlottedPageHeader {
-  //Log Sequence Number. Needed for crash recovery when we implement WAL
+  /// Log Sequence Number. Reserved for WAL-based crash recovery.
   lsn_t lsn = 0;
   page_id_t next_page_id = INVALID_PAGE_ID;
   page_id_t prev_page_id = INVALID_PAGE_ID;
-  uint16_t num_slots = 0;       // Number of slots currently allocated. Will also include deleted slots.
-  uint16_t free_space_pointer = PAGE_SIZE; // Offset to the start of free space (grows downwards)
-  uint16_t tuple_count = 0; // Only includes active slots.
+  /// Number of slot entries allocated, including deleted (tombstone) slots.
+  uint16_t num_slots = 0;
+  /// Offset to the start of tuple data. Decreases as tuples are appended.
+  uint16_t free_space_pointer = PAGE_SIZE;
 };
 
 /**
  * @struct Slot
- * @brief Represents a slot in the directory for SlottedPage
+ * @brief A slot directory entry. Length of 0 indicates a deleted (reusable) slot.
  */
 struct Slot {
   uint16_t offset;
   uint16_t length;
 };
-#pragma pack()
+#pragma pack(pop)
 
 /**
  * @class SlottedPage
- * @brief Wraps a raw page to provide Slotted Page functionality for variable-length tuple storage.
+ * @brief Wraps a raw page buffer to provide variable-length tuple storage.
  *
- * Layout:
- * Slotted Page Layout (PAGE_SIZE bytes)
+ * SlottedPage is a non-owning view. The caller owns the underlying buffer
+ * (typically via BufferPoolManager) and is responsible for its lifetime.
+ *
+ * Layout (PAGE_SIZE bytes):
  *
  *  Offsets grow downward ↓
  *
@@ -46,80 +49,71 @@ struct Slot {
  *  |  - lsn                                                       |
  *  |  - next_page_id / prev_page_id                               |
  *  |  - num_slots       (# slot entries allocated; includes holes)|
- *  |  - tuple_count     (# active tuples; excludes deleted slots) |
  *  |  - free_space_pointer (offset where free space begins)       |
  *  +--------------------------------------------------------------+  sizeof(Header)
- *  | Slot Directory (grows upward →)                              |
- *  |  slot[0] -> (tuple_offset, tuple_length [, flags])           |
- *  |  slot[1] -> (tuple_offset, tuple_length [, flags])           |
+ *  | Slot Directory (grows ↓ toward higher offsets)               |
+ *  |  slot[0] -> (tuple_offset, tuple_length)                     |
+ *  |  slot[1] -> (tuple_offset, tuple_length)                     |
  *  |  ...                                                        |
  *  |  slot[num_slots-1]                                           |
  *  +------------------------------ free space ---------------------+
- *  | Free Space (shrinks as slots grow up and tuples grow down)   |
+ *  | Free Space (shrinks from both ends)                          |
  *  +--------------------------------------------------------------+  free_space_pointer
- *  | Tuple / Record Data Area (grows downward ← from PAGE_SIZE)   |
+ *  | Tuple / Record Data Area (grows ↑ toward lower offsets)      |
  *  |  tuple bytes ...                                             |
  *  |  tuple bytes ...                                             |
  *  +--------------------------------------------------------------+  PAGE_SIZE
  *
  * Invariants:
- *  - Slot directory grows from the front of the page (upwards).
- *  - Tuple data grows from the end of the page (downwards).
- *  - free_space_pointer always points to the start of tuple data.
+ *  - Slot directory grows toward higher offsets (top down).
+ *  - Tuple data grows toward lower offsets (bottom up).
+ *  - free_space_pointer marks the boundary between free space and tuple data.
  *  - num_slots counts allocated slot entries (including deleted slots).
- *  - tuple_count counts only ACTIVE tuples.
  */
 class SlottedPage {
  public:
   /**
-   * @brief Constructs a SlottedPage view over a raw buffer.
+   * @brief Wraps an existing page buffer without initialization.
    * @param buffer Pointer to the raw 4KB page buffer.
-   * @param init If true, initializes the header (clears page).
    */
-  explicit SlottedPage(char* buffer, bool init = false);
+  explicit SlottedPage(char* buffer);
+
+  /**
+   * @brief Initializes a buffer as an empty slotted page and returns a view over it.
+   * @param buffer Pointer to the raw 4KB page buffer (will be zeroed).
+   */
+  static SlottedPage init(char* buffer);
 
   /**
    * @brief Inserts a tuple into the page.
-   * @param tuple_data Pointer to the data.
-   * @param tuple_size Size of the data.
-   * @return The slot ID where the tuple was inserted, or -1 if no space.
+   * @param tuple_data Pointer to the serialized tuple bytes.
+   * @param tuple_size Size of the tuple in bytes.
+   * @return The slot ID where the tuple was placed, or std::nullopt if no space.
    */
-  int32_t insert_tuple(const char* tuple_data, uint32_t tuple_size);
+  std::optional<uint16_t> insert_tuple(const char* tuple_data, uint32_t tuple_size);
 
   /**
-   * @brief Retrieves a pointer to the tuple data.
-   * @param slot_id The slot ID to retrieve.
-   * @param[out] size Output parameter for the size of the tuple.
-   * @return Pointer to the data, or nullptr if slot is invalid/deleted.
+   * @brief Retrieves a read-only pointer to a tuple's data.
+   * @param slot_id The slot to retrieve.
+   * @param[out] size Set to the tuple's byte length on success.
+   * @return Pointer to the tuple data, or nullptr if slot is invalid/deleted.
    */
-  char* get_tuple(uint16_t slot_id, uint32_t* size);
+  const char* get_tuple(uint16_t slot_id, uint32_t* size) const;
 
   /**
-   * @brief Marks a tuple as deleted.
-   * @param slot_id The slot ID to delete.
-   * @return True if successful, false if slot_id is invalid.
-   */
-  bool delete_tuple(uint16_t slot_id);
-
-  /**
-   * @brief Returns the amount of free space remaining in bytes.
+   * @brief Returns available space in bytes (accounting for a potential new slot entry).
    */
   size_t get_free_space() const;
 
   /**
-   * @brief Returns the number of slots (valid + invalid).
+   * @brief Returns the number of slot entries (active + deleted).
    */
   uint16_t get_num_slots() const;
 
-  /**
-   * @brief Returns the total number of active tuples in the page.
-   */
-  uint16_t get_tuple_count() const;
-
  private:
-  char* data_; // holds the actual bytes
+  char* data_;
   SlottedPageHeader* header_;
-  Slot* slots_; // Pointer to the start of the slot array
+  Slot* slots_;
 };
 
 }

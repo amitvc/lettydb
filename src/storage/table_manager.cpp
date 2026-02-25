@@ -23,7 +23,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
   // Format the first page of the new extent as an empty SlottedPage
   Page* pg = buffer_pool_.fetch_page(pid);
   if (!pg) return INVALID_PAGE_ID;
-  SlottedPage(pg->get_data(), true);
+  SlottedPage::init(pg->get_data());
   buffer_pool_.unpin_page(pid, true);
 
   return pid;
@@ -61,8 +61,8 @@ bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   if (!page) return false;
 
   SlottedPage sp(page->get_data());
-  int32_t slot_id = sp.insert_tuple(buf, data_size);
-  if (slot_id < 0) {
+  auto slot_id = sp.insert_tuple(buf, data_size);
+  if (!slot_id) {
     std::cerr << "Failed to insert tuple into page " << target_page_id << std::endl;
     buffer_pool_.unpin_page(target_page_id, false);
     return false;
@@ -100,8 +100,8 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
     if (current_page) {
       SlottedPage sp(current_page->get_data());
       if (sp.get_free_space() >= data_size + sizeof(Slot)) {
-        int32_t slot_id = sp.insert_tuple(buf, data_size);
-        if (slot_id >= 0) {
+        auto slot_id = sp.insert_tuple(buf, data_size);
+        if (slot_id) {
           ++inserted;
           continue;
         }
@@ -125,8 +125,8 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
     current_page_id = target_page_id;
 
     SlottedPage sp(current_page->get_data());
-    int32_t slot_id = sp.insert_tuple(buf, data_size);
-    if (slot_id < 0) {
+    auto slot_id = sp.insert_tuple(buf, data_size);
+    if (!slot_id) {
       buffer_pool_.unpin_page(current_page_id, false);
       current_page = nullptr;
       current_page_id = INVALID_PAGE_ID;
@@ -180,10 +180,10 @@ bool TableManager::scan_table(const std::string& table_name,
         // 5. Scan tuples in the SlottedPage
         SlottedPage sp(data_pg->get_data());
         for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
-          uint32_t tuple_size;
-          char* tuple_data = sp.get_tuple(slot, &tuple_size);
-          if (tuple_data) {
-            callback(tuple_data, tuple_size);
+          uint32_t size;
+          const char* data = sp.get_tuple(slot, &size);
+          if (data) {
+            callback(data, size);
           }
         }
         buffer_pool_.unpin_page(data_page_id, false);

@@ -106,4 +106,4 @@ class TableManager {
   page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space);
 };
 
-} // namespace letty
+}

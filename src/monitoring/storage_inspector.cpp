@@ -297,27 +297,23 @@ std::string StorageInspector::get_page_map() {
                      Page* p_data = buffer_pool_.fetch_page(pid);
                      if(p_data) {
                          SlottedPage sp(p_data->get_data());
-                         // Iterate slots
-                         for(uint16_t slot_id=0; slot_id<sp.get_num_slots(); ++slot_id) {
-                             uint32_t tuple_size = 0;
-                             char* tuple_ptr = sp.get_tuple(slot_id, &tuple_size);
-                             if(tuple_ptr) {
-                                  try {
-                                      // Robustly deserialize using Tuple class
-                                      Tuple t = Tuple::deserialize(st_schema, tuple_ptr, tuple_size);
-                                      if (t.size() >= 3) {
-                                          std::string tname = std::get<std::string>(t.get_value(1));
-                                          int32_t first_pg_int = std::get<int32_t>(t.get_value(2));
-                                          page_id_t t_iam = static_cast<page_id_t>(first_pg_int);
-                                          
-                                          // Filter out system tables (already handled or don't want to double-color)
-                                          if (tname != "sys_tables" && tname != "sys_columns") {
-                                              mark_table_pages(t_iam, tname);
-                                          }
-                                      }
-                                  } catch(...) {
-                                      // Invalid tuple or schema mismatch, skip
-                                  }
+                         for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
+                             uint32_t tuple_size;
+                             const char* tuple_ptr = sp.get_tuple(slot, &tuple_size);
+                             if (!tuple_ptr) continue;
+                             try {
+                                 Tuple t = Tuple::deserialize(st_schema, tuple_ptr, tuple_size);
+                                 if (t.size() >= 3) {
+                                     std::string tname = std::get<std::string>(t.get_value(1));
+                                     int32_t first_pg_int = std::get<int32_t>(t.get_value(2));
+                                     page_id_t t_iam = static_cast<page_id_t>(first_pg_int);
+
+                                     if (tname != "sys_tables" && tname != "sys_columns") {
+                                         mark_table_pages(t_iam, tname);
+                                     }
+                                 }
+                             } catch(...) {
+                                 // Invalid tuple or schema mismatch, skip
                              }
                          }
                          buffer_pool_.unpin_page(pid, false);
@@ -375,7 +371,6 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
         j["header"] = {
             {"num_slots", header->num_slots},
             {"free_space_ptr", header->free_space_pointer},
-            {"tuple_count", header->tuple_count},
             {"lsn", header->lsn}
         };
         

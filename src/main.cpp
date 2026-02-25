@@ -10,9 +10,15 @@ int main(int argc, char* argv[]) {
     try {
         // Parse arguments
         std::string db_path = "letty.db";
+        bool force_simple = false;
 
         for (int i = 1; i < argc; ++i) {
-            db_path = argv[i];
+            std::string arg = argv[i];
+            if (arg == "--simple") {
+                force_simple = true;
+            } else {
+                db_path = arg;
+            }
         }
 
         // Initialize logging system
@@ -25,7 +31,7 @@ int main(int argc, char* argv[]) {
 
 
         {
-            letty::LettyCli cli(db_path);
+            letty::LettyCli cli(db_path, force_simple);
             cli.Run();
         }
 

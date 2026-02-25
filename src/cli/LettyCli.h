@@ -38,7 +38,7 @@ class Executor;
 class LettyCli {
 public:
 
-    explicit LettyCli(const std::string& db_path = "letty.db");
+    explicit LettyCli(const std::string& db_path = "letty.db", bool force_simple = false);
     
 
     ~LettyCli();
@@ -75,6 +75,7 @@ private:
 
     std::string db_path_;
     std::string history_path_;
+    bool force_simple_ = false;
     replxx::Replxx rx_;
 };
 

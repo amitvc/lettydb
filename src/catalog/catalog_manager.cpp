@@ -53,14 +53,14 @@ void CatalogManager::bootstrap() {
     if (!st_page) {
         throw std::runtime_error("Failed to fetch sys_tables first page during bootstrap");
     }
-    SlottedPage sys_tables_sp(st_page->get_data(), true);
+    SlottedPage::init(st_page->get_data());
     buffer_pool_.unpin_page(sys_tables_first_page, true);
 
     Page* sc_page = buffer_pool_.fetch_page(sys_columns_first_page);
     if (!sc_page) {
         throw std::runtime_error("Failed to fetch sys_columns first page during bootstrap");
     }
-    SlottedPage sys_columns_sp(sc_page->get_data(), true);
+    SlottedPage::init(sc_page->get_data());
     buffer_pool_.unpin_page(sys_columns_first_page, true);
 
     // 4. Insert the metadata for sys_tables AND sys_columns INTO sys_tables
@@ -139,7 +139,7 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
         // Initialize the new page as a SlottedPage
         Page* new_pg = buffer_pool_.fetch_page(target_page_id);
         if (!new_pg) return false;
-        SlottedPage new_sp(new_pg->get_data(), true);
+        SlottedPage::init(new_pg->get_data());
         buffer_pool_.unpin_page(target_page_id, true);
     }
 
@@ -148,8 +148,8 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
     if (!page) return false;
 
     SlottedPage sp(page->get_data());
-    int32_t slot_id = sp.insert_tuple(data, size);
-    if (slot_id < 0) {
+    auto slot_id = sp.insert_tuple(data, size);
+    if (!slot_id) {
         std::cerr << "Failed to insert tuple into page " << target_page_id << std::endl;
         buffer_pool_.unpin_page(target_page_id, false);
         return false;
@@ -204,18 +204,16 @@ const TableMetadata* CatalogManager::get_table(const std::string& name) {
                 if (!data_pg) continue;
 
                 SlottedPage sp(data_pg->get_data());
-                for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
-                    uint32_t size;
-                    char* tuple_data = sp.get_tuple(slot, &size);
-                    if (tuple_data) {
-                        Tuple t = Tuple::deserialize(st_schema, tuple_data, size);
-                        std::string table_name = std::get<std::string>(t.get_value(1));
-                        if (name == table_name) {
-                            found_oid = static_cast<uint32_t>(std::get<int32_t>(t.get_value(0)));
-                            found_first_page_id = static_cast<page_id_t>(std::get<int32_t>(t.get_value(2)));
-                            found = true;
-                            break;
-                        }
+                for (uint16_t slot = 0; slot < sp.get_num_slots() && !found; ++slot) {
+                    uint32_t sz;
+                    const char* data = sp.get_tuple(slot, &sz);
+                    if (!data) continue;
+                    Tuple t = Tuple::deserialize(st_schema, data, sz);
+                    std::string table_name = std::get<std::string>(t.get_value(1));
+                    if (name == table_name) {
+                        found_oid = static_cast<uint32_t>(std::get<int32_t>(t.get_value(0)));
+                        found_first_page_id = static_cast<page_id_t>(std::get<int32_t>(t.get_value(2)));
+                        found = true;
                     }
                 }
                 buffer_pool_.unpin_page(data_page_id, false);
@@ -257,19 +255,18 @@ const TableMetadata* CatalogManager::get_table(const std::string& name) {
                 if (!col_data_pg) continue;
 
                 SlottedPage col_sp(col_data_pg->get_data());
-                for (uint16_t cs = 0; cs < col_sp.get_num_slots(); ++cs) {
-                    uint32_t c_size;
-                    char* c_data = col_sp.get_tuple(cs, &c_size);
-                    if (c_data) {
-                        Tuple ct = Tuple::deserialize(sc_schema, c_data, c_size);
-                        auto col_table_oid = static_cast<uint32_t>(std::get<int32_t>(ct.get_value(0)));
-                        if (col_table_oid == found_oid) {
-                            std::string col_name = std::get<std::string>(ct.get_value(1));
-                            auto col_type = static_cast<DataType>(std::get<int32_t>(ct.get_value(2)));
-                            auto col_length = static_cast<uint16_t>(std::get<int32_t>(ct.get_value(3)));
-                            auto col_offset = static_cast<uint16_t>(std::get<int32_t>(ct.get_value(4)));
-                            column_list.emplace_back(col_name, col_type, col_length, col_offset);
-                        }
+                for (uint16_t slot = 0; slot < col_sp.get_num_slots(); ++slot) {
+                    uint32_t sz;
+                    const char* data = col_sp.get_tuple(slot, &sz);
+                    if (!data) continue;
+                    Tuple ct = Tuple::deserialize(sc_schema, data, sz);
+                    auto col_table_oid = static_cast<uint32_t>(std::get<int32_t>(ct.get_value(0)));
+                    if (col_table_oid == found_oid) {
+                        std::string col_name = std::get<std::string>(ct.get_value(1));
+                        auto col_type = static_cast<DataType>(std::get<int32_t>(ct.get_value(2)));
+                        auto col_length = static_cast<uint16_t>(std::get<int32_t>(ct.get_value(3)));
+                        auto col_offset = static_cast<uint16_t>(std::get<int32_t>(ct.get_value(4)));
+                        column_list.emplace_back(col_name, col_type, col_length, col_offset);
                     }
                 }
                 buffer_pool_.unpin_page(col_page_id, false);

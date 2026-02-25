@@ -34,7 +34,7 @@ using Value = std::variant<
 
 /**
  * @class Tuple
- * @brief A serializable, schema-aware representation of a single database row
+ * @brief A serializable, schema-aware representation of a single database table row
  *
  * @details
  * A Tuple is the fundamental unit of row storage in Letty DB. It encapsulates
@@ -75,9 +75,7 @@ using Value = std::variant<
  */
 class Tuple {
  public:
-  /**
-   * @brief Constructs an empty tuple.
-   */
+
   Tuple() = default;
 
   /**

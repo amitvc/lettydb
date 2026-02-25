@@ -60,8 +60,8 @@ static void apply_unicode_borders(tabulate::Table& t) {
  * This CLI is temporary CLI to help me test locally. It will be replaced with a more robust CLI to interact with DB
  * @param db_path
  */
-LettyCli::LettyCli(const std::string& db_path)
-    : db_path_(db_path) {
+LettyCli::LettyCli(const std::string& db_path, bool force_simple)
+    : db_path_(db_path), force_simple_(force_simple) {
 
     // Initialize all database components in order
     disk_manager_ = std::make_unique<DiskManager>(db_path);
@@ -116,7 +116,7 @@ LettyCli::~LettyCli() {
 }
 
 void LettyCli::Run() {
-    if (!isatty(STDIN_FILENO)) {
+    if (force_simple_ || !isatty(STDIN_FILENO)) {
         RunSimpleInteractive();
         return;
     }
@@ -322,7 +322,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 } else {
                     if (json.contains("header")) {
                         auto h = json["header"];
-                        fmt::print("  Tuples         : {}\n", h["tuple_count"].get<int>());
+                        fmt::print("  Slots          : {}\n", h["num_slots"].get<int>());
                         fmt::print("  Free space ptr : {}\n", h["free_space_ptr"].get<int>());
                         fmt::print("  LSN            : {}\n", h["lsn"].get<int>());
                     }
