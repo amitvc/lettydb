@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 9/15/25.
-//
-
 #include "storage/storage_def.h"
 
 #include <gtest/gtest.h>

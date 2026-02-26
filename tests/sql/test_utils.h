@@ -1,7 +1,3 @@
-//
-// Created by Chavan, Amit on 8/1/25.
-//
-
 #pragma once
 
 #include "sql/token.h"

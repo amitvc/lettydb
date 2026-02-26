@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 8/30/25.
-//
-
 #include "disk_manager.h"
 #include "common/logger.h"
 #include "storage/config.h"

@@ -136,14 +136,14 @@ std::string StorageInspector::get_page_map() {
         };
     }
 
-    // 1. Mark Header
+    // Header
     if (num_pages > 0) {
         map[0]["type"] = "HEADER";
         map[0]["owner"] = "system";
         map[0]["info"] = "Database Header";
     }
 
-    // 2. Mark GAM pages
+    // GAM pages
     page_id_t curr_gam = FIRST_GAM_PAGE_ID;
     while (curr_gam != INVALID_PAGE_ID && curr_gam < num_pages) {
          map[curr_gam]["type"] = "GAM";
@@ -161,8 +161,7 @@ std::string StorageInspector::get_page_map() {
          }
     }
 
-    // 3. Mark Metadata Pool pages
-    // Need to read Header to find first metadata pool page
+    // Metadata Pool pages
     page_id_t meta_head = INVALID_PAGE_ID;
     page_id_t sys_tables_iam = INVALID_PAGE_ID;
     page_id_t sys_cols_iam = INVALID_PAGE_ID;
@@ -245,11 +244,11 @@ std::string StorageInspector::get_page_map() {
         }
     };
 
-    // 4. Mark System Tables
+    // System tables
     mark_table_pages(sys_tables_iam, "sys_tables");
     mark_table_pages(sys_cols_iam, "sys_columns");
 
-    // 5. Mark User Tables
+    // User tables
     // Need to read sys_tables to find them.
     // We can use the catalog manager directly if it exposes a way to list tables,
     // or we can scan sys_tables physically.
@@ -265,17 +264,17 @@ std::string StorageInspector::get_page_map() {
     // Iterate its IAM chain -> extents -> pages.
     // For each page, interpret as SlottedPage.
     // For each slot, deserialize Tuple.
-    // Extract table name and first_page_id (IAM head).
+    // Extract table name and iam_page_id (IAM head).
     
     auto process_sys_tables = [&](page_id_t iam_head) {
         if (iam_head == INVALID_PAGE_ID) return;
         
         // Define sys_tables schema specifically for deserialization
-        // Schema: {oid: INT, name: VARCHAR, first_page_id: INT, column_count: INT}
+        // Schema: {oid: INT, name: VARCHAR, iam_page_id: INT, column_count: INT}
         Schema st_schema({
             Column("oid", DataType::INTEGER, 4, 0),
             Column("name", DataType::VARCHAR, 32, 4),
-            Column("first_page_id", DataType::INTEGER, 4, 36),
+            Column("iam_page_id", DataType::INTEGER, 4, 36),
             Column("column_count", DataType::INTEGER, 4, 40)
         });
 
@@ -461,7 +460,7 @@ std::string StorageInspector::get_iam_chain(const std::string& table_name) {
     
     nlohmann::json chain = nlohmann::json::array();
     
-    page_id_t curr = meta->first_page_id;
+    page_id_t curr = meta->iam_page_id;
     while(curr != INVALID_PAGE_ID) {
         Page* p = buffer_pool_.fetch_page(curr);
         if(!p) break;

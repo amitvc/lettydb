@@ -157,7 +157,6 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
     return INVALID_PAGE_ID;
   }
 
-  // 1. Allocate a physical extent from ExtentManager
   page_id_t extent_start_page = extent_manager_.allocate_extent();
   if (extent_start_page == INVALID_PAGE_ID) {
     LOG_STORAGE_ERROR("Failed to allocate physical extent");
@@ -167,7 +166,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   uint32_t extent_id = extent_id_from_page(extent_start_page);
   LOG_STORAGE_DEBUG("Got extent {} (page {})", extent_id, extent_start_page);
 
-  // 2. Find the IAM page with space for this extent ID
+  // Walk the IAM chain looking for a page with space
   page_id_t current_iam_page = iam_head_page_id;
   page_id_t prev_iam_page = INVALID_PAGE_ID;
 
@@ -199,7 +198,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
     current_iam_page = next_iam;
   }
 
-  // 3. No IAM page has space — allocate a new one
+  // No IAM page has space — allocate a new one
   page_id_t new_iam_page_id = allocate_metadata_page();
   if (new_iam_page_id == INVALID_PAGE_ID) {
     LOG_STORAGE_ERROR("Failed to allocate new IAM page");

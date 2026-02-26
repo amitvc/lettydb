@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 6/6/25.
-//
-
 #pragma once
 #include <string>
 #include <string_view>
@@ -11,14 +7,7 @@
 
 namespace letty {
 
-// Forward declarations
-class DiskManager;
-class BufferPoolManager;
-class ExtentManager;
-class IamManager;
-class CatalogManager;
-class TableManager;
-class Executor;
+class DatabaseEngine;
 
 /**
  * @class LettyCli
@@ -61,17 +50,7 @@ private:
                           const std::vector<class Tuple>& rows,
                           const class Schema* schema);
 
-    // Database components
-    std::unique_ptr<DiskManager> disk_manager_;
-    std::unique_ptr<BufferPoolManager> buffer_pool_;
-    std::unique_ptr<ExtentManager> extent_manager_;
-    std::unique_ptr<IamManager> iam_manager_;
-    std::unique_ptr<CatalogManager> catalog_manager_;
-    std::unique_ptr<TableManager> table_manager_;
-    std::unique_ptr<Executor> executor_;
-
-    // Monitoring tools
-    std::unique_ptr<class StorageInspector> inspector_;
+    std::unique_ptr<DatabaseEngine> db_engine_;
 
     std::string db_path_;
     std::string history_path_;

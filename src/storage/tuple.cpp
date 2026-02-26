@@ -1,7 +1,3 @@
-//
-// Created by Antigravity on 1/27/26.
-//
-
 #include "tuple.h"
 #include <stdexcept>
 

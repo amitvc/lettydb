@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 7/15/25.
-//
-
 /**
  * @file lexer.cpp
  * @brief Implementation of the SQL lexical analyzer

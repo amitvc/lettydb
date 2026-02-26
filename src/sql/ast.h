@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 7/28/25.
-//
-
 #pragma once
 
 #include <variant>

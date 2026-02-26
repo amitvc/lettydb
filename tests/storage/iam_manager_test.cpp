@@ -1,4 +1,3 @@
-//
 // Test suite for list-based IAM and metadata pool functionality
 //
 

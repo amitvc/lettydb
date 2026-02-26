@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 7/14/25.
-//
-
 #include <string>
 #include <unordered_map>
 #include "token.h"

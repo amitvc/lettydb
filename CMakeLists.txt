@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
 # Add dependencies via FetchContent
+# Skip network checks after first successful download
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 include(FetchContent)
 FetchContent_Declare(
     spdlog

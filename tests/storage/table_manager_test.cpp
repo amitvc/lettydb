@@ -1,7 +1,3 @@
-//
-// Created by Antigravity on 1/27/26.
-//
-
 #include <gtest/gtest.h>
 #include <cstdio>
 #include "storage/table_manager.h"

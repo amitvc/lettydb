@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 9/2/25.
-//
-
 #pragma once
 
 #include "config.h"

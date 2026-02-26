@@ -1,8 +1,3 @@
-//
-// Created by Chavan, Amit on 8/1/25.
-//
-
-
 #include "sql/parser.h"
 
 #include <gtest/gtest.h>

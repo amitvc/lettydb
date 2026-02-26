@@ -1,7 +1,3 @@
-//
-// Created by Antigravity on 1/27/26.
-//
-
 #include <gtest/gtest.h>
 #include <cstdio>
 #include "sql/executor.h"
@@ -183,7 +179,7 @@ TEST_F(ExecutorTest, SelectSystemTables) {
   auto result = execute_sql("SELECT * FROM sys_tables");
   ASSERT_TRUE(result.success) << result.error_message;
   EXPECT_GE(result.rows.size(), 2);  // sys_tables + sys_columns
-  EXPECT_EQ(result.column_names.size(), 4);  // oid, name, first_page_id, column_count
+  EXPECT_EQ(result.column_names.size(), 4);  // oid, name, iam_page_id, column_count
 
   // sys_columns should have columns for both system tables (4 + 5 = 9 total)
   auto col_result = execute_sql("SELECT * FROM sys_columns");

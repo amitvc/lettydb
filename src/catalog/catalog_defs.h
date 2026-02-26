@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include "storage/storage_def.h"
 
 namespace letty {
 
@@ -23,26 +23,4 @@ enum class DataType : uint8_t {
   TIMESTAMP = 5
 };
 
-/**
- * @struct SysTablesRecord
- * @brief Physical layout of a tuple in the 'sys_tables' table.
- */
-struct SysTablesRecord {
-  uint32_t oid;
-  char name[MAX_NAME_LENGTH];
-  page_id_t first_page_id;
-  uint16_t column_count;
-};
-
-/**
- * @struct SysColumnsRecord
- * @brief Physical layout of a tuple in the 'sys_columns' table.
- */
-struct SysColumnsRecord {
-  uint32_t table_oid;
-  char name[MAX_NAME_LENGTH];
-  DataType type;
-  uint16_t length;
-  uint16_t offset;
-};
 }

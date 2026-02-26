@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 9/13/25.
-//
-
 #include <gtest/gtest.h>
 #include "storage/disk_manager.h"
 #include "storage/config.h"

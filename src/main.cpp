@@ -1,4 +1,3 @@
-//
 // Main entry point for Letty CLI application
 //
 

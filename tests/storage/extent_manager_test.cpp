@@ -1,6 +1,3 @@
-//
-// Created by Amit Chavan on 12/11/25.
-//
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
@@ -279,13 +276,13 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenExtent0IsFull) {
 }
 
 TEST_F(ExtentManagerTest, TestCorruptDatabaseSignature) {
-  // 1. Create a file with valid database
+  // Create a file with valid database
   {
 	auto [disk_manager, bpm, extent_manager] = CreateStack();
     // BPM destructor flushes all dirty pages
   }
 
-  // 2. Corrupt the signature
+  // Corrupt the signature
   {
 	std::fstream file(test_db_file, std::ios::in | std::ios::out | std::ios::binary);
 	file.seekp(0);
@@ -293,7 +290,7 @@ TEST_F(ExtentManagerTest, TestCorruptDatabaseSignature) {
 	file.close();
   }
 
-  // 3. Try to open with ExtentManager - should throw
+  // Opening with bad signature should throw
   {
 	auto disk_manager = std::make_unique<DiskManager>(test_db_file);
 	auto bpm = std::make_unique<BufferPoolManager>(

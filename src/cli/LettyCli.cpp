@@ -1,21 +1,12 @@
-//
-// Created by Amit Chavan on 6/6/25.
-//
-
 #include "LettyCli.h"
-#include "storage/disk_manager.h"
-#include "buffer/buffer_pool_manager.h"
-#include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
+#include "database_engine.h"
 #include "catalog/catalog_manager.h"
-#include "storage/table_manager.h"
+#include "monitoring/storage_inspector.h"
 #include "storage/tuple.h"
 #include "sql/executor.h"
 #include "sql/lexer.h"
 #include "sql/parser.h"
 #include "common/logger.h"
-#include "monitoring/storage_inspector.h"
 
 #include <iostream>
 #include <sstream>
@@ -63,20 +54,7 @@ static void apply_unicode_borders(tabulate::Table& t) {
 LettyCli::LettyCli(const std::string& db_path, bool force_simple)
     : db_path_(db_path), force_simple_(force_simple) {
 
-    // Initialize all database components in order
-    disk_manager_ = std::make_unique<DiskManager>(db_path);
-    buffer_pool_ = std::make_unique<BufferPoolManager>(
-        *disk_manager_, DEFAULT_POOL_SIZE, std::make_unique<LRUPageReplacer>());
-    extent_manager_ = std::make_unique<ExtentManager>(*buffer_pool_);
-    iam_manager_ = std::make_unique<IamManager>(*buffer_pool_, *extent_manager_);
-    catalog_manager_ = std::make_unique<CatalogManager>(*buffer_pool_, *iam_manager_);
-    catalog_manager_->init();
-    table_manager_ = std::make_unique<TableManager>(*buffer_pool_, *iam_manager_, *catalog_manager_);
-    executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_);
-
-    // Initialize monitoring tools (always enabled for CLI use)
-    inspector_ = std::make_unique<StorageInspector>(
-        *buffer_pool_, *extent_manager_, *iam_manager_, *catalog_manager_);
+    db_engine_ = std::make_unique<DatabaseEngine>(db_path);
 
     // Initialize replxx line editor
     history_path_ = db_path_ + ".history";
@@ -124,7 +102,7 @@ void LettyCli::Run() {
     fmt::print("╔══════════════════════════════════════════╗\n");
     fmt::print("║       Welcome to LettyDB CLI!            ║\n");
     fmt::print("║  Type SQL commands or 'exit' to quit     ║\n");
-    fmt::print("║  Database: {:<29}║\n", db_path_);
+    fmt::print("║  Database: {:<30}║\n", db_path_);
     fmt::print("╚══════════════════════════════════════════╝\n\n");
 
     while (true) {
@@ -163,7 +141,7 @@ void LettyCli::RunSimpleInteractive() {
     fmt::print("╔══════════════════════════════════════════╗\n");
     fmt::print("║       Welcome to LettyDB CLI (IDE)!      ║\n");
     fmt::print("║  Type SQL commands or 'exit' to quit     ║\n");
-    fmt::print("║  Database: {:<29}║\n", db_path_);
+    fmt::print("║  Database: {:<30}║\n", db_path_);
     fmt::print("╚══════════════════════════════════════════╝\n\n");
 
     std::string line;
@@ -211,9 +189,6 @@ void LettyCli::PrintHelp() {
 }
 
 void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
-    // 0. Handle Inspector commands
-    // Format: INSPECT <TYPE> [ARGS...]
-    // e.g., INSPECT SUMMARY, INSPECT PAGE 4, INSPECT TABLE sys_tables
     if (input.rfind("INSPECT", 0) == 0 || input.rfind("inspect", 0) == 0) {
         std::string cmd = input;
         std::vector<std::string> parts;
@@ -235,7 +210,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
 
         try {
             if (type == "SUMMARY") {
-                auto json = nlohmann::json::parse(inspector_->get_summary());
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_summary());
 
                 int    total_pages   = json["total_pages"].get<int>();
                 int    alloc_extents = json["allocated_extents"].get<int>();
@@ -269,7 +244,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 fmt::print("  └─ Dirty evict: {}\n\n", dirty_evict);
 
             } else if (type == "GAM") {
-                auto json = nlohmann::json::parse(inspector_->get_gam());
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_gam());
 
                 fmt::print("\n┌─────────────────────────────────┐\n");
                 fmt::print("│   Global Allocation Map (GAM)   │\n");
@@ -311,7 +286,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 page_id_t pid    = std::stoi(parts[2]);
                 std::string owner = parts.size() > 3 ? parts[3] : "";
 
-                auto json = nlohmann::json::parse(inspector_->get_page_detail(pid, owner));
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_page_detail(pid, owner));
 
                 fmt::print("\n┌─────────────────────────────────┐\n");
                 fmt::print("│       Page {:<21}│\n", pid);
@@ -391,7 +366,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                     return;
                 }
                 std::string table = parts[2];
-                auto json = nlohmann::json::parse(inspector_->get_iam_chain(table));
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_iam_chain(table));
 
                 fmt::print("\n┌─────────────────────────────────┐\n");
                 fmt::print("│  IAM Chain: {:<20}│\n", table);
@@ -443,11 +418,9 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
     }
 
     try {
-        // 1. Tokenize
         Lexer lexer(input);
         auto tokens = lexer.tokenize();
 
-        // 2. Parse
         Parser parser(std::move(tokens));
         auto ast = parser.parse();
 
@@ -456,10 +429,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
             return;
         }
 
-        // 3. Execute
-        ExecutionResult result = executor_->execute(ast.get());
-
-        // 4. Display result
+        ExecutionResult result = db_engine_->get_executor().execute(ast.get());
         if (!result.success) {
             fmt::print(stderr, "Error: {}\n", result.error_message);
             return;
@@ -472,7 +442,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                     if (select->from_clause && select->from_clause->name)
                         table_name = select->from_clause->name->name;
                 }
-                auto table_meta = table_name.empty() ? nullptr : catalog_manager_->get_table(table_name);
+                auto table_meta = table_name.empty() ? nullptr : db_engine_->get_catalog().get_table(table_name);
                 PrintResultTable(result.column_names, result.rows,
                                  table_meta ? &table_meta->schema : nullptr);
                 fmt::print("{} row(s) returned\n", result.rows.size());

@@ -1,6 +1,3 @@
-//
-// Created by Amit Chavan on 7/23/25.
-//
 #include <gtest/gtest.h>
 #include "sql/lexer.h"
 #include "sql/token.h"

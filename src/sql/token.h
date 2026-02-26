@@ -1,6 +1,3 @@
-//
-// Created by Amit Chavan on 6/9/25.
-//
 #pragma once
 #include <string>
 #include "iostream"

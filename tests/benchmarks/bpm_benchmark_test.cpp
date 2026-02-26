@@ -1,4 +1,3 @@
-//
 // BPM Benchmark Harness
 // Measures the effectiveness of the Buffer Pool Manager by running
 // the same workload at different pool sizes and comparing I/O stats.

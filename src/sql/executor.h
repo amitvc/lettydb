@@ -1,7 +1,3 @@
-//
-// Created by Antigravity on 1/27/26.
-//
-
 #pragma once
 
 #include <string>
@@ -114,4 +110,4 @@ class Executor {
   Value literal_to_value(const LiteralNode* literal);
 };
 
-} // namespace letty
+}

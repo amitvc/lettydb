@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 9/12/25.
-//
-
 #pragma once
 
 namespace  letty {

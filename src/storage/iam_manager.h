@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 12/26/25.
-//
-
 #pragma once
 
 #include "buffer/buffer_pool_manager.h"

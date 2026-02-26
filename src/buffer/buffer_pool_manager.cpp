@@ -1,8 +1,6 @@
 #include "buffer/buffer_pool_manager.h"
 #include "common/logger.h"
 
-#include <cassert>
-
 namespace letty {
 
 BufferPoolManager::BufferPoolManager(IDiskManager& disk_manager, size_t pool_size,
@@ -25,7 +23,6 @@ BufferPoolManager::~BufferPoolManager() {
 Page* BufferPoolManager::fetch_page(page_id_t page_id) {
   std::lock_guard<std::mutex> lock(latch_);
 
-  // 1. Check if page is already in the pool (cache hit)
   auto it = page_table_.find(page_id);
   if (it != page_table_.end()) {
 	// Found the page in cache
@@ -37,13 +34,12 @@ Page* BufferPoolManager::fetch_page(page_id_t page_id) {
     return &page;
   }
 
-  // 2. Cache miss — need a frame.
+  // Cache miss — need a frame
   ++cache_misses_;
   auto new_frame = acquire_frame();
   if (!new_frame) return nullptr;
   frame_id_t frame_id = new_frame.value();
 
-  // 3. Load the requested page into the frame
   Page& page = pages_[frame_id];
   page.reset(); // Clear the current page
   LOG_STORAGE_DEBUG("Buffer pool miss: page {}, frame {}", page_id, frame_id);

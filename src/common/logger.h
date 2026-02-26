@@ -1,7 +1,3 @@
-//
-// Created by Letty Project
-//
-
 #pragma once
 
 #include <spdlog/spdlog.h>

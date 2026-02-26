@@ -1,4 +1,3 @@
-//
 // Simple integration test to verify list-based IAM and metadata pool functionality
 //
 

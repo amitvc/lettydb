@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 9/15/25.
-//
-
 #include "storage_def.h"
 
 #include "extent_manager.h"

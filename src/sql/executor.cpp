@@ -1,7 +1,3 @@
-//
-// Created by Antigravity on 1/27/26.
-//
-
 #include "executor.h"
 #include "token.h"
 #include <iostream>
@@ -16,7 +12,6 @@ ExecutionResult Executor::execute(ASTNode* node) {
     return ExecutionResult::error("Null AST node");
   }
   
-  // Dispatch based on node type using dynamic_cast
   if (auto* create_table = dynamic_cast<CreateTableStatementNode*>(node)) {
     return execute_create_table(create_table);
   }
@@ -39,7 +34,6 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
   
   std::string table_name = node->table_name->name;
   
-  // Build Schema from column definitions
   std::vector<Column> columns;
   uint16_t current_offset = 0;
   
@@ -51,7 +45,6 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
     std::string col_name = col_def->name->name;
     DataType data_type = token_type_to_data_type(col_def->type);
     
-    // Determine column length
     uint16_t col_length;
     if (data_type == DataType::VARCHAR) {
       col_length = col_def->size > 0 ? col_def->size : 255;  // Default VARCHAR size
@@ -65,7 +58,6 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
   
   Schema schema(columns);
   
-  // Create the table
   if (!catalog_manager_.create_table(table_name, schema)) {
     return ExecutionResult::error("CREATE TABLE: failed to create table '" + table_name + "' (may already exist)");
   }
@@ -124,7 +116,6 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
   
   std::string table_name = node->from_clause->name->name;
   
-  // Get table metadata
   auto* table_meta = catalog_manager_.get_table(table_name);
   if (!table_meta) {
     return ExecutionResult::error("SELECT: table '" + table_name + "' does not exist");
@@ -133,7 +124,6 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
   ExecutionResult result;
   result.success = true;
   
-  // Get column names for result
   const auto& schema_columns = table_meta->schema.get_columns();
   if (node->is_select_all) {
     for (const auto& col : schema_columns) {
@@ -149,7 +139,7 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
     }
   }
   
-  // Scan the table
+
   bool scan_ok = table_manager_.scan_table_tuples(table_name, [&result](const Tuple& tuple) {
     result.rows.push_back(tuple);
   });

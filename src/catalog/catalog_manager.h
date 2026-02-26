@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <unordered_map>
@@ -26,9 +27,10 @@ struct TableMetadata {
   std::string name; // table name.
   Schema schema;
 
-  //Page identifier of the first page in the table's heap storage.
-  //Used by the storage layer to locate and scan the table.
-  page_id_t first_page_id;
+  // Head of the IAM (Index Allocation Map) chain for this table.
+  // The storage layer follows this chain to find all extents (and their
+  // data pages) that belong to the table.
+  page_id_t iam_page_id;
 };
 
 /**
@@ -67,7 +69,7 @@ class CatalogManager {
 
   bool delete_table(const std::string &name);
 
-  /** Schema for sys_tables: {oid INT, name VARCHAR(32), first_page_id INT, column_count INT} */
+  /** Schema for sys_tables: {oid INT, name VARCHAR(32), iam_page_id INT, column_count INT} */
   static Schema sys_tables_schema();
 
   /** Schema for sys_columns: {table_oid INT, name VARCHAR(32), type INT, length INT, offset INT} */
@@ -79,10 +81,13 @@ class CatalogManager {
 
   /** In-memory cache of table metadata, keyed by table name.
    *  Populated on create_table() and first get_table() miss.
-   *  Eliminates repeated full scans of sys_tables + sys_columns. */
+   *  Eliminates repeated full scans of sys_tables + sys_columns.
+   **/
   std::unordered_map<std::string, TableMetadata> table_cache_;
 
-  // Function to create the system tables if they don't exist
+  /**
+   *  Will bootstrap the database by creating sys_tables and sys_columns
+   */
   void bootstrap();
 
   /**
@@ -103,7 +108,24 @@ class CatalogManager {
    */
   bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
 
+  /**
+   * @brief Reads the database header and returns the IAM page IDs for system tables.
+   * @return (sys_tables_iam, sys_columns_iam), or (INVALID_PAGE_ID, INVALID_PAGE_ID) if uninitialized.
+   */
+  std::pair<page_id_t, page_id_t> get_system_iam_pages();
 
+  /**
+   * @brief Scans a system table via its IAM chain and returns all tuples.
+   *
+   * Walks the IAM chain starting at iam_head, reads every SlottedPage in
+   * every extent, and deserializes each tuple using the given schema.
+   * System tables are small (tens of rows), so materializing is fine.
+   *
+   * @param iam_head  IAM chain head page ID for the system table.
+   * @param schema    Schema used for tuple deserialization.
+   * @return All tuples found in the system table.
+   */
+  std::vector<Tuple> scan_system_table(page_id_t iam_head, const Schema& schema);
 };
 
 }

@@ -1,6 +1,3 @@
-//
-// Created by Amit Chavan on 9/15/25.
-//
 #pragma once
 
 #include "storage_def.h"
