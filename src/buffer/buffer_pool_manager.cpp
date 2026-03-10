@@ -69,6 +69,7 @@ bool BufferPoolManager::unpin_page(page_id_t page_id, bool is_dirty) {
 
   page.decrement_pin();
 
+  // If a Page's pin count (aka reference count) drops to 0 then it is safe to be evicted from cache
   if (page.get_pin_count() == 0) {
 	replacer_->mark_evictable(frame_id);
   }

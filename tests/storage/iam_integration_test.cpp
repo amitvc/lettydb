@@ -28,10 +28,10 @@ TEST(IamIntegrationTest, ListBasedIamBasicFunctionality) {
         IamManager iam_manager(bpm, extent_manager);
 
         // Initialize metadata pool
-        iam_manager.init_metadata_pool(FIRST_METADATA_POOL_PAGE_ID);
+        iam_manager.init_shared_extent(FIRST_SHARED_EXTENT_PAGE_ID);
 
         // Create a table's IAM chain
-        page_id_t table_iam = iam_manager.create_iam_chain();
+        page_id_t table_iam = iam_manager.create_iam_chain("test_table");
         ASSERT_NE(table_iam, INVALID_PAGE_ID);
         
         // Allocate some extents
@@ -85,10 +85,10 @@ TEST(IamIntegrationTest, IAMPageBasics) {
 }
 
 /**
- * Test MetadataPoolDirectoryPage structure
+ * Test SharedExtentDirectoryPage structure
  */
-TEST(IamIntegrationTest, MetadataPoolDirectoryPageBasics) {
-    MetadataPoolDirectoryPage header;
+TEST(IamIntegrationTest, SharedExtentDirectoryPageBasics) {
+    SharedExtentDirectoryPage header;
     
     // Initial state
     EXPECT_EQ(header.slots_bitmap, 0);
@@ -107,7 +107,7 @@ TEST(IamIntegrationTest, MetadataPoolDirectoryPageBasics) {
     header.mark_slot_free(2);
     EXPECT_EQ(header.find_free_slot(), 2);
     
-    LOG_STORAGE_INFO("MetadataPoolDirectoryPage basics test passed");
+    LOG_STORAGE_INFO("SharedExtentDirectoryPage basics test passed");
 }
 
 /**
@@ -123,12 +123,12 @@ TEST(IamIntegrationTest, MultipleTablesSharePool) {
         bpm.flush_all_pages();  // Flush init pages for components still using DiskManager directly
         IamManager iam_manager(bpm, extent_manager);
 
-        iam_manager.init_metadata_pool(FIRST_METADATA_POOL_PAGE_ID);
+        iam_manager.init_shared_extent(FIRST_SHARED_EXTENT_PAGE_ID);
         
         // Create multiple tables
-        page_id_t table1_iam = iam_manager.create_iam_chain();
-        page_id_t table2_iam = iam_manager.create_iam_chain();
-        page_id_t table3_iam = iam_manager.create_iam_chain();
+        page_id_t table1_iam = iam_manager.create_iam_chain("test_table");
+        page_id_t table2_iam = iam_manager.create_iam_chain("test_table");
+        page_id_t table3_iam = iam_manager.create_iam_chain("test_table");
         
         // All should be valid and from metadata pool
         EXPECT_NE(table1_iam, INVALID_PAGE_ID);
@@ -141,8 +141,8 @@ TEST(IamIntegrationTest, MultipleTablesSharePool) {
         EXPECT_NE(table1_iam, table3_iam);
         
         // All should be in metadata pool extent
-        EXPECT_GE(table1_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
-        EXPECT_LE(table1_iam, FIRST_METADATA_POOL_PAGE_ID + METADATA_POOL_SLOTS);
+        EXPECT_GE(table1_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
+        EXPECT_LE(table1_iam, FIRST_SHARED_EXTENT_PAGE_ID + SHARED_EXTENT_SLOTS);
         
         LOG_STORAGE_INFO("Multiple tables share pool test passed");
         

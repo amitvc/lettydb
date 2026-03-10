@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <iostream>
 #include "storage/config.h"
 
 namespace letty {
@@ -18,7 +19,10 @@ class BufferPoolManager;
  */
 class Page {
  public:
-  Page() { std::memset(data_, 0, PAGE_SIZE); }
+  Page() {
+	std::memset(data_, 0, PAGE_SIZE);
+	std::cout << "Page created" <<std::endl;
+  }
 
   /** @brief Returns a mutable pointer to the raw page data. */
   char* get_data() { return data_; }

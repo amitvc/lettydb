@@ -27,8 +27,6 @@ bool Tuple::serialize(const Schema& schema, char* buf, uint32_t buf_size, uint32
     return false;  // Buffer too small
   }
 
-  std::memset(buf, 0, total_size);
-
   // Serialize each value
   uint32_t offset = 0;
   for (size_t i = 0; i < columns.size(); ++i) {

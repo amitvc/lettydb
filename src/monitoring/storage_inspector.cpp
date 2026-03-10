@@ -170,7 +170,7 @@ std::string StorageInspector::get_page_map() {
         Page* p0 = buffer_pool_.fetch_page(0);
         if (p0) {
             auto* header = reinterpret_cast<DatabaseHeader*>(p0->get_data());
-            meta_head = header->metadata_pool_page_id;
+            meta_head = header->shared_extent_page_id;
             sys_tables_iam = header->sys_tables_iam_page;
             sys_cols_iam = header->sys_columns_iam_page;
             buffer_pool_.unpin_page(0, false);
@@ -182,7 +182,7 @@ std::string StorageInspector::get_page_map() {
     while (curr_pool != INVALID_PAGE_ID && curr_pool < num_pages) {
         // Mark the entire extent (8 pages) as Metadata Pool
         // The pool is allocated in extents.
-        // Wait, metadata_pool_page_id points to the *first page* of the pool extent.
+        // Wait, shared_extent_page_id points to the *first page* of the shared extent.
         // Pools are linked via next_pool_page in the directory page (page 0 of extent).
         
         // Mark the directory page itself
@@ -200,7 +200,7 @@ std::string StorageInspector::get_page_map() {
 
         Page* p = buffer_pool_.fetch_page(curr_pool);
         if (p) {
-            auto* mp = reinterpret_cast<MetadataPoolDirectoryPage*>(p->get_data());
+            auto* mp = reinterpret_cast<SharedExtentDirectoryPage*>(p->get_data());
             page_id_t next = mp->next_pool_page;
             buffer_pool_.unpin_page(curr_pool, false);
             curr_pool = next;
@@ -245,8 +245,8 @@ std::string StorageInspector::get_page_map() {
     };
 
     // System tables
-    mark_table_pages(sys_tables_iam, "sys_tables");
-    mark_table_pages(sys_cols_iam, "sys_columns");
+    mark_table_pages(sys_tables_iam, SYS_TABLES_NAME);
+    mark_table_pages(sys_cols_iam, SYS_COLUMNS_NAME);
 
     // User tables
     // Need to read sys_tables to find them.
@@ -307,7 +307,7 @@ std::string StorageInspector::get_page_map() {
                                      int32_t first_pg_int = std::get<int32_t>(t.get_value(2));
                                      page_id_t t_iam = static_cast<page_id_t>(first_pg_int);
 
-                                     if (tname != "sys_tables" && tname != "sys_columns") {
+                                     if (tname != SYS_TABLES_NAME && tname != SYS_COLUMNS_NAME) {
                                          mark_table_pages(t_iam, tname);
                                      }
                                  }
@@ -385,10 +385,10 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
         bool has_schema = false;
 
         if (!owner.empty() && owner != "free" && owner != "system") {
-            if (owner == "sys_tables") {
+            if (owner == SYS_TABLES_NAME) {
                 schema = CatalogManager::sys_tables_schema();
                 has_schema = true;
-            } else if (owner == "sys_columns") {
+            } else if (owner == SYS_COLUMNS_NAME) {
                 schema = CatalogManager::sys_columns_schema();
                 has_schema = true;
             } else {
@@ -486,7 +486,7 @@ std::string StorageInspector::get_iam_chain(const std::string& table_name) {
 
 std::string StorageInspector::get_catalog() {
     // Just dump sys_tables
-    return get_iam_chain("sys_tables");
+    return get_iam_chain(SYS_TABLES_NAME);
 }
 
 std::string StorageInspector::bytes_to_hex(const char* data, uint32_t size) {

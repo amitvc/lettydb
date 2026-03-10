@@ -94,12 +94,28 @@ class TableManager {
   /**
    * @brief Returns a page that can accept `needed_space` bytes, allocating a
    *        new extent (and initializing it as a SlottedPage) if none exists.
-   *
-   * @param iam_head     The IAM chain head for the table.
-   * @param needed_space Minimum free bytes required (tuple size + slot overhead).
-   * @return Page ID of a writable page, or INVALID_PAGE_ID on failure.
    */
   page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space);
+
+  /**
+   * @brief Attempts to insert a serialized tuple into an already-pinned page.
+   * @return true if insertion succeeded, false if the page has no room.
+   */
+  bool try_insert_into_page(Page* page, const char* buf, uint32_t data_size);
+
+  /**
+   * @brief Scans all live tuples across every page in one extent, invoking
+   *        callback with raw (data, size) for each.
+   */
+  void scan_extent(uint32_t extent_id,
+                   const std::function<void(const char*, uint32_t)>& callback);
+
+  /**
+   * @brief Scans all live tuples across every page in one extent, deserializing
+   *        each into a Tuple before invoking callback.
+   */
+  void scan_extent_tuples(uint32_t extent_id, const Schema& schema,
+                          const std::function<void(const Tuple&)>& callback);
 };
 
 }

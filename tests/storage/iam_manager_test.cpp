@@ -30,7 +30,7 @@ protected:
         iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
         
         // Initialize the metadata pool (needed for the new design)
-        iam_manager->init_metadata_pool(FIRST_METADATA_POOL_PAGE_ID);
+        iam_manager->init_shared_extent(FIRST_SHARED_EXTENT_PAGE_ID);
         
         LOG_STORAGE_INFO("Test setup complete for IAMManager tests");
     }
@@ -54,7 +54,7 @@ protected:
      * Helper function to create a test table's IAM chain
      */
     page_id_t create_test_table_iam() {
-        return iam_manager->create_iam_chain();
+        return iam_manager->create_iam_chain("test_table");
     }
     
     /**
@@ -109,15 +109,15 @@ protected:
 /**
  * Test metadata pool initialization
  */
-TEST_F(IamManagerTest, MetadataPoolInit) {
-    // Flush BPM so init_metadata_pool writes are visible on disk
+TEST_F(IamManagerTest, SharedExtentInit) {
+    // Flush BPM so init_shared_extent writes are visible on disk
     bpm->flush_all_pages();
 
     // Read the metadata pool header
     char buffer[PAGE_SIZE];
-    ASSERT_EQ(disk_manager->read_page(FIRST_METADATA_POOL_PAGE_ID, buffer), IOResult::SUCCESS);
+    ASSERT_EQ(disk_manager->read_page(FIRST_SHARED_EXTENT_PAGE_ID, buffer), IOResult::SUCCESS);
     
-    auto* pool_header = reinterpret_cast<MetadataPoolDirectoryPage*>(buffer);
+    auto* pool_header = reinterpret_cast<SharedExtentDirectoryPage*>(buffer);
     
     // Should have no slots used initially (just after init)
     // Note: After SetUp, we may have allocated IAM pages, so just check structure is valid
@@ -134,8 +134,8 @@ TEST_F(IamManagerTest, CreateIAMChain) {
     ASSERT_NE(table_iam, INVALID_PAGE_ID);
     
     // Verify the IAM page is from the metadata pool (pages 9-15)
-    EXPECT_GE(table_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
-    EXPECT_LE(table_iam, FIRST_METADATA_POOL_PAGE_ID + METADATA_POOL_SLOTS);
+    EXPECT_GE(table_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
+    EXPECT_LE(table_iam, FIRST_SHARED_EXTENT_PAGE_ID + SHARED_EXTENT_SLOTS);
     
     // Flush BPM so create_iam_chain writes are visible on disk
     bpm->flush_all_pages();
@@ -222,9 +222,9 @@ TEST_F(IamManagerTest, MultipleTablesSharePool) {
     EXPECT_NE(table1_iam, table3_iam);
     
     // All should be in metadata pool extent (pages 9-15)
-    EXPECT_GE(table1_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
-    EXPECT_GE(table2_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
-    EXPECT_GE(table3_iam, FIRST_METADATA_POOL_PAGE_ID + 1);
+    EXPECT_GE(table1_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
+    EXPECT_GE(table2_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
+    EXPECT_GE(table3_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
     
     LOG_STORAGE_INFO("Multiple tables share pool test passed");
 }
@@ -258,11 +258,11 @@ TEST_F(IamManagerTest, IAMPageStructure) {
 }
 
 /**
- * Test MetadataPoolDirectoryPage structure functionality
+ * Test SharedExtentDirectoryPage structure functionality
  */
-TEST_F(IamManagerTest, MetadataPoolDirectoryPageStructure) {
+TEST_F(IamManagerTest, SharedExtentDirectoryPageStructure) {
     char buffer[PAGE_SIZE] = {0};
-    auto* pool_header = new(buffer) MetadataPoolDirectoryPage();
+    auto* pool_header = new(buffer) SharedExtentDirectoryPage();
     
     // Test initial state
     EXPECT_EQ(pool_header->slots_bitmap, 0);
@@ -287,12 +287,12 @@ TEST_F(IamManagerTest, MetadataPoolDirectoryPageStructure) {
     EXPECT_EQ(pool_header->find_free_slot(), 2);  // Should find slot 2 first
     
     // Mark all slots used
-    for (uint8_t i = 1; i <= METADATA_POOL_SLOTS; ++i) {
+    for (uint8_t i = 1; i <= SHARED_EXTENT_SLOTS; ++i) {
         pool_header->mark_slot_used(i);
     }
     EXPECT_EQ(pool_header->find_free_slot(), 0);  // No free slot
     
-    LOG_STORAGE_INFO("MetadataPoolDirectoryPage structure test passed");
+    LOG_STORAGE_INFO("SharedExtentDirectoryPage structure test passed");
 }
 
 /**

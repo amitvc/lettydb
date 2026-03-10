@@ -443,8 +443,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                         table_name = select->from_clause->name->name;
                 }
                 auto table_meta = table_name.empty() ? nullptr : db_engine_->get_catalog().get_table(table_name);
-                PrintResultTable(result.column_names, result.rows,
-                                 table_meta ? &table_meta->schema : nullptr);
+                PrintResultTable(result.column_names, result.rows);
                 fmt::print("{} row(s) returned\n", result.rows.size());
             }
         } else if (!quiet && result.affected_rows > 0) {
@@ -459,8 +458,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
 }
 
 void LettyCli::PrintResultTable(const std::vector<std::string>& column_names,
-                                 const std::vector<Tuple>& rows,
-                                 const Schema* schema) {
+                                 const std::vector<Tuple>& rows) {
     if (column_names.empty()) return;
 
     tabulate::Table t;

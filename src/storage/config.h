@@ -30,9 +30,9 @@ namespace letty {
   static constexpr int HEADER_PAGE_ID = 0;
   static constexpr page_id_t FIRST_GAM_PAGE_ID = 1; // Since first page is database header page always.
   
-  // Metadata pool: shared extent(s) for IAM pages and other metadata
-  // First metadata pool starts at extent 1 (pages 8-15), page 8 is pool header
-  static constexpr page_id_t FIRST_METADATA_POOL_PAGE_ID = 8;
+  // Shared extent(s) for IAM pages and other metadata
+  // First shared extent starts at extent 1 (pages 8-15), page 8 is directory header
+  static constexpr page_id_t FIRST_SHARED_EXTENT_PAGE_ID = 8;
   
   // GAMPage layout: next_page_id (4 bytes) + first_free_hint (2 bytes) + bitmap
   static constexpr size_t GAM_BITMAP_ARRAY_SIZE = PAGE_SIZE - 6; // 4 bytes PAGE_ID + 2 bytes hint
@@ -43,8 +43,8 @@ namespace letty {
   static constexpr size_t IAM_PAGE_HEADER_SIZE = 8;
   static constexpr size_t IAM_MAX_EXTENTS = (PAGE_SIZE - IAM_PAGE_HEADER_SIZE) / sizeof(uint32_t); // 1022 extents
   
-  // Metadata pool: 7 slots available per pool extent (slot 0 is header)
-  static constexpr size_t METADATA_POOL_SLOTS = EXTENT_SIZE - 1; // 7 slots
+  // Shared extent: 7 slots available per extent (slot 0 is directory header)
+  static constexpr size_t SHARED_EXTENT_SLOTS = EXTENT_SIZE - 1; // 7 slots
 
   // Default buffer pool size (number of page frames)
   static constexpr size_t DEFAULT_POOL_SIZE = 256;

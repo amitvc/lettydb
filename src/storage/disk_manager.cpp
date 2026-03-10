@@ -10,7 +10,9 @@
 namespace letty {
 DiskManager::DiskManager(std::string db_file) : file_name_(std::move(db_file)) {
   assert(!file_name_.empty() && "Database file path cannot be empty");
-  mode_t mode = S_IRUSR | S_IWUSR; // 0600
+  // Open with read/write permissions for the owner only (0600).
+  // This prevents other users on the system from reading or
+  mode_t mode = S_IRUSR | S_IWUSR;
   fd_ = open(file_name_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, mode);
   if (fd_ == -1) {
 	throw std::runtime_error("FATAL: Failed to create or open database file: " + file_name_ + " error no : ( " + std::strerror(errno) + ")");

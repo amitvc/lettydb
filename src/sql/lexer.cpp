@@ -10,7 +10,6 @@
 #include "lexer.h"
 #include "token_type_utils.h"
 #include "utils.h"
-#include <regex>
 namespace letty {
 
     /**

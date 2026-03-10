@@ -100,8 +100,12 @@ class BufferPoolManager {
    */
   bool delete_page(page_id_t page_id);
 
-  /** @brief Returns the current database file size in pages. */
-  page_id_t get_file_size_in_pages() { return disk_manager_.get_file_size_in_pages(); }
+  /** @brief Returns the current database file size in pages.
+   *
+   **/
+  inline page_id_t get_file_size_in_pages() {
+	return disk_manager_.get_file_size_in_pages();
+  }
 
   /** @brief Returns the configured pool size. */
   size_t get_pool_size() const { return pool_size_; }

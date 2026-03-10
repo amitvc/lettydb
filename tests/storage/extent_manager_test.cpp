@@ -62,7 +62,7 @@ TEST_F(ExtentManagerTest, TestInitialization) {
   // File size is now 2 extents (extent 0 + metadata pool extent 1)
   EXPECT_EQ(disk_manager->get_file_size_in_pages(), 2 * EXTENT_SIZE);
   EXPECT_EQ(header->gam_page_id, FIRST_GAM_PAGE_ID);
-  EXPECT_EQ(header->metadata_pool_page_id, FIRST_METADATA_POOL_PAGE_ID);
+  EXPECT_EQ(header->shared_extent_page_id, FIRST_SHARED_EXTENT_PAGE_ID);
   // sys_tables and sys_columns IAM pages are dynamically allocated (INVALID initially)
   EXPECT_EQ(header->sys_tables_iam_page, INVALID_PAGE_ID);
   EXPECT_EQ(header->sys_columns_iam_page, INVALID_PAGE_ID);

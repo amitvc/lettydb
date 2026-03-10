@@ -16,12 +16,45 @@ void CatalogManager::init() {
   if (!header_page) return;
 
   auto* header = reinterpret_cast<const DatabaseHeader*>(header_page->get_data());
-  bool needs_bootstrap = (header->sys_tables_iam_page == INVALID_PAGE_ID);
+  sys_tables_iam_ = header->sys_tables_iam_page;
+  sys_columns_iam_ = header->sys_columns_iam_page;
   buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
 
-  if (needs_bootstrap) {
+  if (sys_tables_iam_ == INVALID_PAGE_ID) {
     bootstrap();
   }
+
+  // Eagerly load all tables into the cache
+  load_all_tables();
+}
+
+void CatalogManager::load_all_tables() {
+    // Scan sys_columns once and group by table_oid to avoid an O(N) scan per table.
+    std::unordered_map<uint32_t, std::vector<Column>> columns_by_oid;
+    if (sys_columns_iam_ != INVALID_PAGE_ID) {
+        Schema sc_schema = sys_columns_schema();
+        for (const auto& col_row : scan_system_table(sys_columns_iam_, sc_schema)) {
+            uint32_t table_oid = static_cast<uint32_t>(std::get<int32_t>(col_row.get_value(0)));
+            columns_by_oid[table_oid].emplace_back(
+                std::get<std::string>(col_row.get_value(1)),
+                static_cast<DataType>(std::get<int32_t>(col_row.get_value(2))),
+                static_cast<uint16_t>(std::get<int32_t>(col_row.get_value(3))),
+                static_cast<uint16_t>(std::get<int32_t>(col_row.get_value(4)))
+            );
+        }
+    }
+
+    Schema st_schema = sys_tables_schema();
+    for (const auto& row : scan_system_table(sys_tables_iam_, st_schema)) {
+        uint32_t oid = static_cast<uint32_t>(std::get<int32_t>(row.get_value(0)));
+        std::string name = std::get<std::string>(row.get_value(1));
+        page_id_t iam = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
+
+        auto it = columns_by_oid.find(oid);
+        std::vector<Column> cols = (it != columns_by_oid.end()) ? std::move(it->second) : std::vector<Column>{};
+
+        table_cache_.emplace(name, TableMetadata{oid, name, Schema(std::move(cols)), iam});
+    }
 }
 
 void CatalogManager::bootstrap() {
@@ -31,16 +64,19 @@ void CatalogManager::bootstrap() {
     }
     auto* header = reinterpret_cast<DatabaseHeader*>(header_page->get_data());
 
-    // Initialize metadata pool at the designated page
-    iam_manager_.init_metadata_pool(header->metadata_pool_page_id);
+    // Initialize shared extent at the designated page
+    iam_manager_.init_shared_extent(header->shared_extent_page_id);
 
-    page_id_t sys_tables_iam = iam_manager_.create_iam_chain();
-    page_id_t sys_columns_iam = iam_manager_.create_iam_chain();
+    page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME);
+    page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME);
 
-    // Update header in-place
+    // Update header in-place and cache
     header->sys_tables_iam_page = sys_tables_iam;
     header->sys_columns_iam_page = sys_columns_iam;
     buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
+
+    sys_tables_iam_ = sys_tables_iam;
+    sys_columns_iam_ = sys_columns_iam;
 
     page_id_t sys_tables_first_page = iam_manager_.allocate_extent_for_table(sys_tables_iam);
     page_id_t sys_columns_first_page = iam_manager_.allocate_extent_for_table(sys_columns_iam);
@@ -61,52 +97,21 @@ void CatalogManager::bootstrap() {
     buffer_pool_.unpin_page(sys_columns_first_page, true);
 
     // Insert the metadata for sys_tables AND sys_columns INTO sys_tables
-    Schema st_schema = sys_tables_schema();
-    char buf[PAGE_SIZE];
-    uint32_t data_size;
-
-    // sys_tables entry for itself
-    Tuple st_tuple({static_cast<int32_t>(SYS_TABLES_TABLE_OID),
-                    std::string("sys_tables"),
-                    static_cast<int32_t>(sys_tables_iam),
-                    static_cast<int32_t>(4)});
-  st_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
-    insert_into_table(sys_tables_iam, buf, data_size);
-
-    // sys_tables entry for sys_columns
-    Tuple sc_tuple({static_cast<int32_t>(SYS_COLUMNS_TABLE_OID),
-                    std::string("sys_columns"),
-                    static_cast<int32_t>(sys_columns_iam),
-                    static_cast<int32_t>(5)});
-  sc_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
-    insert_into_table(sys_tables_iam, buf, data_size);
+    insert_sys_table_record({SYS_TABLES_TABLE_OID, SYS_TABLES_NAME, sys_tables_iam, SYS_TABLES_COLUMN_COUNT});
+    insert_sys_table_record({SYS_COLUMNS_TABLE_OID, SYS_COLUMNS_NAME, sys_columns_iam, SYS_COLUMNS_COLUMN_COUNT});
 
     // Insert column definitions into sys_columns
+    Schema st_schema = sys_tables_schema();
+    for (const auto& col : st_schema.get_columns()) {
+        insert_sys_column_record(SYS_TABLES_TABLE_OID, col);
+    }
     Schema sc_schema = sys_columns_schema();
-
-    // Helper lambda to serialize and insert a sys_columns row
-    auto insert_col = [&](int32_t table_oid, const std::string& col_name,
-                          int32_t type, int32_t length, int32_t offset) {
-        Tuple col_tuple({table_oid, col_name, type, length, offset});
-	  col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size);
-        insert_into_table(sys_columns_iam, buf, data_size);
-    };
-
-    // Columns for sys_tables (offsets are sequential for Tuple format)
-    insert_col(SYS_TABLES_TABLE_OID, "oid",           static_cast<int32_t>(DataType::INTEGER), 4, 0);
-    insert_col(SYS_TABLES_TABLE_OID, "name",          static_cast<int32_t>(DataType::VARCHAR), MAX_NAME_LENGTH, 4);
-    insert_col(SYS_TABLES_TABLE_OID, "iam_page_id", static_cast<int32_t>(DataType::INTEGER), 4, 36);
-    insert_col(SYS_TABLES_TABLE_OID, "column_count",  static_cast<int32_t>(DataType::INTEGER), 4, 40);
-
-    // Columns for sys_columns
-    insert_col(SYS_COLUMNS_TABLE_OID, "table_oid", static_cast<int32_t>(DataType::INTEGER), 4, 0);
-    insert_col(SYS_COLUMNS_TABLE_OID, "name",      static_cast<int32_t>(DataType::VARCHAR), MAX_NAME_LENGTH, 4);
-    insert_col(SYS_COLUMNS_TABLE_OID, "type",      static_cast<int32_t>(DataType::INTEGER), 4, 36);
-    insert_col(SYS_COLUMNS_TABLE_OID, "length",    static_cast<int32_t>(DataType::INTEGER), 4, 40);
-    insert_col(SYS_COLUMNS_TABLE_OID, "offset",    static_cast<int32_t>(DataType::INTEGER), 4, 44);
+    for (const auto& col : sc_schema.get_columns()) {
+        insert_sys_column_record(SYS_COLUMNS_TABLE_OID, col);
+    }
 }
 
-uint16_t CatalogManager::get_next_oid() {
+uint32_t CatalogManager::get_next_oid() {
     Page* header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
     if (!header_page) {
         throw std::runtime_error("Failed to fetch header page for OID allocation");
@@ -153,20 +158,6 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
     return true;
 }
 
-std::pair<page_id_t, page_id_t> CatalogManager::get_system_iam_pages() {
-    Page* header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!header_page) {
-        return {INVALID_PAGE_ID, INVALID_PAGE_ID};
-    }
-
-    auto* db_header = reinterpret_cast<const DatabaseHeader*>(header_page->get_data());
-    page_id_t sys_tables_iam = db_header->sys_tables_iam_page;
-    page_id_t sys_columns_iam = db_header->sys_columns_iam_page;
-    buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
-
-    return {sys_tables_iam, sys_columns_iam};
-}
-
 std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const Schema& schema) {
     std::vector<Tuple> results;
 
@@ -206,122 +197,84 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
     return results;
 }
 
-const TableMetadata* CatalogManager::get_table(const std::string& name) {
-    auto cache_it = table_cache_.find(name);
-    if (cache_it != table_cache_.end()) {
-        return &cache_it->second;
-    }
-
-    auto [sys_tables_iam, sys_columns_iam] = get_system_iam_pages();
-    if (sys_tables_iam == INVALID_PAGE_ID) {
-        return nullptr;
-    }
-
-    // Find matching table in sys_tables
+bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
     Schema st_schema = sys_tables_schema();
-    auto table_rows = scan_system_table(sys_tables_iam, st_schema);
+    char buf[PAGE_SIZE];
+    uint32_t data_size;
 
-    uint32_t found_oid = 0;
-    page_id_t found_iam_page_id = INVALID_PAGE_ID;
-    bool found = false;
+    Tuple table_tuple({static_cast<int32_t>(record.oid),
+                       record.table_name,
+                       static_cast<int32_t>(record.iam_page_id),
+                       static_cast<int32_t>(record.column_count)});
+    table_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
 
-    for (const auto& row : table_rows) {
-        std::string table_name = std::get<std::string>(row.get_value(1));
-        if (name == table_name) {
-            found_oid = static_cast<uint32_t>(std::get<int32_t>(row.get_value(0)));
-            found_iam_page_id = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
-            found = true;
-            break;
-        }
-    }
+    return insert_into_table(sys_tables_iam_, buf, data_size);
+}
 
-    if (!found) return nullptr;
-
-    // Collect columns for this table from sys_columns
+bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& col) {
     Schema sc_schema = sys_columns_schema();
-    auto col_rows = scan_system_table(sys_columns_iam, sc_schema);
+    char buf[PAGE_SIZE];
+    uint32_t data_size;
 
-    std::vector<Column> column_list;
-    for (const auto& col_row : col_rows) {
-        auto col_table_oid = static_cast<uint32_t>(std::get<int32_t>(col_row.get_value(0)));
-        if (col_table_oid == found_oid) {
-            std::string col_name = std::get<std::string>(col_row.get_value(1));
-            auto col_type = static_cast<DataType>(std::get<int32_t>(col_row.get_value(2)));
-            auto col_length = static_cast<uint16_t>(std::get<int32_t>(col_row.get_value(3)));
-            auto col_offset = static_cast<uint16_t>(std::get<int32_t>(col_row.get_value(4)));
-            column_list.emplace_back(col_name, col_type, col_length, col_offset);
-        }
+    Tuple col_tuple({static_cast<int32_t>(table_oid),
+                     col.get_name(),
+                     static_cast<int32_t>(col.get_type()),
+                     static_cast<int32_t>(col.get_length()),
+                     static_cast<int32_t>(col.get_offset())});
+    col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size);
+    return insert_into_table(sys_columns_iam_, buf, data_size);
+}
+
+
+bool CatalogManager::table_exists(const std::string& name) {
+    return table_cache_.find(name) != table_cache_.end();
+}
+
+const TableMetadata* CatalogManager::get_table(const std::string& name) {
+    auto it = table_cache_.find(name);
+    if (it != table_cache_.end()) {
+        return &it->second;
     }
-
-    // Build metadata, cache, and return
-    TableMetadata metadata;
-    metadata.oid = found_oid;
-    metadata.name = name;
-    metadata.iam_page_id = found_iam_page_id;
-    metadata.schema = Schema(column_list);
-
-    auto [it, _] = table_cache_.emplace(name, std::move(metadata));
-    return &it->second;
+    return nullptr;
 }
 
 bool CatalogManager::create_table(const std::string& name, const Schema& schema) {
-    if (get_table(name) != nullptr) {
+    if (table_exists(name)) {
         return false;
     }
 
+    if (sys_tables_iam_ == INVALID_PAGE_ID) return false;
+
     uint16_t next_oid = get_next_oid();
 
-    page_id_t new_iam = iam_manager_.create_iam_chain();
+    page_id_t new_iam = iam_manager_.create_iam_chain(name);
     if (new_iam == INVALID_PAGE_ID) {
         return false;
     }
 
-    auto [sys_tables_iam, sys_columns_iam] = get_system_iam_pages();
-    if (sys_tables_iam == INVALID_PAGE_ID) return false;
-
-    // Insert into sys_tables
-    char buf[PAGE_SIZE];
-    uint32_t data_size;
-    Schema st_schema = sys_tables_schema();
-
-    Tuple table_tuple({static_cast<int32_t>(next_oid),
-                       name,
-                       static_cast<int32_t>(new_iam),
-                       static_cast<int32_t>(schema.get_columns().size())});
-  table_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size);
-
-    if (!insert_into_table(sys_tables_iam, buf, data_size)) {
+    if (!insert_sys_table_record({next_oid, name, new_iam, static_cast<int32_t>(schema.get_columns().size())})) {
         std::cerr << "Failed to insert table record into sys_tables" << std::endl;
         return false;
     }
 
-    // Insert columns into sys_columns
-    Schema sc_schema = sys_columns_schema();
-    const auto& columns = schema.get_columns();
-    for (const auto& col : columns) {
-        Tuple col_tuple({static_cast<int32_t>(next_oid),
-                         col.get_name(),
-                         static_cast<int32_t>(col.get_type()),
-                         static_cast<int32_t>(col.get_length()),
-                         static_cast<int32_t>(col.get_offset())});
-	  col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size);
-
-        if (!insert_into_table(sys_columns_iam, buf, data_size)) {
+    for (const auto& col : schema.get_columns()) {
+        if (!insert_sys_column_record(next_oid, col)) {
             std::cerr << "Failed to insert column record into sys_columns" << std::endl;
             return false;
         }
     }
 
-    // Cache so subsequent lookups skip the disk scan
-    TableMetadata cached_meta;
-    cached_meta.oid = next_oid;
-    cached_meta.name = name;
-    cached_meta.schema = schema;
-    cached_meta.iam_page_id = new_iam;
-    table_cache_[name] = std::move(cached_meta);
+    // Cache the newly created table directly
+    table_cache_.emplace(name, TableMetadata{
+        next_oid,
+        name,
+        schema,
+        new_iam
+    });
 
     return true;
 }
+
 
 Schema CatalogManager::sys_tables_schema() {
     // {oid INT, name VARCHAR(32), iam_page_id INT, column_count INT}

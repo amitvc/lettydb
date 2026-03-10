@@ -12,7 +12,7 @@ namespace letty {
  * @brief Manages Index Allocation Maps (IAM) for tables using list-based extent tracking.
  *
  * Each table has an IAM page that stores a list of extent IDs belonging to that table.
- * IAM pages are allocated from a shared metadata pool to minimize space waste.
+ * IAM pages are allocated from a shared extent to minimize space waste.
  *
  * All page access goes through BufferPoolManager. No direct DiskManager calls.
  */
@@ -22,10 +22,11 @@ class IamManager {
 
   /**
    * @brief Creates a new IAM chain for a table.
-   * Allocates a page from the metadata pool and initializes it as an empty IAMPage.
+   * Allocates a page from the shared extent and initializes it as an empty IAMPage.
+   * @param table_name Table name for which the IAM chain is being created.
    * @return The Page ID of the new IAM page, or INVALID_PAGE_ID if failed.
    */
-  page_id_t create_iam_chain();
+  page_id_t create_iam_chain(const std::string &table_name);
 
   /**
    * @brief Allocates a data extent for a table and adds it to the IAM.
@@ -38,41 +39,39 @@ class IamManager {
 
   /**
    * @brief Finds a data page with sufficient free space within a table's extents.
-   * Iterates through the extent list in the IAM and checks each page for space.
+   *
+   * Strategy (in order):
+   *  1. Check the cached hint page for this table.
+   *  2. Scan forward within the hint's extent.
+   *  3. Full IAM chain scan (first-insert path only).
    *
    * @param iam_head_page_id The IAM page for the table.
    * @param required_space The minimum free space needed (tuple size + slot overhead).
-   * @return The Page ID of a page with enough space, or INVALID_PAGE_ID if none found.
+   * @return Page ID of a suitable page, or INVALID_PAGE_ID if none exists.
+   *         INVALID_PAGE_ID means the caller must allocate a new extent.
    */
   page_id_t find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space);
 
   /**
-   * @brief Allocates a page from the metadata pool.
-   * Used for IAM pages and other metadata.
-   * @return The Page ID of the allocated metadata page, or INVALID_PAGE_ID if failed.
-   */
-  page_id_t allocate_metadata_page();
-
-  /**
-   * @brief Initializes the first metadata pool extent.
+   * @brief Initializes the first shared extent.
    * Called during database bootstrap.
-   * @param pool_page_id The page ID where the metadata pool should start.
+   * @param pool_page_id The page ID where the shared extent should start.
    */
-  void init_metadata_pool(page_id_t pool_page_id);
+  void init_shared_extent(page_id_t pool_page_id);
 
  private:
   BufferPoolManager& buffer_pool_;
   ExtentManager& extent_manager_;
 
   /** Cached from header page on first access. Never changes after init. */
-  page_id_t metadata_pool_page_id_ = INVALID_PAGE_ID;
+  page_id_t shared_extent_page_id_ = INVALID_PAGE_ID;
 
   /** Per-table hint: iam_head_page_id → last known page with free space.
    *  Avoids O(n) linear scan on every INSERT in the common (append) case. */
-  std::unordered_map<page_id_t, page_id_t> last_page_hint_;
+  std::unordered_map<page_id_t, page_id_t> table_page_hints_;
 
-  /** Loads metadata_pool_page_id_ from header if not yet cached. */
-  page_id_t get_metadata_pool_page_id();
+  /** Loads shared_extent_page_id_ from header if not yet cached. */
+  page_id_t get_shared_extent_page_id();
 
   // ——— find_page_with_space decomposition ———
 
@@ -87,8 +86,30 @@ class IamManager {
 
   // ——— allocate_metadata_page decomposition ———
 
+  /**
+   * @brief Allocates a page from the shared extent.
+   * Used internally by create_iam_chain.
+   * @return The Page ID of the allocated metadata page, or INVALID_PAGE_ID if failed.
+   */
+  page_id_t allocate_shared_page();
+
   /** Allocates a new pool extent and links it to the current one. Returns new pool page ID or INVALID_PAGE_ID. */
-  page_id_t extend_metadata_pool(MetadataPoolDirectoryPage* current_header, page_id_t current_pool_page);
+  page_id_t extend_shared_extent(SharedExtentDirectoryPage* current_header, page_id_t current_pool_page);
+
+  // ——— shared helpers ———
+
+  /**
+   * @brief Fetches a page, checks if it has at least `required` free bytes, and unpins it.
+   * @return true if the page has enough space.
+   */
+  bool page_has_space(page_id_t page_id, uint32_t required);
+
+  /**
+   * @brief Allocates a new IAM page from the shared extent, appends extent_id to it,
+   *        and links it to prev_iam_page (if valid).
+   * @return Page ID of the new IAM page, or INVALID_PAGE_ID on failure.
+   */
+  page_id_t link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id);
 };
 
 }

@@ -6,7 +6,6 @@
 
 namespace letty {
 
-// Forward declaration
 struct DatabaseHeader;
 /**
  * @class ExtentManager
@@ -54,7 +53,9 @@ class ExtentManager {
    * @return true if deallocation succeeded, false if the page ID was invalid or an error occurred.
    */
   bool deallocate_extent(page_id_t start_page_id);
+
  private:
+
   /**
    * @brief Finds a free extent in the GAM page, marks it allocated.
    * @param gam_page Pointer to the GAM page data.
@@ -63,13 +64,22 @@ class ExtentManager {
   page_id_t allocate_extent_in_gam_page(GAMPage* gam_page);
 
   /**
-   * @brief Helper to perform the actual allocation once a free bit is found.
+   * @brief Marks bit_index as allocated in gam_page and returns the corresponding extent's first page ID.
+   * @param gam_page Pointer to the GAM page
+   * @param bit_index bit index that represents a free extent in the current gam page.
    */
-  page_id_t commit_extent_allocation(GAMPage* gam_page, size_t bit_index);
+  page_id_t claim_extent_at_bit(GAMPage* gam_page, size_t bit_index);
+
   /**
    * @brief Initializes a brand new database file.
    * This function is called by the constructor if it detects that the database
    * file is empty. It creates and writes the initial Header and GAM pages.
+   * - Page 0: Database Header
+   * - Page 1: GAM (Global Allocation Map)
+   * - Extent 0 (Pages 0-7) and 1 (Pages 8-15) reserved on disk.
+   *
+   * Note: IAM pages for sys_tables and sys_columns are allocated dynamically
+   * from the shared extent during CatalogManager::bootstrap()
    */
   void initialize_new_db();
 
@@ -79,6 +89,7 @@ class ExtentManager {
   // We keep track of the last known free GAM page so we don't need to scan each gam page to arrive at the free
   // gam page. This essentially removes the O(n) linear scan of all gam pages.
   page_id_t current_gam_page_id_ = FIRST_GAM_PAGE_ID;
+
   // The ordinal position (0-indexed) of current_gam_page_id_ in the GAM chain.
   // Note: This is very important as it is used for calculating page IDs when allocating extents.
   size_t current_gam_chain_index_ = 0;
@@ -96,5 +107,23 @@ class ExtentManager {
   bool create_and_link_new_gam();
 
   static void print_database_header(const DatabaseHeader *header);
+
+
+  /** Returns false and logs if start_page_id is not a valid, deallocatable extent. */
+  bool is_valid_extent_for_deallocation(page_id_t start_page_id) const;
+
+  /**
+   * @brief Walks the GAM chain to find the GAM page that owns the given index.
+   * @param gam_page_index Position of the target GAM page in the chain (0-indexed).
+   * @return Page ID of the target GAM page, or INVALID_PAGE_ID if chain is broken.
+   */
+  page_id_t find_gam_page_at_index(size_t gam_page_index);
+
+  /**
+   * @brief Clears the extent bit in the given GAM page and rewinds the allocation
+   *        cursor if the freed position is earlier than the current hint.
+   * @return true on success, false if the GAM page could not be fetched.
+   */
+  bool clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index);
 };
 }

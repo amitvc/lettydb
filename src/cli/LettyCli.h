@@ -47,8 +47,7 @@ private:
     void PrintHelp();
     
     void PrintResultTable(const std::vector<std::string>& column_names,
-                          const std::vector<class Tuple>& rows,
-                          const class Schema* schema);
+                          const std::vector<class Tuple>& rows);
 
     std::unique_ptr<DatabaseEngine> db_engine_;
 

@@ -1,8 +1,6 @@
 #pragma once
 
 #include <string>
-#include <optional>
-#include <utility>
 #include <vector>
 #include <memory>
 #include <unordered_map>
@@ -31,6 +29,18 @@ struct TableMetadata {
   // The storage layer follows this chain to find all extents (and their
   // data pages) that belong to the table.
   page_id_t iam_page_id;
+};
+
+/**
+ * @struct SysTableRecord
+ * @brief Represents a single row in the sys_tables system catalog table.
+ * Used to insert records into sys_tables without passing individual columns.
+ */
+struct SysTableRecord {
+  uint32_t oid;
+  std::string table_name;
+  page_id_t iam_page_id;
+  int32_t column_count;
 };
 
 /**
@@ -67,6 +77,13 @@ class CatalogManager {
    */
   const TableMetadata* get_table(const std::string& name);
 
+  /**
+   * @brief Checks if a table with the given name exists.
+   * @param name The name of the table.
+   * @return true if the table exists, false otherwise.
+   */
+  bool table_exists(const std::string& name);
+
   bool delete_table(const std::string &name);
 
   /** Schema for sys_tables: {oid INT, name VARCHAR(32), iam_page_id INT, column_count INT} */
@@ -85,16 +102,26 @@ class CatalogManager {
    **/
   std::unordered_map<std::string, TableMetadata> table_cache_;
 
+  /// Cached IAM page IDs for sys_tables and sys_columns.
+  /// Set once during init() or bootstrap() and never change.
+  page_id_t sys_tables_iam_ = INVALID_PAGE_ID;
+  page_id_t sys_columns_iam_ = INVALID_PAGE_ID;
+
   /**
    *  Will bootstrap the database by creating sys_tables and sys_columns
    */
   void bootstrap();
 
   /**
+   * @brief Eagerly loads all table metadata from sys_tables and sys_columns into the cache.
+   */
+  void load_all_tables();
+
+  /**
    * @brief Gets the next available OID and increments the counter in the database header.
    * @return The next available OID for a new table.
    */
-  uint16_t get_next_oid();
+  uint32_t get_next_oid();
 
   /**
    * @brief Inserts a tuple into a table, automatically finding a page with space.
@@ -108,11 +135,12 @@ class CatalogManager {
    */
   bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
 
-  /**
-   * @brief Reads the database header and returns the IAM page IDs for system tables.
-   * @return (sys_tables_iam, sys_columns_iam), or (INVALID_PAGE_ID, INVALID_PAGE_ID) if uninitialized.
-   */
-  std::pair<page_id_t, page_id_t> get_system_iam_pages();
+  /** @brief Helper to insert a record into sys_tables. */
+  bool insert_sys_table_record(const SysTableRecord& record);
+
+  /** @brief Helper to insert a record into sys_columns. */
+  bool insert_sys_column_record(uint32_t table_oid, const Column& col);
+
 
   /**
    * @brief Scans a system table via its IAM chain and returns all tuples.

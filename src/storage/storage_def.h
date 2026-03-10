@@ -41,17 +41,17 @@ namespace letty {
  *  |   - Page ID of the Global Allocation Map (GAM)               |
  *  |   - Always page 1                                            |
  *  +--------------------------------------------------------------+ 20
- *  | metadata_pool_page_id (page_id_t)                            |
- *  |   - First page of the metadata pool extent                   |
+ *  | shared_extent_page_id (page_id_t)                            |
+ *  |   - First page of the shared extent                          |
  *  |   - Used to allocate IAM pages dynamically                   |
  *  +--------------------------------------------------------------+ 24
  *  | sys_tables_iam_page (page_id_t)                              |
  *  |   - IAM page for system catalog: sys_tables                  |
- *  |   - Dynamically allocated from metadata pool                 |
+ *  |   - Dynamically allocated from shared extent                 |
  *  +--------------------------------------------------------------+ 28
  *  | sys_columns_iam_page (page_id_t)                             |
  *  |   - IAM page for system catalog: sys_columns                 |
- *  |   - Dynamically allocated from metadata pool                 |
+ *  |   - Dynamically allocated from shared extent                 |
  *  +--------------------------------------------------------------+ 32
  *  | next_table_oid (uint16)                                      |
  *  |   - Next available OID for user tables                       |
@@ -77,13 +77,13 @@ struct DatabaseHeader {
   // The GAM page is always the 2nd page in the file. Value is 1 since page 0 is db header page.
   page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
-  // Points to the first metadata pool extent (for IAM pages and other metadata)
-  page_id_t metadata_pool_page_id = FIRST_METADATA_POOL_PAGE_ID;
+  // Points to the first shared extent (for IAM pages and other metadata)
+  page_id_t shared_extent_page_id = FIRST_SHARED_EXTENT_PAGE_ID;
 
-  // Points to the IAM page for the 'sys_tables' table (dynamically assigned from metadata pool)
+  // Points to the IAM page for the 'sys_tables' table (dynamically assigned from shared extent)
   page_id_t sys_tables_iam_page = INVALID_PAGE_ID;
 
-  // Points to the IAM page for the 'sys_columns' table (dynamically assigned from metadata pool)
+  // Points to the IAM page for the 'sys_columns' table (dynamically assigned from shared extent)
   page_id_t sys_columns_iam_page = INVALID_PAGE_ID;
 
   // Next available OID for user tables. System tables use OIDs 1-99.
@@ -139,10 +139,10 @@ struct GAMPage {
 };
 
 /**
- * @struct MetadataPoolDirectoryPage
- * @brief Directory page for a metadata pool extent.
+ * @struct SharedExtentDirectoryPage
+ * @brief Directory page for a shared extent.
  *
- * A metadata pool extent holds up to 7 metadata pages (IAM pages, etc.).
+ * A shared extent holds up to 7 metadata pages (IAM pages, etc.).
  * Page 0 of the extent is this directory; pages 1–7 are allocatable slots.
  *
  * @verbatim
@@ -160,7 +160,7 @@ struct GAMPage {
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
-struct MetadataPoolDirectoryPage {
+struct SharedExtentDirectoryPage {
   page_id_t next_pool_page = INVALID_PAGE_ID;  // 4 bytes
   uint8_t slots_bitmap = 0;                     // 1 byte - bits 1-7 represent slots
   char padding[PAGE_SIZE - 5];                  // Fill the rest of the page
@@ -172,7 +172,7 @@ struct MetadataPoolDirectoryPage {
    * @return Slot number (1-7) or NO_FREE_SLOT if no free slot.
    */
   uint8_t find_free_slot() const {
-    for (uint8_t i = 1; i <= METADATA_POOL_SLOTS; ++i) {
+    for (uint8_t i = 1; i <= SHARED_EXTENT_SLOTS; ++i) {
       if ((slots_bitmap & (1 << i)) == 0) {
         return i;
       }
