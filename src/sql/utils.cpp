@@ -1,11 +1,7 @@
-//
-// Created by Amit Chavan on 10/31/25.
-//
-
 #include "utils.h"
 #include <regex>
 
-namespace minidb {
+namespace letty {
 
     /**
      * @brief Checks if a given string matches the 'YYYY-MM-DD' date literal format.

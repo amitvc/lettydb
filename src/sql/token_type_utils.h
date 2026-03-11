@@ -1,12 +1,8 @@
-//
-// Created by Amit Chavan on 7/14/25.
-//
-
 #include <string>
 #include <unordered_map>
 #include "token.h"
 #pragma once
-namespace minidb {
+namespace letty {
     inline const std::unordered_map<std::string, TokenType>& keyword_map() {
         static const std::unordered_map<std::string, TokenType> map = {
                 {"SELECT", TokenType::SELECT},

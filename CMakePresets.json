@@ -1,0 +1,77 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/cmake-build-${presetName}",
+      "installDir": "${sourceDir}/cmake-install-${presetName}"
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "offline",
+      "inherits": "debug",
+      "displayName": "Offline Debug",
+      "description": "Debug build without fetching updates for dependencies (e.g., when offline)",
+      "cacheVariables": {
+        "FETCHCONTENT_UPDATES_DISCONNECTED": "ON",
+        "FETCHCONTENT_QUIET": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "offline",
+      "configurePreset": "offline"
+    },
+    {
+      "name": "docs",
+      "displayName": "Documentation",
+      "configurePreset": "debug",
+      "targets": ["docs"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "offline",
+      "configurePreset": "offline"
+    }
+  ]
+}

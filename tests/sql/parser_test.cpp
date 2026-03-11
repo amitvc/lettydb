@@ -1,8 +1,3 @@
-//
-// Created by Chavan, Amit on 8/1/25.
-//
-
-
 #include "sql/parser.h"
 
 #include <gtest/gtest.h>
@@ -10,7 +5,7 @@
 #include <vector>
 #include "sql/ast.h"
 
-using namespace minidb;
+using namespace letty;
 
 
 class ParserTest : public ::testing::Test {

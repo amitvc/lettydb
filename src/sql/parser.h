@@ -1,14 +1,10 @@
-//
-// Created by Amit Chavan on 7/15/25.
-//
-
 #pragma once
 #include <string>
 #include "lexer.h"
 #include "token.h"
 #include "ast.h"
 
-namespace minidb {
+namespace letty {
 
     /**
      * @class Parser

@@ -1,11 +1,8 @@
-//
-// Created by Amit Chavan on 6/9/25.
-//
 #pragma once
 #include <string>
 #include "iostream"
 
-namespace minidb {
+namespace letty {
     // Types of tokens we support
     enum class TokenType {
         // Basic types

@@ -1,15 +1,12 @@
-//
-// Created by Amit Chavan on 9/13/25.
-//
-
 #include <gtest/gtest.h>
 #include "storage/disk_manager.h"
 #include "storage/config.h"
 #include "storage/error_codes.h"
 #include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <memory>
-
+using namespace letty;
 class DiskManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -133,8 +130,11 @@ TEST_F(DiskManagerTest, OverwritePage) {
     
     // Write first data
     EXPECT_EQ(dm.write_page(0, first_data), IOResult::SUCCESS);
-    
-    // Overwrite with second data
+  	EXPECT_EQ(dm.read_page(0, read_data), IOResult::SUCCESS);
+    EXPECT_EQ(memcmp(first_data, read_data, PAGE_SIZE), 0);
+
+
+  // Overwrite with second data
     EXPECT_EQ(dm.write_page(0, second_data), IOResult::SUCCESS);
     
     // Read and verify second data

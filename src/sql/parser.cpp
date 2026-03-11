@@ -5,15 +5,13 @@
  * This file implements the Parser class which converts token streams into
  * Abstract Syntax Trees using recursive descent parsing. The parser handles
  * SELECT statements with proper operator precedence for expressions.
- * 
- * Created by Amit Chavan on 7/15/25.
  */
 
 #include "parser.h"
 #include <sstream>
 
 
-namespace minidb {
+namespace letty {
 
     SQLDate parse_date_literal(const std::string& s) {
         SQLDate date;

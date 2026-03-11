@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(minidb)
+project(lettydb)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -16,13 +16,14 @@ FetchContent_MakeAvailable(googletest)
 file(GLOB_RECURSE DB_SOURCES "*.cpp")
 file(GLOB_RECURSE DB_HEADERS "*.h")
 
-add_executable(minidb_test ${DB_SOURCES} ${DB_HEADERS})
+add_executable(lettydb_test ${DB_SOURCES} ${DB_HEADERS})
 
-target_link_libraries(minidb_test PRIVATE minidb
+target_link_libraries(lettydb_test PRIVATE lettydb
         gtest_main
+        gmock
+        gmock_main
 )
-
-target_include_directories(minidb_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(lettydb_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 include(GoogleTest)
-gtest_discover_tests(minidb_test)
+gtest_discover_tests(lettydb_test)

@@ -1,7 +1,3 @@
-//
-// Created by Amit Chavan on 7/15/25.
-//
-
 #pragma once
 
 #include <utility>
@@ -9,7 +5,7 @@
 #include <string>
 #include "token.h"
 
-namespace minidb {
+namespace letty {
 
     /**
      * @class Lexer
