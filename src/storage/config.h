@@ -28,11 +28,11 @@ namespace letty {
   static constexpr int INVALID_PAGE_ID = -1;
   static constexpr int INVALID_FRAME_ID = -1;
   static constexpr int HEADER_PAGE_ID = 0;
-  static constexpr page_id_t FIRST_GAM_PAGE_ID = 1; // Since first page is database header page always.
+  static constexpr page_id_t FIRST_GAM_PAGE_ID = 8; // First gam page is allocated in extent 1 which covers page 8-15
   
   // Shared extent(s) for IAM pages and other metadata
-  // First shared extent starts at extent 1 (pages 8-15), page 8 is directory header
-  static constexpr page_id_t FIRST_SHARED_EXTENT_PAGE_ID = 8;
+  // First shared extent starts at extent 2 (pages 16-23),
+  static constexpr page_id_t FIRST_SHARED_EXTENT_PAGE_ID = 16;
   
   // GAMPage layout: next_page_id (4 bytes) + first_free_hint (2 bytes) + bitmap
   static constexpr size_t GAM_BITMAP_ARRAY_SIZE = PAGE_SIZE - 6; // 4 bytes PAGE_ID + 2 bytes hint

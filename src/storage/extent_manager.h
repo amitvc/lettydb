@@ -74,9 +74,9 @@ class ExtentManager {
    * @brief Initializes a brand new database file.
    * This function is called by the constructor if it detects that the database
    * file is empty. It creates and writes the initial Header and GAM pages.
-   * - Page 0: Database Header
-   * - Page 1: GAM (Global Allocation Map)
-   * - Extent 0 (Pages 0-7) and 1 (Pages 8-15) reserved on disk.
+   * - Extent 0 (Pages 0-7):   Database Header (page 0), pages 1-7 reserved
+   * - Extent 1 (Pages 8-15):  GAM extent (first GAM page at page 8)
+   * - Extent 2 (Pages 16-23): Shared extent (for IAM pages)
    *
    * Note: IAM pages for sys_tables and sys_columns are allocated dynamically
    * from the shared extent during CatalogManager::bootstrap()
