@@ -49,23 +49,25 @@ void ExtentManager::initialize_new_db() {
   // They will be set during CatalogManager::bootstrap()
   buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
 
-  // Prepare the first GAM Page (Page 1)
+  // Prepare the first GAM Page (Page 8 — first page of extent 1)
   Page* gam_page_obj = buffer_pool_.new_page(FIRST_GAM_PAGE_ID);
   if (!gam_page_obj) {
     throw std::runtime_error("Failed to create GAM page during initialization");
   }
   auto* gam_page = new(gam_page_obj->get_data()) GAMPage();
 
-  // Mark Extent 0 as allocated (Header, GAM, pages 2-7 reserved)
+  // Mark reserved extents as allocated in the GAM bitmap
   Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
-  gam_bitmap.set(0);  // Extent 0 (pages 0-7)
-  gam_bitmap.set(1);  // Extent 1 (pages 8-15) - shared extent
+  gam_bitmap.set(0);  // Extent 0 (pages 0-7)   - database header
+  gam_bitmap.set(1);  // Extent 1 (pages 8-15)  - GAM pages
+  gam_bitmap.set(2);  // Extent 2 (pages 16-23) - shared extent (IAM pages)
   buffer_pool_.unpin_page(FIRST_GAM_PAGE_ID, true);
 
   // Writing the last page of each reserved extent forces the OS to extend the file
   // to cover all pages in that extent, so subsequent reads won't return garbage.
   constexpr page_id_t EXTENT_0_LAST_PAGE = EXTENT_SIZE - 1;        // page 7
   constexpr page_id_t EXTENT_1_LAST_PAGE = 2 * EXTENT_SIZE - 1;    // page 15
+  constexpr page_id_t EXTENT_2_LAST_PAGE = 3 * EXTENT_SIZE - 1;    // page 23
 
   Page* extent0_end = buffer_pool_.new_page(EXTENT_0_LAST_PAGE);
   if (!extent0_end) {
@@ -76,10 +78,17 @@ void ExtentManager::initialize_new_db() {
 
   Page* extent1_end = buffer_pool_.new_page(EXTENT_1_LAST_PAGE);
   if (!extent1_end) {
-    throw std::runtime_error("Failed to reserve extent 1 (shared extent) during initialization");
+    throw std::runtime_error("Failed to reserve extent 1 (GAM extent) during initialization");
   }
   buffer_pool_.flush_page(EXTENT_1_LAST_PAGE);
   buffer_pool_.unpin_page(EXTENT_1_LAST_PAGE, false);
+
+  Page* extent2_end = buffer_pool_.new_page(EXTENT_2_LAST_PAGE);
+  if (!extent2_end) {
+    throw std::runtime_error("Failed to reserve extent 2 (shared extent) during initialization");
+  }
+  buffer_pool_.flush_page(EXTENT_2_LAST_PAGE);
+  buffer_pool_.unpin_page(EXTENT_2_LAST_PAGE, false);
 }
 
 page_id_t ExtentManager::allocate_extent() {
@@ -101,6 +110,7 @@ page_id_t ExtentManager::allocate_extent() {
       page_id_t next_gam_id = gam_page->next_page_id;
       buffer_pool_.unpin_page(current_gam_page_id_, false);
 
+	  //
       if (next_gam_id == INVALID_PAGE_ID) break;
       advance_gam_cursor(next_gam_id);
   }
@@ -130,16 +140,12 @@ void ExtentManager::advance_gam_cursor(page_id_t next_gam_id) {
 bool ExtentManager::create_and_link_new_gam() {
   page_id_t current_gam_page_id = current_gam_page_id_;
 
-  // Logic to determine location of new GAM page
-  // New GAM pages pack into pages 2-7 of extent 0, then extend to new extents
+  // Next GAM page goes to the next sequential page.
+  // If it's still within the same extent as the current GAM page, use it directly.
+  // Otherwise, allocate a new extent at end of file.
   page_id_t candidate = current_gam_page_id + 1;
-
-  page_id_t new_gam_page_id = INVALID_PAGE_ID;
-  // GAM pages 2–7 are packed inside extent 0 (already reserved), so they don't
-  // need to protect their own extent. GAM pages beyond extent 0 live at the start
-  // of a new extent and must mark bit 0 to prevent that extent from being re-allocated.
-  bool shares_system_extent = (candidate < EXTENT_SIZE);
-  new_gam_page_id = shares_system_extent ? candidate : buffer_pool_.get_file_size_in_pages();
+  bool fits_in_current_extent = (candidate / EXTENT_SIZE == current_gam_page_id / EXTENT_SIZE);
+  page_id_t new_gam_page_id = fits_in_current_extent ? candidate : buffer_pool_.get_file_size_in_pages();
 
   // Initialize the new GAM page in the buffer pool
   Page* new_gam_page_obj = buffer_pool_.new_page(new_gam_page_id);
@@ -150,7 +156,9 @@ bool ExtentManager::create_and_link_new_gam() {
   auto* new_gam_page = new(new_gam_page_obj->get_data()) GAMPage();
   new_gam_page->next_page_id = INVALID_PAGE_ID;
 
-  if (!shares_system_extent) {
+  // GAM pages outside the dedicated GAM extent live at the start of a new extent
+  // and must self-protect by marking bit 0 to prevent that extent from being re-allocated.
+  if (!fits_in_current_extent) {
     Bitmap new_gam_bitmap(new_gam_page->bitmap, GAM_MAX_BITS);
     new_gam_bitmap.set(0);
   }

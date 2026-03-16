@@ -63,10 +63,11 @@ class BufferPoolManager {
   Page* fetch_page(page_id_t page_id);
 
   /**
-   * @brief Unpin a page, allowing it to be evicted.
+   * @brief Unpin a page allowing it to be evicted if the page cache is full.
    * @param page_id The page to unpin.
    * @param is_dirty If true, marks the page as dirty (modified).
    * @return false if the page is not in the pool.
+   * Note: If the page is marked as dirty when it is being evicted it is first written to the disk
    */
   bool unpin_page(page_id_t page_id, bool is_dirty);
 

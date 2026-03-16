@@ -22,7 +22,7 @@ std::string StorageInspector::get_summary() {
     j["total_pages"] = total_pages;
     
     // Scan GAM for allocation stats
-    // We start at page 1 and walk the chain
+    // We start at FIRST_GAM_PAGE_ID and walk the chain
     uint32_t allocated_extents = 0;
     uint32_t total_extents = 0;
     

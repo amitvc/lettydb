@@ -59,8 +59,8 @@ TEST_F(ExtentManagerTest, TestInitialization) {
   disk_manager->read_page(HEADER_PAGE_ID, header_buffer);
   auto *header = reinterpret_cast<DatabaseHeader *>(header_buffer);
   EXPECT_EQ(std::string(header->signature), DB_SIGNATURE);
-  // File size is now 2 extents (extent 0 + metadata pool extent 1)
-  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 2 * EXTENT_SIZE);
+  // File size is now 3 extents (extent 0: header, extent 1: GAM, extent 2: shared extent)
+  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
   EXPECT_EQ(header->gam_page_id, FIRST_GAM_PAGE_ID);
   EXPECT_EQ(header->shared_extent_page_id, FIRST_SHARED_EXTENT_PAGE_ID);
   // sys_tables and sys_columns IAM pages are dynamically allocated (INVALID initially)
@@ -72,23 +72,25 @@ TEST_F(ExtentManagerTest, TestInitialization) {
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
   auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
 
-  // Verify extent 0 and 1 are allocated (Header/GAM and metadata pool)
+  // Verify extent 0,1 & 2 are allocated
   Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
   EXPECT_TRUE(gam_bitmap.is_set(0));  // Extent 0: Header, GAM
-  EXPECT_TRUE(gam_bitmap.is_set(1));  // Extent 1: Metadata pool
+  EXPECT_TRUE(gam_bitmap.is_set(1));  // Extent 1: GAM page extent
+  EXPECT_TRUE(gam_bitmap.is_set(2));  // Extent 2: Shared extent
+
 }
 
 // Verify ExtentManager allocates pages correctly.
 TEST_F(ExtentManagerTest, TestAllocation) {
   auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-  // Allocate first available extent (extent 2, since 0=system/GAM, 1=metadata pool)
+  // Allocate first available extent (extent 3, since 0=system 1=gam extent, 2=shared iam extent)
   page_id_t extent1_start = extent_manager->allocate_extent();
-  EXPECT_EQ(extent1_start, 2 * EXTENT_SIZE);  // 16
+  EXPECT_EQ(extent1_start, 3 * EXTENT_SIZE);  // 16
 
   // Allocate second extent
   page_id_t extent2_start = extent_manager->allocate_extent();
-  EXPECT_EQ(extent2_start, 3 * EXTENT_SIZE);  // 24
+  EXPECT_EQ(extent2_start, 4 * EXTENT_SIZE);  // 32
 
   // Flush BPM so we can verify GAM on disk
   bpm->flush_all_pages();
@@ -98,20 +100,21 @@ TEST_F(ExtentManagerTest, TestAllocation) {
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
   auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
   Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
-  // Extents 0, 1 (system), 2, 3 are allocated
   EXPECT_TRUE(gam_bitmap.is_set(0));  // System
-  EXPECT_TRUE(gam_bitmap.is_set(1));  // Metadata pool
-  EXPECT_TRUE(gam_bitmap.is_set(2));  // First user allocation
-  EXPECT_TRUE(gam_bitmap.is_set(3));  // Second user allocation
+  EXPECT_TRUE(gam_bitmap.is_set(1));  // Gam pages extent
+  EXPECT_TRUE(gam_bitmap.is_set(2));  // Shared iam extent
+  EXPECT_TRUE(gam_bitmap.is_set(3));  // first user allocation
+  EXPECT_TRUE(gam_bitmap.is_set(4));  // second user allocation
+
 }
 
 TEST_F(ExtentManagerTest, TestPersistence) {
   {
 	auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-	// First allocation is extent 2 (page 16), since 0=system, 1=metadata pool
+	// First allocation is extent 3 (page 24), since 0=system, 1=GAM extent , 2=shared iam extent
 	page_id_t p1 = extent_manager->allocate_extent();
-	EXPECT_EQ(p1, 16);
+	EXPECT_EQ(p1, 24);
     // BPM destructor flushes all dirty pages when block ends
   }
 
@@ -119,9 +122,9 @@ TEST_F(ExtentManagerTest, TestPersistence) {
   {
 	auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-	// Next allocation should be extent 3 (page 24), keeping extent 2 allocated
+	// Next allocation should be extent 4 (page 32)
 	page_id_t p2 = extent_manager->allocate_extent();
-	EXPECT_EQ(p2, 24);
+	EXPECT_EQ(p2, 32);
 
 	// Flush and verify on disk
 	bpm->flush_all_pages();
@@ -132,16 +135,17 @@ TEST_F(ExtentManagerTest, TestPersistence) {
 	auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
 	Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
 	EXPECT_TRUE(gam_bitmap.is_set(0));  // System
-	EXPECT_TRUE(gam_bitmap.is_set(1));  // Metadata pool
-	EXPECT_TRUE(gam_bitmap.is_set(2));  // First user allocation
-	EXPECT_TRUE(gam_bitmap.is_set(3));  // Second user allocation
+	EXPECT_TRUE(gam_bitmap.is_set(1));  // GAM pages extent
+	EXPECT_TRUE(gam_bitmap.is_set(2));  // Shared iam extent
+	EXPECT_TRUE(gam_bitmap.is_set(3));  // First user allocation
+	EXPECT_TRUE(gam_bitmap.is_set(4));  // Second user allocation
   }
 }
 
 TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-  // Fill the first GAM page through BPM (it may be cached from init)
+  // Fill the first GAM page (page 8) through BPM (it may be cached from init)
   Page* gam_page_obj = bpm->fetch_page(FIRST_GAM_PAGE_ID);
   ASSERT_NE(gam_page_obj, nullptr);
   auto *gam_page = reinterpret_cast<GAMPage *>(gam_page_obj->get_data());
@@ -154,34 +158,34 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   // Flush so we can verify on disk
   bpm->flush_all_pages();
 
-  // File size should be 2 extents (we started with 2 due to metadata pool)
-  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 2 * EXTENT_SIZE);
+  // File size should still be 3 extents (new GAM page fits inside GAM extent 1)
+  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
 
-  // The new GAM page should be at Page 2 (first free in extent 0 after header and GAM)
+  // The new GAM page should be at page 9 (next page in GAM extent after page 8)
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
   auto *first_gam = reinterpret_cast<GAMPage *>(gam_buffer);
-  EXPECT_EQ(first_gam->next_page_id, 2); // Should point to Page 2
+  EXPECT_EQ(first_gam->next_page_id, 9); // Should point to page 9
 
   // Validate the new GAM page itself
   char new_gam_buffer[PAGE_SIZE];
-  disk_manager->read_page(2, new_gam_buffer);
+  disk_manager->read_page(9, new_gam_buffer);
   auto *new_gam_page = reinterpret_cast<GAMPage *>(new_gam_buffer);
 
   // Validate allocation return value
   // The new extent should be at the start of the range covered by the second GAM page
-  // Formula: MAX_BITS (extents per GAM) * EXTENT_SIZE (pages per extent)
+  // Formula: GAM_MAX_BITS (extents per GAM) * EXTENT_SIZE (pages per extent)
   EXPECT_EQ(new_extent_page_id, GAM_MAX_BITS * EXTENT_SIZE);
 }
 
 TEST_F(ExtentManagerTest, TestDeallocation) {
   auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-  // Allocate two extents (extents 2 and 3, since 0=system, 1=metadata pool)
-  page_id_t extent1_start = extent_manager->allocate_extent();  // 16
-  page_id_t extent2_start = extent_manager->allocate_extent();  // 24
-  EXPECT_EQ(extent1_start, 16);
-  EXPECT_EQ(extent2_start, 24);
+  // Allocate two extents (extents 3 and 4, since 0=header, 1=GAM, 2=shared)
+  page_id_t extent1_start = extent_manager->allocate_extent();  // 24
+  page_id_t extent2_start = extent_manager->allocate_extent();  // 32
+  EXPECT_EQ(extent1_start, 24);
+  EXPECT_EQ(extent2_start, 32);
 
   // Deallocate the first one
   extent_manager->deallocate_extent(extent1_start);
@@ -195,44 +199,43 @@ TEST_F(ExtentManagerTest, TestDeallocation) {
 
   Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
 
-  EXPECT_FALSE(gam_bitmap.is_set(2)); // Extent 2 should be free
-  EXPECT_TRUE(gam_bitmap.is_set(3));  // Extent 3 should still be allocated
+  EXPECT_FALSE(gam_bitmap.is_set(3)); // Extent 3 should be free
+  EXPECT_TRUE(gam_bitmap.is_set(4));  // Extent 4 should still be allocated
 
   // Now, allocate again - should reuse the deallocated one
   page_id_t reused_extent_start = extent_manager->allocate_extent();
   EXPECT_EQ(reused_extent_start, extent1_start);
 }
 
-TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenExtent0IsFull) {
+TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
   auto [disk_manager, bpm, extent_manager] = CreateStack();
 
-  // We need to fill up Extent 0 with GAM pages.
-  // Extent 0 layout:
-  // 0: Header
-  // 1: GAM 0
-  // 2-7: Available for additional GAM pages
+  // We need to fill up the GAM extent (extent 1, pages 8-15) with GAM pages.
+  // GAM extent layout:
+  // 8:  GAM page 0 (already created during init)
+  // 9-15: Available for additional GAM pages
 
-  page_id_t gam_pages[] = {1, 2, 3, 4, 5, 6, 7};
-  int num_gam_pages = 7;
+  page_id_t gam_pages[] = {8, 9, 10, 11, 12, 13, 14, 15};
+  int num_gam_pages = 8;
 
-  // Fill GAM page 1 (already exists, cached from init) and set chain
+  // Fill GAM page 8 (already exists, cached from init) and set chain
   Page* gam1_obj = bpm->fetch_page(FIRST_GAM_PAGE_ID);
   ASSERT_NE(gam1_obj, nullptr);
   auto* gam1 = reinterpret_cast<GAMPage*>(gam1_obj->get_data());
-  gam1->next_page_id = 2;
+  gam1->next_page_id = 9;
   std::memset(gam1->bitmap, 0xFF, sizeof(gam1->bitmap));
   bpm->unpin_page(FIRST_GAM_PAGE_ID, true);
 
-  // Create GAM pages 2-7 through BPM
-  // Note: Page 7 (EXTENT_SIZE-1) already exists in BPM from initialize_new_db()
-  // (extent 0 reservation page), so we fetch it instead of new_page.
+  // Create GAM pages 9-15 through BPM
+  // Note: Page 15 already exists in BPM from initialize_new_db()
+  // (GAM extent reservation page), so we fetch it instead of new_page.
   for (int i = 1; i < num_gam_pages; ++i) {
     page_id_t current = gam_pages[i];
     page_id_t next = (i == num_gam_pages - 1) ? INVALID_PAGE_ID : gam_pages[i + 1];
 
     Page* page_obj;
-    if (current == EXTENT_SIZE - 1) {
-      page_obj = bpm->fetch_page(current);  // Page 7 already in BPM
+    if (current == 2 * EXTENT_SIZE - 1) {
+      page_obj = bpm->fetch_page(current);  // Page 15 already in BPM
     } else {
       page_obj = bpm->new_page(current);
     }
@@ -243,35 +246,36 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenExtent0IsFull) {
     bpm->unpin_page(current, true);
   }
 
-  // Verify file size before (2 extents: 0 + metadata pool)
+  // Verify file size before (3 extents: header + GAM + shared)
   bpm->flush_all_pages();
-  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 2 * EXTENT_SIZE);
+  EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
 
   // Allocate!
-  // Should traverse 1->2->3->4->5->6->7->Full -> Create New GAM at page 16 (new extent).
+  // Should traverse 8->9->10->11->12->13->14->15->Full -> Create new GAM at EOF.
   page_id_t new_page_id = extent_manager->allocate_extent();
 
   // Flush to verify on disk
   bpm->flush_all_pages();
 
-  // Verify file size after - should have grown to include the new GAM page
-  // The new GAM page was placed at page 16, so file should be at least 17 pages
-  EXPECT_GE(disk_manager->get_file_size_in_pages(), 17);
+  // Verify file size after - should have grown to include the new GAM extent
+  EXPECT_GE(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE + 1);
 
-  // Verify New GAM at Page 16 (new extent since extent 0 is full)
+  // Verify new GAM at EOF (new extent since GAM extent is full)
+  // The new GAM was placed at what was the end of file (page 24)
+  page_id_t expected_new_gam_page = 3 * EXTENT_SIZE; // page 24
   char new_gam_buffer[PAGE_SIZE];
-  IOResult res = disk_manager->read_page(16, new_gam_buffer);
+  IOResult res = disk_manager->read_page(expected_new_gam_page, new_gam_buffer);
   EXPECT_EQ(res, IOResult::SUCCESS);
   auto *new_gam = reinterpret_cast<GAMPage *>(new_gam_buffer);
   EXPECT_EQ(new_gam->next_page_id, INVALID_PAGE_ID);
 
-  // Verify Link from Page 7
-  char page7_buffer[PAGE_SIZE];
-  disk_manager->read_page(7, page7_buffer);
-  auto *page7 = reinterpret_cast<GAMPage *>(page7_buffer);
-  EXPECT_EQ(page7->next_page_id, 16);
+  // Verify link from page 15 (last page in GAM extent) to new GAM
+  char page15_buffer[PAGE_SIZE];
+  disk_manager->read_page(15, page15_buffer);
+  auto *page15 = reinterpret_cast<GAMPage *>(page15_buffer);
+  EXPECT_EQ(page15->next_page_id, expected_new_gam_page);
 
-  // Return ID should be valid and huge
+  // Return ID should be valid and large
   EXPECT_GT(new_page_id, 0);
 }
 
@@ -396,7 +400,7 @@ TEST_F(ExtentManagerTest, TestDeallocateSystemExtent) {
 
   // First allocate a normal extent to ensure system is working
   page_id_t normal_extent = extent_manager->allocate_extent();
-  EXPECT_EQ(normal_extent, 2 * EXTENT_SIZE); // Should be extent 2 (page 16)
+  EXPECT_EQ(normal_extent, 3 * EXTENT_SIZE); // Should be extent 3 (page 24)
 
   // Try to deallocate system extent (extent 0)
   // This should not crash but behavior might be undefined
@@ -411,7 +415,7 @@ TEST_F(ExtentManagerTest, TestGAMCacheEfficiency) {
 
   // First allocation should cache the GAM page
   page_id_t extent1 = extent_manager->allocate_extent();
-  EXPECT_EQ(extent1, 2 * EXTENT_SIZE);  // First user extent is extent 2 (page 16)
+  EXPECT_EQ(extent1, 3 * EXTENT_SIZE);  // First user extent is extent 3 (page 24)
   allocated_extents.push_back(extent1);
 
   // Subsequent allocations in the same GAM should hit cache
@@ -459,7 +463,7 @@ TEST_F(ExtentManagerTest, TestAllocationLimits) {
 
   for (page_id_t extent : allocated_extents) {
 	EXPECT_EQ(extent % EXTENT_SIZE, 0); // Should be extent-aligned
-	EXPECT_GE(extent, EXTENT_SIZE); // Should not be system extent
+	EXPECT_GE(extent, 3 * EXTENT_SIZE); // Should not be a reserved extent (0=header, 1=GAM, 2=shared)
   }
 
   // Cleanup - deallocate all extents

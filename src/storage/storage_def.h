@@ -74,7 +74,7 @@ struct DatabaseHeader {
   // Page size stored for file validation and potential future support of variable page sizes.
   // Standalone tools can use this to read db pages.
   uint32_t page_size = PAGE_SIZE;
-  // The GAM page is always the 2nd page in the file. Value is 1 since page 0 is db header page.
+  // The first GAM page is always the 1st page in extent 1. Extent 1 covers pages 8 to 15.
   page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
   // Points to the first shared extent (for IAM pages and other metadata)
