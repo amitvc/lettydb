@@ -1423,8 +1423,15 @@ TEST_F(ParserTest, CreateIndexComposite) {
     ASSERT_NE(indexStmt, nullptr);
     EXPECT_EQ(indexStmt->index_name->name, "idx_composite");
     EXPECT_EQ(indexStmt->table_name->name, "users");
-    
+
     ASSERT_EQ(indexStmt->columns.size(), 2);
     EXPECT_EQ(indexStmt->columns[0]->name, "name");
     EXPECT_EQ(indexStmt->columns[1]->name, "age");
+}
+
+TEST_F(ParserTest, BoolLiteralInWhere) {
+    auto ast = parse_query("SELECT * FROM users WHERE id = 1 AND active = TRUE");
+    auto* select = dynamic_cast<SelectStatementNode*>(ast.get());
+    ASSERT_NE(select, nullptr);
+    EXPECT_NE(select->where_clause, nullptr);
 }

@@ -40,7 +40,7 @@ namespace letty {
              * @brief Constructs a Lexer with the given SQL input string
              * @param input The SQL query string to tokenize
              */
-            explicit Lexer(std::string_view  input) : input_(input), curr_pos(0) {}
+            explicit Lexer(std::string input) : input_(std::move(input)), curr_pos(0) {}
             
             /**
              * @brief Extracts and returns the next token from the input stream
@@ -57,8 +57,8 @@ namespace letty {
 			[[nodiscard]]
             std::vector<Token> tokenize();
         private:
-            std::string_view input_;         ///< The input SQL string being tokenized
-            size_t curr_pos;           ///< Current position in the input string
+            std::string input_;
+            size_t curr_pos;
 
             /**
              * @brief Looks at the current character without consuming it

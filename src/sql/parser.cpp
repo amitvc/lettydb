@@ -592,6 +592,14 @@ std::unique_ptr<ASTNode> Parser::parse_create_node() {
             advance();
             return std::make_unique<LiteralNode>(tokens[pos - 1].text);
         }
+        if (match(TokenType::TRUE)) {
+            advance();
+            return std::make_unique<LiteralNode>(true);
+        }
+        if (match(TokenType::FALSE)) {
+            advance();
+            return std::make_unique<LiteralNode>(false);
+        }
 
         if (match(TokenType::IDENTIFIER)) {
             advance();

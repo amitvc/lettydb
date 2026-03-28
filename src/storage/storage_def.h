@@ -39,7 +39,7 @@ namespace letty {
  *  +--------------------------------------------------------------+ 16
  *  | gam_page_id (page_id_t)                                      |
  *  |   - Page ID of the Global Allocation Map (GAM)               |
- *  |   - Always page 1                                            |
+ *  |   - Always page 8                                            |
  *  +--------------------------------------------------------------+ 20
  *  | shared_extent_page_id (page_id_t)                            |
  *  |   - First page of the shared extent                          |

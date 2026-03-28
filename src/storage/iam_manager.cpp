@@ -139,7 +139,7 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
   iam_page->extent_count = 0;
   buffer_pool_.unpin_page(iam_page_id, true);
 
-  LOG_STORAGE_INFO("Created new IAM chain for table {} at page {}", iam_page_id);
+  LOG_STORAGE_INFO("Created new IAM chain for table {} at page {}", table_name, iam_page_id);
   return iam_page_id;
 }
 
