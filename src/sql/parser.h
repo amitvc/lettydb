@@ -85,7 +85,6 @@ namespace letty {
              */
             std::unique_ptr<ExpressionNode> extract_column();
 
-            // Operations for constructing Select AST Node
             /**
              * @brief Parses a complete SELECT statement
              * @return SelectStatementNode with all parsed clauses

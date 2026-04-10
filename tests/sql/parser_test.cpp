@@ -1462,3 +1462,33 @@ TEST_F(ParserTest, CreateTableDefaultsToNullable) {
     EXPECT_TRUE(create->columns[0]->nullable);
     EXPECT_TRUE(create->columns[1]->nullable);
 }
+
+TEST_F(ParserTest, InsertNegativeInteger) {
+    auto ast = parse_query("INSERT INTO t VALUES (-5)");
+    auto* insert = dynamic_cast<InsertStatementNode*>(ast.get());
+    ASSERT_NE(insert, nullptr);
+    ASSERT_EQ(insert->values.size(), 1u);
+    ASSERT_EQ(insert->values[0].size(), 1u);
+    EXPECT_EQ(std::get<int64_t>(insert->values[0][0]->value), -5);
+}
+
+TEST_F(ParserTest, InsertNegativeFloat) {
+    auto ast = parse_query("INSERT INTO t VALUES (-3.14)");
+    auto* insert = dynamic_cast<InsertStatementNode*>(ast.get());
+    ASSERT_NE(insert, nullptr);
+    ASSERT_EQ(insert->values.size(), 1u);
+    ASSERT_EQ(insert->values[0].size(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(insert->values[0][0]->value), -3.14);
+}
+
+TEST_F(ParserTest, InsertMixedNegativeAndPositive) {
+    auto ast = parse_query("INSERT INTO t VALUES (-1, -2, 3, 3.14, -3.0)");
+    auto* insert = dynamic_cast<InsertStatementNode*>(ast.get());
+    ASSERT_NE(insert, nullptr);
+    ASSERT_EQ(insert->values[0].size(), 5u);
+    EXPECT_EQ(std::get<int64_t>(insert->values[0][0]->value), -1);
+    EXPECT_EQ(std::get<int64_t>(insert->values[0][1]->value), -2);
+    EXPECT_EQ(std::get<int64_t>(insert->values[0][2]->value), 3);
+  	EXPECT_DOUBLE_EQ(std::get<double>(insert->values[0][3]->value), 3.14);
+  	EXPECT_DOUBLE_EQ(std::get<double>(insert->values[0][4]->value), -3.0);
+}
