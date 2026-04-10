@@ -12,19 +12,8 @@ namespace letty {
      * 
      * The Parser class implements a recursive descent parser that converts
      * a sequence of tokens (produced by the Lexer) into an Abstract Syntax Tree (AST).
-     * It supports parsing SELECT statements with JOIN, WHERE, and expression clauses.
-     * 
-     * @par Supported SQL Statements:
-     * - SELECT with column lists or SELECT *
-     * - FROM clause with table references and aliases
-     * - JOIN clause with ON conditions
-     * - WHERE clause with complex boolean expressions
-     * 
-     * @par Expression Parsing:
-     * Uses operator precedence parsing for logical expressions:
-     * - OR expressions (lowest precedence)
-     * - AND expressions (higher precedence)
-     * - Comparison expressions (=, !=, <, >, <=, >=)
+     * Currently the parser supports CREATE, SELECT, INSERT statements. This class will be work in progress
+     * until we release the database.
      * 
      * @par Error Handling:
      * - Throws std::runtime_error for syntax errors
@@ -55,8 +44,8 @@ namespace letty {
             std::unique_ptr<ASTNode> parse();
 
         private:
-            std::vector<Token> tokens;  ///< Token stream to parse
-            int pos;                   ///< Current position in the token stream
+            std::vector<Token> tokens;
+            int pos;
 
             /**
              * @brief Consumes and returns the current token, advancing the position
@@ -138,8 +127,8 @@ namespace letty {
 
             // Future statement parsers (not yet implemented)
             std::unique_ptr<ASTNode> parse_insert_node();
-            std::unique_ptr<ASTNode> parse_delete_node();   ///< TODO: Parse DELETE statements
-            std::unique_ptr<ASTNode> parse_update_node();   ///< TODO: Parse UPDATE statements
+            std::unique_ptr<ASTNode> parse_delete_node();
+            std::unique_ptr<ASTNode> parse_update_node();
             std::unique_ptr<ASTNode> parse_create_node();
             std::unique_ptr<ASTNode> parse_create_table_node();
             std::unique_ptr<ASTNode> parse_create_index_node();

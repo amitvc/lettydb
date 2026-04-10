@@ -222,6 +222,7 @@ namespace letty {
             std::unique_ptr<IdentifierNode> name;
             TokenType type; // e.g., TokenType::INT, TokenType::VARCHAR or TokenType::BOOL
             int size = 0; // For VARCHAR data type.
+            bool nullable = true; // Default true: column is nullable unless NOT NULL is specified.
         };
 
         std::vector<std::unique_ptr<ColumnDefinition>> columns;
@@ -239,7 +240,4 @@ namespace letty {
         std::unique_ptr<IdentifierNode> table_name;
         std::vector<std::unique_ptr<IdentifierNode>> columns;
     };
-
-
-
-} // namespace letty
+}

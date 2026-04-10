@@ -8,8 +8,6 @@ namespace letty {
 TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager)
     : buffer_pool_(buffer_pool), iam_manager_(iam_manager), catalog_manager_(catalog_manager) {}
 
-// ——— Private helpers ———
-
 page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space) {
   page_id_t pid = iam_manager_.find_page_with_space(iam_head, needed_space);
   if (pid != INVALID_PAGE_ID) return pid;
@@ -66,8 +64,6 @@ void TableManager::scan_extent_tuples(uint32_t extent_id, const Schema& schema,
     buffer_pool_.unpin_page(data_page_id, false);
   }
 }
-
-// ——— Public API ———
 
 bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
   auto* meta = catalog_manager_.get_table(table_name);

@@ -3,8 +3,7 @@
  * @brief Implementation of the SQL parser that builds Abstract Syntax Tree for each type SQL query command.
  * 
  * This file implements the Parser class which converts token streams into
- * Abstract Syntax Trees using recursive descent parsing. The parser handles
- * SELECT statements with proper operator precedence for expressions.
+ * Abstract Syntax Trees using recursive descent parsing technique.
  */
 
 #include "parser.h"
@@ -272,6 +271,12 @@ std::unique_ptr<ASTNode> Parser::parse_create_node() {
 			}
 		  } else {
 			throw std::runtime_error("Unexpected Column type specified. Found " + peek().text);
+		  }
+
+		  if (match(TokenType::NOT)) {
+			advance();
+			ensure(TokenType::NULL_LITERAL, "Expected NULL after NOT");
+			columnDef->nullable = false;
 		  }
 
 		  if (match(TokenType::PRIMARY)) {

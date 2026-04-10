@@ -76,15 +76,6 @@ namespace letty {
         return  {TokenType::EOF_FILE, ""};
     }
 
-   /**
-    * @brief Parses comparison and equality operators
-    * 
-    * Handles both single-character operators (=, <, >) and two-character
-    * operators (!=, <=, >=). Uses lookahead to determine if a second
-    * character should be consumed.
-    * 
-    * @return Token representing the parsed operator
-    */
    Token Lexer::make_operator() {
         char first_char = advance(); // Consume the first character of the operator
 
@@ -116,13 +107,6 @@ namespace letty {
     }
 
 
-    /**
-     * @brief Helper method to create a token and advance the cursor
-     * 
-     * @param type The TokenType for the new token
-     * @param value The string representation of the token
-     * @return Newly created Token with the specified type and value
-     */
     Token Lexer::make_token(TokenType type, const std::string &value) {
         advance(); // Move cursor ahead
         return {type, value};
@@ -153,15 +137,6 @@ namespace letty {
         return {TokenType::STRING_LITERAL, value};
     }
 
-    /**
-     * @brief Parses integer literal tokens
-     * 
-     * Collects consecutive digit characters to form an integer literal.
-     * Currently only supports positive integers and floats - negative numbers are
-     * handled as a unary minus operator followed by a positive integer.
-     * 
-     * @return Token of type INT_LITERAL, FLOAT_LITERAL with the numeric string
-     */
     Token Lexer::make_numbers() {
         size_t start = curr_pos;
         bool is_float = false;
@@ -183,16 +158,6 @@ namespace letty {
         return {is_float ? TokenType::FLOAT_LITERAL : TokenType::INT_LITERAL, std::move(number)};
     }
 
-    /**
-     * @brief Parses SQL keywords and user-defined identifiers
-     * 
-     * Collects alphanumeric characters and underscores, then performs
-     * case-insensitive lookup in the keyword map. If found in the keyword
-     * map, returns the corresponding keyword token; otherwise returns an
-     * IDENTIFIER token.
-     * 
-     * @return Token of appropriate keyword type or IDENTIFIER
-     */
     Token Lexer::make_key_or_identifier() {
         // Use substr instead of char-by-char append
         size_t start = curr_pos;
@@ -206,8 +171,8 @@ namespace letty {
         std::transform(upper_text.begin(), upper_text.end(), upper_text.begin(),
                        [](unsigned char c){ return std::toupper(c); });
 
-        auto it = keyword_map().find(upper_text);
-        if (it != keyword_map().end()) {
+        auto it = keyword_map.find(upper_text);
+        if (it != keyword_map.end()) {
             return {it->second, std::move(text)};
         }
 
@@ -230,18 +195,8 @@ namespace letty {
         return curr_pos >= input_.size();
     }
 
-    /**
-     * @brief Tokenizes the entire input string into a vector
-     * 
-     * Repeatedly calls next_token() until EOF_FILE is encountered,
-     * collecting all tokens into a vector. The EOF_FILE token is included
-     * in the result.
-     * 
-     * @return Complete vector of tokens from the input string
-     */
     std::vector<Token> Lexer::tokenize() {
         std::vector<Token> tokens;
-        tokens.reserve(16);  // Typical INSERT has ~13 tokens
         Token token;
         do {
             token = next_token();
@@ -250,17 +205,6 @@ namespace letty {
         return tokens;
     }
 
-    /**
-     * @brief Error recovery method for unexpected characters
-     * 
-     * When an unrecognized character is encountered, this method:
-     * 1. Advances past the character
-     * 2. Returns an UNKNOWN token containing the character
-     * 
-     * This allows parsing to continue despite errors.
-     * 
-     * @return UNKNOWN token containing the unexpected character
-     */
     Token Lexer::handle_unexpected_character() {
         char unexpected_char = advance();
         

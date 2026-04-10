@@ -1,6 +1,8 @@
 #pragma once
 
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include "ast.h"
@@ -103,6 +105,18 @@ class Executor {
    * @brief Converts a TokenType (from parser) to a DataType (for storage).
    */
   DataType token_type_to_data_type(TokenType type);
+
+  /**
+   * @brief Builds a schema-position → value-position index for INSERT.
+   * @param column_names Named column list from the INSERT statement (may be empty).
+   * @param schema_columns Columns from the table schema.
+   * @param out_error Populated with an error message on failure.
+   * @return Map of schema_pos -> value_pos on success, empty optional on failure.
+   */
+  std::optional<std::unordered_map<size_t, size_t>> build_column_index(
+      const std::vector<std::unique_ptr<IdentifierNode>>& column_names,
+      const std::vector<Column>& schema_columns,
+      std::string& out_error);
 
   /**
    * @brief Converts an AST LiteralNode value to a storage Value.

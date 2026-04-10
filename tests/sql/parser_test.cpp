@@ -1435,3 +1435,30 @@ TEST_F(ParserTest, BoolLiteralInWhere) {
     ASSERT_NE(select, nullptr);
     EXPECT_NE(select->where_clause, nullptr);
 }
+
+TEST_F(ParserTest, CreateTableNotNullSetsNullableFalse) {
+    auto ast = parse_query("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))");
+    auto* create = dynamic_cast<CreateTableStatementNode*>(ast.get());
+    ASSERT_NE(create, nullptr);
+    ASSERT_EQ(create->columns.size(), 2u);
+    EXPECT_FALSE(create->columns[0]->nullable) << "id should be NOT NULL";
+    EXPECT_TRUE(create->columns[1]->nullable)  << "name should be nullable";
+}
+
+TEST_F(ParserTest, CreateTableAllColumnsNotNull) {
+    auto ast = parse_query("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50) NOT NULL)");
+    auto* create = dynamic_cast<CreateTableStatementNode*>(ast.get());
+    ASSERT_NE(create, nullptr);
+    ASSERT_EQ(create->columns.size(), 2u);
+    EXPECT_FALSE(create->columns[0]->nullable);
+    EXPECT_FALSE(create->columns[1]->nullable);
+}
+
+TEST_F(ParserTest, CreateTableDefaultsToNullable) {
+    auto ast = parse_query("CREATE TABLE t (id INT, name VARCHAR(50))");
+    auto* create = dynamic_cast<CreateTableStatementNode*>(ast.get());
+    ASSERT_NE(create, nullptr);
+    ASSERT_EQ(create->columns.size(), 2u);
+    EXPECT_TRUE(create->columns[0]->nullable);
+    EXPECT_TRUE(create->columns[1]->nullable);
+}

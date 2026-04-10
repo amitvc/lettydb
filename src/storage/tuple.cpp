@@ -15,8 +15,10 @@ bool Tuple::serialize(const Schema& schema, char* buf, uint32_t buf_size, uint32
   for (size_t i = 0; i < columns.size(); ++i) {
     const auto& col = columns[i];
     if (col.get_type() == DataType::VARCHAR) {
-      const auto& str = std::get<std::string>(values_[i]);
-      total_size += 2 + str.size();
+      size_t str_len = std::holds_alternative<std::string>(values_[i])
+                           ? std::get<std::string>(values_[i]).size()
+                           : 0;
+      total_size += 2 + str_len;
     } else {
       total_size += col.get_length();
     }
@@ -33,29 +35,31 @@ bool Tuple::serialize(const Schema& schema, char* buf, uint32_t buf_size, uint32
     const auto& col = columns[i];
     const auto& value = values_[i];
 
+    const bool is_null = std::holds_alternative<std::monostate>(value);
+
     switch (col.get_type()) {
       case DataType::INTEGER: {
-        int32_t int_val = std::get<int32_t>(value);
+        int32_t int_val = is_null ? 0 : std::get<int32_t>(value);
         std::memcpy(buf + offset, &int_val, sizeof(int32_t));
         offset += sizeof(int32_t);
         break;
       }
       case DataType::DOUBLE: {
-        double dbl_val = std::get<double>(value);
+        double dbl_val = is_null ? 0.0 : std::get<double>(value);
         std::memcpy(buf + offset, &dbl_val, sizeof(double));
         offset += sizeof(double);
         break;
       }
       case DataType::BOOLEAN: {
-        bool bool_val = std::get<bool>(value);
-		buf[offset] = bool_val ? 1 : 0;
+        buf[offset] = (!is_null && std::get<bool>(value)) ? 1 : 0;
         offset += 1;
         break;
       }
       case DataType::VARCHAR:
       case DataType::DATE:
       case DataType::TIMESTAMP: {
-        const auto& str = std::get<std::string>(value);
+        const std::string empty;
+        const auto& str = is_null ? empty : std::get<std::string>(value);
         if (col.get_type() == DataType::VARCHAR) {
           uint16_t len = static_cast<uint16_t>(str.size());
           std::memcpy(buf + offset, &len, sizeof(uint16_t));

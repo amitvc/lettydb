@@ -298,6 +298,16 @@ TEST_F(LexerTest, BooleanAndNullLiterals) {
   assert_tokens_equal(tokens, expected_tokens);
 }
 
+TEST_F(LexerTest, ConstructFromTemporaryString) {
+  auto make_query = []() { return std::string("SELECT * FROM users"); };
+  Lexer lexer(make_query());
+  auto tokens = lexer.tokenize();
+  EXPECT_EQ(tokens[0].type, TokenType::SELECT);
+  EXPECT_EQ(tokens[2].type, TokenType::FROM);
+  EXPECT_EQ(tokens[3].type, TokenType::IDENTIFIER);
+  EXPECT_EQ(tokens[3].text, "users");
+}
+
 TEST_F(LexerTest, ComplexOperators) {
   std::string query = "WHERE a != b AND c <= d;";
   Lexer lexer(query);

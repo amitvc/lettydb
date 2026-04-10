@@ -201,4 +201,51 @@ TEST_F(ExecutorTest, SelectSystemTablesAfterCreate) {
   EXPECT_GE(col_result.rows.size(), 11);
 }
 
-} // namespace letty
+TEST_F(ExecutorTest, InsertNamedColumnsOutOfOrder) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  // Insert a row but the column order is switched.
+  execute_sql("INSERT INTO t (name, id) VALUES ('alice', 1)");
+
+  auto result = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(result.success);
+  ASSERT_EQ(result.rows.size(), 1u);
+
+  const auto& row = result.rows[0];
+  EXPECT_EQ(std::get<int32_t>(row.get_value(0)), 1)  << "id column got wrong value";
+  EXPECT_EQ(std::get<std::string>(row.get_value(1)), "alice") << "name column got wrong value";
+}
+
+TEST_F(ExecutorTest, NotNullColumnRejectsOmittedValue) {
+  execute_sql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))");
+  auto result = execute_sql("INSERT INTO t (name) VALUES ('alice')");
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error_message.find("NOT NULL"), std::string::npos);
+}
+
+TEST_F(ExecutorTest, NullableColumnAllowsOmittedValue) {
+  execute_sql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))");
+  auto result = execute_sql("INSERT INTO t (id) VALUES (1)");
+  EXPECT_TRUE(result.success) << result.error_message;
+}
+
+TEST_F(ExecutorTest, NotNullColumnAcceptsValue) {
+  execute_sql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50) NOT NULL)");
+  auto result = execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')");
+  EXPECT_TRUE(result.success) << result.error_message;
+}
+
+TEST_F(ExecutorTest, InsertMoreColumnsThanSchema) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  auto result = execute_sql("INSERT INTO t (id, name, extra) VALUES (1, 'alice', 99)");
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error_message.find("more columns"), std::string::npos);
+}
+
+TEST_F(ExecutorTest, InsertDuplicateColumnNames) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  auto result = execute_sql("INSERT INTO t (id, id) VALUES (1, 2)");
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error_message.find("duplicate"), std::string::npos);
+}
+
+}

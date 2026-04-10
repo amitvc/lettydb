@@ -12,14 +12,11 @@ namespace letty {
  */
 class Column {
  public:
-  Column(std::string name, DataType type, uint16_t length, uint16_t offset)
-      : name_(std::move(name)), type_(type), length_(length), offset_(offset) {}
-      
-  // Helper for fixed length types where length is implied
-  Column(std::string name, DataType type, uint16_t offset)
-      : name_(std::move(name)), type_(type), offset_(offset), length_(fixed_length_of(type)) {
+  Column(std::string name, DataType type, uint16_t length, uint16_t offset, bool nullable = true)
+      : name_(std::move(name)), type_(type), length_(length), offset_(offset), nullable_(nullable) {}
 
-  }
+  Column(std::string name, DataType type, uint16_t offset)
+      : name_(std::move(name)), type_(type), offset_(offset), length_(fixed_length_of(type)), nullable_(true) {}
 
   static constexpr uint16_t fixed_length_of(DataType t) {
 	switch (t) {
@@ -38,12 +35,14 @@ class Column {
   DataType get_type() const { return type_; }
   uint16_t get_length() const { return length_; }
   uint16_t get_offset() const { return offset_; }
+  bool is_nullable() const { return nullable_; }
 
  private:
   std::string name_;
   DataType type_;
   uint16_t length_;
   uint16_t offset_;
+  bool nullable_ = true;
 };
 
 }

@@ -1,5 +1,6 @@
 #include "executor.h"
 #include "token.h"
+#include "common/logger.h"
 #include <iostream>
 
 namespace letty {
@@ -52,7 +53,7 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
       col_length = Column::fixed_length_of(data_type);
     }
     
-    columns.emplace_back(col_name, data_type, col_length, current_offset);
+    columns.emplace_back(col_name, data_type, col_length, current_offset, col_def->nullable);
     current_offset += col_length;
   }
   
@@ -63,6 +64,56 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
   }
   
   return ExecutionResult::ok();
+}
+
+std::optional<std::unordered_map<size_t, size_t>> Executor::build_column_index(
+    const std::vector<std::unique_ptr<IdentifierNode>>& column_names,
+    const std::vector<Column>& schema_columns,
+    std::string& out_error) {
+  // schema_column_pos -> value_column_pos
+  std::unordered_map<size_t, size_t> idx;
+
+  if (column_names.empty()) {
+    for (size_t i = 0; i < schema_columns.size(); ++i) {
+      idx[i] = i;
+    }
+    return idx;
+  }
+
+  if (column_names.size() > schema_columns.size()) {
+    out_error = "INSERT: more columns specified than exist in table schema";
+    return std::nullopt;
+  }
+
+  for (size_t vi = 0; vi < column_names.size(); ++vi) {
+    const std::string& col_name = column_names[vi]->name;
+    bool found = false;
+    for (size_t si = 0; si < schema_columns.size(); ++si) {
+      if (schema_columns[si].get_name() == col_name) {
+        idx[si] = vi;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      out_error = "INSERT: unknown column '" + col_name + "'";
+      return std::nullopt;
+    }
+  }
+
+  if (idx.size() != column_names.size()) {
+    out_error = "INSERT: duplicate column names in column list";
+    return std::nullopt;
+  }
+
+  for (size_t si = 0; si < schema_columns.size(); ++si) {
+    if (idx.find(si) == idx.end() && !schema_columns[si].is_nullable()) {
+      out_error = "INSERT: column '" + schema_columns[si].get_name() + "' is NOT NULL but has no value";
+      return std::nullopt;
+    }
+  }
+
+  return idx;
 }
 
 ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
@@ -85,15 +136,24 @@ ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
   std::vector<Tuple> tuples;
   tuples.reserve(node->values.size());
 
+  std::string index_error;
+  auto schema_to_value_idx = build_column_index(node->columnNames, schema_columns, index_error);
+  if (!schema_to_value_idx) {
+    return ExecutionResult::error(index_error);
+  }
+
+  size_t expected_value_count = node->columnNames.empty() ? schema_columns.size() : node->columnNames.size();
+
   for (const auto& row_values : node->values) {
-    if (row_values.size() != schema_columns.size()) {
+    if (row_values.size() != expected_value_count) {
       return ExecutionResult::error("INSERT: value count (" + std::to_string(row_values.size()) +
-                                    ") doesn't match column count (" + std::to_string(schema_columns.size()) + ")");
+                                    ") doesn't match column count (" + std::to_string(expected_value_count) + ")");
     }
 
     Tuple tuple;
-    for (size_t i = 0; i < row_values.size(); ++i) {
-      Value val = literal_to_value(row_values[i].get());
+    for (size_t si = 0; si < schema_columns.size(); ++si) {
+      auto it = schema_to_value_idx->find(si);
+      Value val = (it == schema_to_value_idx->end()) ? Value{std::monostate{}} : literal_to_value(row_values[it->second].get());
       tuple.add_value(val);
     }
     tuples.push_back(std::move(tuple));
