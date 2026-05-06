@@ -218,4 +218,57 @@ void BufferPoolManager::reset_cache_stats() {
   flushes_ = 0;
 }
 
+// --- PageGuard Implementation ---
+
+  PageGuard::PageGuard(PageGuard &&other) noexcept
+      : bpm_(other.bpm_), page_(other.page_), page_id_(other.page_id_), dirty_(other.dirty_) {
+    // Transfer ownership and nullify the source to prevent double-unpinning
+    other.bpm_ = nullptr;
+    other.page_ = nullptr;
+    other.page_id_ = INVALID_PAGE_ID;
+    other.dirty_ = false;
+  }
+
+  PageGuard &PageGuard::operator=(PageGuard &&other) noexcept {
+    if (this != &other) {
+      // Release existing resource before taking ownership of new one
+      drop();
+      bpm_ = other.bpm_;
+      page_ = other.page_;
+      page_id_ = other.page_id_;
+      dirty_ = other.dirty_;
+      
+      other.bpm_ = nullptr;
+      other.page_ = nullptr;
+      other.page_id_ = INVALID_PAGE_ID;
+      other.dirty_ = false;
+    }
+    return *this;
+  }
+
+  void PageGuard::drop() {
+    if (bpm_ != nullptr && page_id_ != INVALID_PAGE_ID) {
+      // Automatically call the manager's unpin logic
+      bpm_->unpin_page(page_id_, dirty_);
+    }
+    bpm_ = nullptr;
+    page_ = nullptr;
+    page_id_ = INVALID_PAGE_ID;
+    dirty_ = false;
+  }
+
+  // --- BufferPoolManager Guard APIs ---
+
+  PageGuard BufferPoolManager::fetch_page_guard(page_id_t page_id) {
+    // Wrap the standard fetch_page result in an RAII guard
+    Page *page = fetch_page(page_id);
+    return {this, page, page_id};
+  }
+
+  PageGuard BufferPoolManager::new_page_guard(page_id_t page_id) {
+    // Wrap the standard new_page result in an RAII guard
+    Page *page = new_page(page_id);
+    return {this, page, page_id};
+  }
+
 }  // namespace letty

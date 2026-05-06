@@ -14,6 +14,52 @@
 
 namespace letty {
 
+class BufferPoolManager; // Forward declaration
+
+/**
+ * @class PageGuard
+ * @brief RAII handle for a page in the buffer pool. 
+ *        Automatically unpins the page when it goes out of scope.
+ */
+class PageGuard {
+ public:
+  PageGuard() = default;
+
+  /** @brief Constructor used by BufferPoolManager. */
+  PageGuard(BufferPoolManager *bpm, Page *page, page_id_t page_id)
+      : bpm_(bpm), page_(page), page_id_(page_id) {}
+
+  /** @brief Destructor automatically calls drop() to unpin the page. */
+  ~PageGuard() { drop(); }
+
+  // Non-copyable, prevents multiple unpins for the same page
+  PageGuard(const PageGuard &) = delete;
+  PageGuard &operator=(const PageGuard &) = delete;
+
+  /** @brief Move constructor transfers ownership of the page pin. */
+  PageGuard(PageGuard &&other) noexcept;
+  /** @brief Move assignment transfers ownership of the page pin. */
+  PageGuard& operator=(PageGuard &&other) noexcept;
+
+  /** @brief Returns pointer to the underlying page. */
+  Page *get() const { return page_; }
+  Page &operator*() const { return *page_; }
+  Page *operator->() const { return page_; }
+  explicit operator bool() const { return page_ != nullptr; }
+
+  /** @brief Marks the page as dirty so it is written back on eviction. */
+  void mark_dirty() { dirty_ = true; }
+
+  /** @brief Manually releases the page pin before the guard goes out of scope. */
+  void drop();
+
+ private:
+  BufferPoolManager *bpm_ = nullptr;
+  Page *page_ = nullptr;
+  page_id_t page_id_ = INVALID_PAGE_ID;
+  bool dirty_ = false;
+};
+
 /** @brief Snapshot of buffer pool cache performance counters. */
 struct CacheStats {
   uint64_t hits             = 0;
@@ -76,6 +122,20 @@ class BufferPoolManager {
    * @return Pointer to the Page (pin_count=1, dirty=true), or nullptr if pool is full.
    */
   Page* new_page(page_id_t page_id);
+  
+  /**
+   * @brief Fetch a page from the pool and return an RAII guard.
+   * @param page_id The page to fetch.
+   * @return PageGuard holding the page, or empty guard if fetch fails.
+   */
+  PageGuard fetch_page_guard(page_id_t page_id);
+
+  /**
+   * @brief Register a new page and return an RAII guard.
+   * @param page_id The page ID assigned by the caller.
+   * @return PageGuard holding the new page, or empty guard if creation fails.
+   */
+  PageGuard new_page_guard(page_id_t page_id);
 
   /**
    * @brief Write a dirty page to disk without unpinning or evicting it.
