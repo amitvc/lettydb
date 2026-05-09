@@ -1,7 +1,6 @@
 #include "executor.h"
 #include "token.h"
-#include "common/logger.h"
-#include <iostream>
+#include "common/db_exception.h"
 
 namespace letty {
 
@@ -9,23 +8,27 @@ Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager)
     : catalog_manager_(catalog_manager), table_manager_(table_manager) {}
 
 ExecutionResult Executor::execute(ASTNode* node) {
-  if (!node) {
-    return ExecutionResult::error("Null AST node");
+  try {
+    if (!node) {
+      return ExecutionResult::error("Null AST node");
+    }
+
+    if (auto* create_table = dynamic_cast<CreateTableStatementNode*>(node)) {
+      return execute_create_table(create_table);
+    }
+
+    if (auto* insert = dynamic_cast<InsertStatementNode*>(node)) {
+      return execute_insert(insert);
+    }
+
+    if (auto* select = dynamic_cast<SelectStatementNode*>(node)) {
+      return execute_select(select);
+    }
+
+    return ExecutionResult::error("Unsupported statement type");
+  } catch (const DbException& e) {
+    return ExecutionResult::error(e.what());
   }
-  
-  if (auto* create_table = dynamic_cast<CreateTableStatementNode*>(node)) {
-    return execute_create_table(create_table);
-  }
-  
-  if (auto* insert = dynamic_cast<InsertStatementNode*>(node)) {
-    return execute_insert(insert);
-  }
-  
-  if (auto* select = dynamic_cast<SelectStatementNode*>(node)) {
-    return execute_select(select);
-  }
-  
-  return ExecutionResult::error("Unsupported statement type");
 }
 
 ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {

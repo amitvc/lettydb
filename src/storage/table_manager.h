@@ -38,7 +38,8 @@ class TableManager {
    *
    * @param table_name The name of the table.
    * @param tuple The tuple to insert.
-   * @return true if successful, false otherwise.
+   * @return true if successful.
+   * @throws DbException if the table is missing or the insert cannot complete.
    */
   bool insert_row(const std::string& table_name, const Tuple& tuple);
 
@@ -47,7 +48,8 @@ class TableManager {
    *
    * @param meta The table's metadata (schema + IAM page).
    * @param tuple The tuple to insert.
-   * @return true if successful, false otherwise.
+   * @return true if successful.
+   * @throws DbException if the insert cannot complete.
    */
   bool insert_row(const TableMetadata& meta, const Tuple& tuple);
 
@@ -60,6 +62,7 @@ class TableManager {
    * @param table_name The name of the table.
    * @param tuples The tuples to insert.
    * @return Number of rows successfully inserted.
+   * @throws DbException if the table is missing or the batch insert cannot complete.
    */
   uint32_t insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples);
 
@@ -71,7 +74,8 @@ class TableManager {
    *
    * @param table_name The name of the table.
    * @param callback Function called for each tuple (raw data, size).
-   * @return true if scan completed successfully, false on error.
+   * @return true if scan completed successfully.
+   * @throws DbException if the table is missing or scan metadata cannot be read.
    */
   bool scan_table(const std::string& table_name,
                   const std::function<void(const char* data, uint32_t size)>& callback);
@@ -81,7 +85,8 @@ class TableManager {
    *
    * @param table_name The name of the table.
    * @param callback Function called for each deserialized tuple.
-   * @return true if scan completed successfully, false on error.
+   * @return true if scan completed successfully.
+   * @throws DbException if the table is missing or scan metadata cannot be read.
    */
   bool scan_table_tuples(const std::string& table_name,
                          const std::function<void(const Tuple& tuple)>& callback);

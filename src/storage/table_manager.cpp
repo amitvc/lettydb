@@ -2,7 +2,7 @@
 #include "slotted_page.h"
 #include "storage_def.h"
 #include "page_utils.h"
-#include <iostream>
+#include "common/db_exception.h"
 
 namespace letty {
 
@@ -80,8 +80,7 @@ void TableManager::scan_extent_tuples(uint32_t extent_id, const Schema& schema,
 bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
   auto* meta = catalog_manager_.get_table(table_name);
   if (!meta) {
-    std::cerr << "Table not found: " << table_name << std::endl;
-    return false;
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
   return insert_row(*meta, tuple);
 }
@@ -90,30 +89,31 @@ bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   char buf[PAGE_SIZE];
   uint32_t data_size;
   if (!tuple.serialize(meta.schema, buf, PAGE_SIZE, &data_size)) {
-    std::cerr << "Tuple too large for page" << std::endl;
-    return false;
+    throw DbException(DbErrorCode::InvalidArgument, "tuple is too large for page");
   }
 
   page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size);
   if (target_page_id == INVALID_PAGE_ID) {
-    std::cerr << "Failed to find or allocate a page for table" << std::endl;
-    return false;
+    throw DbException(DbErrorCode::NoSpace, "failed to find or allocate a page for table");
   }
 
   Page* page = buffer_pool_.fetch_page(target_page_id);
-  if (!page) return false;
+  if (!page) {
+    throw DbException(DbErrorCode::IOError, "failed to fetch target page for insert");
+  }
 
   bool ok = try_insert_into_page(page, buf, data_size);
-  if (!ok) std::cerr << "Failed to insert tuple into page " << target_page_id << std::endl;
   buffer_pool_.unpin_page(target_page_id, ok);
-  return ok;
+  if (!ok) {
+    throw DbException(DbErrorCode::NoSpace, "failed to insert tuple into page " + std::to_string(target_page_id));
+  }
+  return true;
 }
 
 uint32_t TableManager::insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples) {
   auto* meta = catalog_manager_.get_table(table_name);
   if (!meta) {
-    std::cerr << "Table not found: " << table_name << std::endl;
-    return 0;
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
   const Schema& schema = meta->schema;
@@ -127,8 +127,8 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
     char buf[PAGE_SIZE];
     uint32_t data_size;
     if (!tuple.serialize(schema, buf, PAGE_SIZE, &data_size)) {
-      std::cerr << "Tuple too large for page" << std::endl;
-      break;
+      if (current_page) buffer_pool_.unpin_page(current_page_id, true);
+      throw DbException(DbErrorCode::InvalidArgument, "tuple is too large for page");
     }
 
     if (current_page && try_insert_into_page(current_page, buf, data_size)) {
@@ -145,19 +145,20 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
 
     current_page_id = acquire_page_for_insert(iam_page_id, data_size);
     if (current_page_id == INVALID_PAGE_ID) {
-      std::cerr << "Failed to find or allocate a page for table" << std::endl;
-      break;
+      throw DbException(DbErrorCode::NoSpace, "failed to find or allocate a page for table");
     }
 
     current_page = buffer_pool_.fetch_page(current_page_id);
-    if (!current_page) break;
+    if (!current_page) {
+      throw DbException(DbErrorCode::IOError, "failed to fetch target page for insert");
+    }
 
     if (!try_insert_into_page(current_page, buf, data_size)) {
-      std::cerr << "Failed to insert tuple into page " << current_page_id << std::endl;
+      page_id_t failed_page_id = current_page_id;
       buffer_pool_.unpin_page(current_page_id, false);
       current_page = nullptr;
       current_page_id = INVALID_PAGE_ID;
-      break;
+      throw DbException(DbErrorCode::NoSpace, "failed to insert tuple into page " + std::to_string(failed_page_id));
     }
     ++inserted;
   }
@@ -170,16 +171,14 @@ bool TableManager::scan_table(const std::string& table_name,
                               const std::function<void(const char* data, uint32_t size)>& callback) {
   auto* meta = catalog_manager_.get_table(table_name);
   if (!meta) {
-    std::cerr << "Table not found: " << table_name << std::endl;
-    return false;
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
   page_id_t current_iam_page_id = meta->iam_page_id;
   while (current_iam_page_id != INVALID_PAGE_ID) {
     auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
     if (!iam_page) {
-      std::cerr << "Failed to fetch IAM page " << current_iam_page_id << std::endl;
-      return false;
+      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page_id));
     }
 
     for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
@@ -195,8 +194,7 @@ bool TableManager::scan_table_tuples(const std::string& table_name,
                                      const std::function<void(const Tuple& tuple)>& callback) {
   auto* meta = catalog_manager_.get_table(table_name);
   if (!meta) {
-    std::cerr << "Table not found: " << table_name << std::endl;
-    return false;
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
   const Schema& schema = meta->schema;
@@ -205,8 +203,7 @@ bool TableManager::scan_table_tuples(const std::string& table_name,
   while (current_iam_page_id != INVALID_PAGE_ID) {
     auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
     if (!iam_page) {
-      std::cerr << "Failed to fetch IAM page " << current_iam_page_id << std::endl;
-      return false;
+      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page_id));
     }
 
     for (uint16_t i = 0; i < iam_page->extent_count; ++i) {

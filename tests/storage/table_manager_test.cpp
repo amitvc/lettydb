@@ -7,6 +7,7 @@
 #include "storage/extent_manager.h"
 #include "storage/iam_manager.h"
 #include "catalog/catalog_manager.h"
+#include "common/db_exception.h"
 
 namespace letty {
 
@@ -111,15 +112,18 @@ TEST_F(TableManagerTest, InsertAndScanWithTuple) {
 }
 
 TEST_F(TableManagerTest, ScanNonExistentTable) {
-  bool result = table_manager->scan_table("nonexistent", [](const char*, uint32_t) {});
-  EXPECT_FALSE(result);
+  EXPECT_THROW({
+    table_manager->scan_table("nonexistent", [](const char*, uint32_t) {});
+  }, DbException);
 }
 
 TEST_F(TableManagerTest, InsertIntoNonExistentTable) {
   Tuple tuple;
   tuple.add_value(int32_t(1));
   
-  EXPECT_FALSE(table_manager->insert_row("nonexistent", tuple));
+  EXPECT_THROW({
+    table_manager->insert_row("nonexistent", tuple);
+  }, DbException);
 }
 
 TEST_F(TableManagerTest, MultipleInsertsFillPage) {

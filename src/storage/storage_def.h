@@ -11,9 +11,7 @@ namespace letty {
 
 
 // Disable compiler-inserted alignment padding so struct layouts match
-// their on-disk byte offsets exactly. These structs are overlaid onto raw
-// page buffers via reinterpret_cast, so any padding would misalign fields
-// and corrupt reads/writes.
+// their on-disk byte offsets exactly.
 // See: https://learn.microsoft.com/en-us/cpp/preprocessor/pack
 #pragma pack(push, 1)
 
@@ -163,7 +161,7 @@ struct GAMPage {
   uint16_t first_free_bit_hint = 0;
 
   // Bitmap tracking extent allocation (1 = allocated, 0 = free)
-  char bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4090 = 4096 - (4 bytes PAGE_ID + 2 bytes hint)
+  uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4090 = 4096 - (4 bytes PAGE_ID + 2 bytes hint)
 };
 
 static_assert(sizeof(GAMPage) == PAGE_SIZE,
@@ -367,8 +365,11 @@ class Bitmap {
    * @param data A pointer to the start of the bitmap data (e.g., GAMPage::bitmap).
    * @param size_in_bits The total number of bits the bitmap can hold.
    */
+  explicit Bitmap(uint8_t *data, size_t size_in_bits)
+	  : data(data), size(size_in_bits) {}
+
   explicit Bitmap(char *data, size_t size_in_bits)
-	  : data(reinterpret_cast<uint8_t *>(data)), size(size_in_bits) {}
+	  : data(static_cast<uint8_t *>(static_cast<void *>(data))), size(size_in_bits) {}
 
   /**
    * @brief Checks if a specific bit is set to 1.
