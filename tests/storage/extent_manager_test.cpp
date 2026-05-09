@@ -52,7 +52,7 @@ TEST_F(ExtentManagerTest, TestInitialization) {
   auto [disk_manager, bpm, extent_manager] = CreateStack();
 
   // Flush BPM so we can verify on-disk state
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   // Check if Header page is initialized correctly
   char header_buffer[PAGE_SIZE];
@@ -93,7 +93,7 @@ TEST_F(ExtentManagerTest, TestAllocation) {
   EXPECT_EQ(extent2_start, 4 * EXTENT_SIZE);  // 32
 
   // Flush BPM so we can verify GAM on disk
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   // Verify in GAM
   char gam_buffer[PAGE_SIZE];
@@ -127,7 +127,7 @@ TEST_F(ExtentManagerTest, TestPersistence) {
 	EXPECT_EQ(p2, 32);
 
 	// Flush and verify on disk
-	bpm->flush_all_pages();
+	EXPECT_TRUE(bpm->flush_all_pages());
 
 	// Check that extents 0, 1, 2, 3 are all allocated
 	char gam_buffer[PAGE_SIZE];
@@ -156,7 +156,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   page_id_t new_extent_page_id = extent_manager->allocate_extent();
 
   // Flush so we can verify on disk
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   // File size should still be 3 extents (new GAM page fits inside GAM extent 1)
   EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
@@ -191,7 +191,7 @@ TEST_F(ExtentManagerTest, TestDeallocation) {
   extent_manager->deallocate_extent(extent1_start);
 
   // Flush and verify in GAM
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
@@ -247,7 +247,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
   }
 
   // Verify file size before (3 extents: header + GAM + shared)
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
   EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
 
   // Allocate!
@@ -255,7 +255,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
   page_id_t new_page_id = extent_manager->allocate_extent();
 
   // Flush to verify on disk
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   // Verify file size after - should have grown to include the new GAM extent
   EXPECT_GE(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE + 1);

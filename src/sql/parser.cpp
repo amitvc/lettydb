@@ -192,6 +192,9 @@ namespace letty {
 						throw std::runtime_error("Expected number after '-' in VALUES");
 					}
 					break;
+				case TokenType::NULL_LITERAL:
+					values.push_back(std::make_unique<LiteralNode>(std::monostate{}));
+					break;
 			}
 			advance();
 		} while (match(TokenType::COMMA));
@@ -200,7 +203,7 @@ namespace letty {
 		return values;
 	}
 
-std::unique_ptr<ASTNode> Parser::parse_create_node() {
+	std::unique_ptr<ASTNode> Parser::parse_create_node() {
         ensure(TokenType::CREATE,  "Expected 'CREATE' keyword.");
         if (match(TokenType::TABLE)) {
             return parse_create_table_node();
@@ -337,12 +340,6 @@ std::unique_ptr<ASTNode> Parser::parse_create_node() {
     }
 
 
-/**
-     * @brief Parses a complete DROP statement.
-     * Handles the full DROP statement syntax:
-     * DROP IF EXISTS table list
-     * @return DropTableStatementNode containing all parsed components
-     */
     std::unique_ptr<ASTNode> Parser::parse_drop_node() {
         auto rootNode = std::make_unique<DropTableStatementNode>();
         advance(); // Advance past the drop token
@@ -554,16 +551,6 @@ std::unique_ptr<ASTNode> Parser::parse_create_node() {
     }
 
 
-    /**
-     * @brief Consumes the current token and advances the parser position
-     * 
-     * This method moves the parser to the next token in the stream and returns
-     * a reference to the token that was consumed. It includes bounds checking
-     * to prevent advancing past the end of the token stream.
-     * 
-     * @return Reference to the consumed token
-     * @throws std::out_of_range if attempting to advance past end of tokens
-     */
     Token &Parser::advance() {
         if (!is_at_end()) {
             return tokens[pos++];

@@ -26,7 +26,7 @@ protected:
         bpm = std::make_unique<BufferPoolManager>(
             *disk_manager, 64, std::make_unique<LRUPageReplacer>());
         extent_manager = std::make_unique<ExtentManager>(*bpm);
-        bpm->flush_all_pages();  // Flush init pages for components still using DiskManager directly
+        ASSERT_TRUE(bpm->flush_all_pages());  // Flush init pages for components still using DiskManager directly
         iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
         
         // Initialize the metadata pool (needed for the new design)
@@ -61,7 +61,7 @@ protected:
      * Helper to count the number of pages in an IAM chain
      */
     size_t count_iam_chain_length(page_id_t head_page_id) {
-        bpm->flush_all_pages();  // Ensure BPM writes are visible on disk
+        EXPECT_TRUE(bpm->flush_all_pages());  // Ensure BPM writes are visible on disk
         size_t count = 0;
         page_id_t current = head_page_id;
 
@@ -82,7 +82,7 @@ protected:
      * Helper to count total extents tracked in an IAM chain
      */
     size_t count_extents_in_iam(page_id_t head_page_id) {
-        bpm->flush_all_pages();  // Ensure BPM writes are visible on disk
+        EXPECT_TRUE(bpm->flush_all_pages());  // Ensure BPM writes are visible on disk
         size_t count = 0;
         page_id_t current = head_page_id;
 
@@ -111,7 +111,7 @@ protected:
  */
 TEST_F(IamManagerTest, SharedExtentInit) {
     // Flush BPM so init_shared_extent writes are visible on disk
-    bpm->flush_all_pages();
+    EXPECT_TRUE(bpm->flush_all_pages());
 
     // Read the metadata pool header
     char buffer[PAGE_SIZE];
@@ -138,7 +138,7 @@ TEST_F(IamManagerTest, CreateIAMChain) {
     EXPECT_LE(table_iam, FIRST_SHARED_EXTENT_PAGE_ID + SHARED_EXTENT_SLOTS);
     
     // Flush BPM so create_iam_chain writes are visible on disk
-    bpm->flush_all_pages();
+    EXPECT_TRUE(bpm->flush_all_pages());
 
     // Verify the IAM page structure
     char buffer[PAGE_SIZE];
@@ -265,7 +265,9 @@ TEST_F(IamManagerTest, SharedExtentDirectoryPageStructure) {
     auto* pool_header = new(buffer) SharedExtentDirectoryPage();
     
     // Test initial state
-    EXPECT_EQ(pool_header->slots_bitmap, 0);
+    for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
+        EXPECT_FALSE(pool_header->is_slot_used(slot));
+    }
     
     // Find free slot should return 1 (slots are 1-7)
     EXPECT_EQ(pool_header->find_free_slot(), 1);

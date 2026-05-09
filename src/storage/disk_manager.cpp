@@ -2,6 +2,8 @@
 #include "common/logger.h"
 #include "storage/config.h"
 #include <cassert>
+#include <cstring>
+#include <errno.h>
 #include <utility>
 #include <fcntl.h>
 #include <unistd.h>
@@ -23,7 +25,7 @@ DiskManager::DiskManager(std::string db_file) : file_name_(std::move(db_file)) {
 
 DiskManager::~DiskManager() {
   if (fd_ != -1) {
-	fsync(fd_);
+	sync();
 	close(fd_);
   }
 }
@@ -32,6 +34,8 @@ IOResult DiskManager::write_page(page_id_t page_id, const char *page_data) {
   off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
   ssize_t written = pwrite(fd_, page_data, PAGE_SIZE, offset);
   if (written != PAGE_SIZE) {
+	LOG_STORAGE_ERROR("Problem while writing page to disk {}", page_id);
+	++write_error_;
 	return IOResult::WRITE_ERROR;
   }
 
@@ -43,6 +47,8 @@ IOResult DiskManager::read_page(page_id_t page_id, char *page_data) {
   off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
   ssize_t bytes_read = pread(fd_, page_data, PAGE_SIZE, offset);
   if (bytes_read != PAGE_SIZE) {
+	LOG_STORAGE_ERROR("Problem while load page to disk {}", page_id);
+	++read_error_;
 	return IOResult::READ_ERROR;
   }
 
@@ -59,10 +65,19 @@ void DiskManager::reset_io_stats() {
   write_count_ = 0;
 }
 
-void DiskManager::sync() {
-  if (fd_ != -1) {
-    fsync(fd_);
+bool DiskManager::sync() {
+  if (fd_ == -1) {
+    LOG_STORAGE_ERROR("Cannot sync database file {}: file descriptor is closed", file_name_);
+    return false;
   }
+
+  if (fsync(fd_) == 0) {
+    return true;
+  }
+
+  int err = errno;
+  LOG_STORAGE_ERROR("Problem while syncing database file {}: {}", file_name_, std::strerror(err));
+  return false;
 }
 
 page_id_t DiskManager::get_file_size_in_pages() {

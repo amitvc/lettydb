@@ -44,6 +44,11 @@ namespace letty {
             
             /**
              * @brief Extracts and returns the next token from the input stream
+             * This method implements a finite state machine that:
+			 * 1. Skips whitespace characters
+			 * 2. Recognizes single-character tokens (punctuation, operators)
+			 * 3. Delegates to specialized methods for complex tokens
+			 * 4. Handles unexpected characters gracefully
              * @return The next Token in the input, or EOF_FILE token when input is exhausted
              * @throws std::runtime_error for unrecoverable parsing errors
              */
@@ -64,7 +69,12 @@ namespace letty {
              * @brief Looks at the current character without consuming it
              * @return Current character or '\0' if at end of input
              */
-            char peek() const;
+            inline char peek() const {
+			  if (!has_ended()) {
+				return input_[curr_pos];
+			  }
+			  return '\0'; // return end of string char.
+			}
             
             /**
              * @brief Consumes and returns the current character, advancing position
@@ -76,7 +86,9 @@ namespace letty {
              * @brief Checks if we've reached the end of the input string
              * @return true if at end of input, false otherwise
              */
-            bool has_ended() const;
+            inline bool has_ended() const {
+			  return curr_pos >= input_.size();
+			}
             
             /**
              * @brief Creates a token of the specified type and advances position

@@ -12,17 +12,6 @@
 #include "utils.h"
 namespace letty {
 
-    /**
-     * @brief Main tokenization method that extracts the next token from input
-     * 
-     * This method implements a finite state machine that:
-     * 1. Skips whitespace characters
-     * 2. Recognizes single-character tokens (punctuation, operators)
-     * 3. Delegates to specialized methods for complex tokens
-     * 4. Handles unexpected characters gracefully
-     * 
-     * @return Next token in the input stream or EOF_FILE when exhausted
-     */
     Token Lexer::next_token() {
         while (!has_ended()) {
             char c = peek();
@@ -31,7 +20,7 @@ namespace letty {
                 case '\t':
                 case '\r':
                 case '\n':
-                    advance(); // Skip whitespace
+                    advance(); // Skip whitespace, tabs, carriage returns, and newlines
                     continue;
 
                 case '*':
@@ -108,20 +97,21 @@ namespace letty {
 
 
     Token Lexer::make_token(TokenType type, const std::string &value) {
-        advance(); // Move cursor ahead
+        advance();
         return {type, value};
     }
 
     Token Lexer::make_string() {
         advance();
-        // Capture start position and use substr instead of char-by-char append
+
         size_t start = curr_pos;
         while (!has_ended() && peek() != '\'') {
             advance();
         }
+		// Extract the string value between quotes.
         std::string value(input_.substr(start, curr_pos - start));
 
-		// Check if we hit the end of the file without finding a closing quote
+		// Check if we hit the end of the query string without finding a closing quote
 		if (has_ended()) {
 		  // Return an UNKNOWN token or throw an error.
 		  // For now, let's return UNKNOWN so the parser can handle it or fail gracefully.
@@ -182,17 +172,6 @@ namespace letty {
     char Lexer::advance() {
         if (has_ended()) return '\0';
         return input_[curr_pos++];
-    }
-
-    char Lexer::peek() const {
-        if (!has_ended()) {
-            return input_[curr_pos];
-        }
-        return '\0'; // return end of string char.
-    }
-
-    bool Lexer::has_ended() const {
-        return curr_pos >= input_.size();
     }
 
     std::vector<Token> Lexer::tokenize() {

@@ -95,22 +95,16 @@ public:
         SPDLOG_INFO("Letty Logger initialized - Log file: {}", log_file);
     }
     
-    /**
-     * @brief Shutdown logging system gracefully
-     */
     static void shutdown() {
         spdlog::shutdown();
     }
     
-    /**
-     * @brief Set log level at runtime
-     */
     static void set_level(spdlog::level::level_enum level) {
         spdlog::set_level(level);
     }
 };
 
-} // namespace letty
+}
 
 // Convenient logging macros
 #define LOG_TRACE(...)    SPDLOG_TRACE(__VA_ARGS__)
@@ -125,6 +119,11 @@ public:
 #define LOG_STORAGE_INFO(...)     LOG_INFO("[STORAGE] " __VA_ARGS__)
 #define LOG_STORAGE_WARN(...)     LOG_WARN("[STORAGE] " __VA_ARGS__)
 #define LOG_STORAGE_ERROR(...)    LOG_ERROR("[STORAGE] " __VA_ARGS__)
+
+#define LOG_BPM_DEBUG(...)    	  LOG_STORAGE_DEBUG("[BPM] " __VA_ARGS__)
+#define LOG_BPM_INFO(...)         LOG_STORAGE_INFO("[BPM] " __VA_ARGS__)
+#define LOG_BPM_WARN(...)         LOG_STORAGE_WARN("[BPM] " __VA_ARGS__)
+#define LOG_BPM_ERROR(...)        LOG_STORAGE_ERROR("[BPM] " __VA_ARGS__)
 
 #define LOG_SQL_DEBUG(...)        LOG_DEBUG("[SQL] " __VA_ARGS__)
 #define LOG_SQL_INFO(...)         LOG_INFO("[SQL] " __VA_ARGS__)

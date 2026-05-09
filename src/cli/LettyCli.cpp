@@ -47,10 +47,6 @@ static void apply_unicode_borders(tabulate::Table& t) {
 }
 
 
-/**
- * This CLI is temporary CLI to help me test locally. It will be replaced with a more robust CLI to interact with DB
- * @param db_path
- */
 LettyCli::LettyCli(const std::string& db_path, bool force_simple)
     : db_path_(db_path), force_simple_(force_simple) {
 

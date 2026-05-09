@@ -24,7 +24,7 @@ TEST(IamIntegrationTest, ListBasedIamBasicFunctionality) {
         DiskManager disk_manager(test_db_file.string());
         BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
         ExtentManager extent_manager(bpm);
-        bpm.flush_all_pages();  // Flush init pages for components still using DiskManager directly
+        ASSERT_TRUE(bpm.flush_all_pages());  // Flush init pages for components still using DiskManager directly
         IamManager iam_manager(bpm, extent_manager);
 
         // Initialize metadata pool
@@ -91,7 +91,9 @@ TEST(IamIntegrationTest, SharedExtentDirectoryPageBasics) {
     SharedExtentDirectoryPage header;
     
     // Initial state
-    EXPECT_EQ(header.slots_bitmap, 0);
+    for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
+        EXPECT_FALSE(header.is_slot_used(slot));
+    }
     EXPECT_EQ(header.find_free_slot(), 1);  // First available slot
     
     // Mark slots
@@ -120,7 +122,7 @@ TEST(IamIntegrationTest, MultipleTablesSharePool) {
         DiskManager disk_manager(test_db_file.string());
         BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
         ExtentManager extent_manager(bpm);
-        bpm.flush_all_pages();  // Flush init pages for components still using DiskManager directly
+        ASSERT_TRUE(bpm.flush_all_pages());  // Flush init pages for components still using DiskManager directly
         IamManager iam_manager(bpm, extent_manager);
 
         iam_manager.init_shared_extent(FIRST_SHARED_EXTENT_PAGE_ID);

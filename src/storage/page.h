@@ -11,23 +11,30 @@ class BufferPoolManager;
 
 /**
  * @class Page
- * @brief Represents a single frame(page) in the buffer pool.
+ * @brief Represents a single page in the buffer pool.
  *
- * A Page holds a PAGE_SIZE buffer of raw data along with metadata that the
- * BufferPoolManager uses to manage caching, eviction, and dirty-page tracking.
+ * A Page holds metadata plus a pointer to a PAGE_SIZE buffer managed by the
+ * BufferPoolManager. The data buffer is allocated separately as one large
+ * page-aligned slab — this avoids the sizeof(Page) inflation that occurs when
+ * alignas(PAGE_SIZE) is embedded in the struct (which would pad each Page to
+ * 8192 bytes instead of ~24 bytes, wasting ~256 KB for a 64-frame pool).
  *
+ * The BufferPoolManager allocates a contiguous, PAGE_SIZE-aligned buffer of
+ * pool_size * PAGE_SIZE bytes and assigns each frame's data_ pointer into it.
+ * Each frame starts on a database page boundary and is used as byte-oriented
+ * storage for page layouts loaded from or stored to disk.
  */
 class Page {
  public:
-  Page() {
-	std::memset(data_, 0, PAGE_SIZE);
-	std::cout << "Page created" <<std::endl;
-  }
+  Page() = default;
 
   /** @brief Returns a mutable pointer to the raw page data. */
-  char* get_data() { return data_; }
+  char* get_data() {
+    assert(data_ != nullptr && "Page data_ is null — Page must be used through BufferPoolManager");
+    return data_;
+  }
 
-  /** @brief Returns the page ID loaded in this frame, or INVALID_PAGE_ID if empty. */
+  /** @brief Returns the page ID of this page, or INVALID_PAGE_ID if empty. */
   page_id_t get_page_id() const { return page_id_; }
 
   /** @brief Returns the current pin count (number of active users). */
@@ -53,44 +60,14 @@ class Page {
   void increment_pin() { ++pin_count_; }
 
   void decrement_pin() {
-    assert(pin_count_ > 0 && "decrement_pin called on page with pin_count <= 0"); // This is a bug if assert is true.
+    assert(pin_count_ > 0 && "decrement_pin called on page with pin_count <= 0");
     --pin_count_;
   }
 
-  // Raw page data buffer, aligned to PAGE_SIZE (4096 bytes).
-  //
-  // Why alignas(PAGE_SIZE)?
-  //
-  // We overlay on-disk structs onto this buffer via reinterpret_cast:
-  //
-  //   auto* header = reinterpret_cast<DatabaseHeader*>(page->get_data());
-  //   page_id_t gam = header->gam_page_id;  // must read bytes 16-19
-  //
-  // Those structs use #pragma pack(1), so their fields sit at exact byte
-  // offsets with no padding. For this cast to be correct and efficient, the
-  // buffer must start at a well-known aligned address. alignas(PAGE_SIZE)
-  // guarantees data_ begins at a multiple of 4096 (e.g., 0x7F00001000),
-  // which means packed fields like a uint32_t at offset 16 land at address
-  // 0x7F00001010 — naturally aligned for the CPU despite #pragma pack(1).
-  //
-  // Additional benefits:
-  //  - O_DIRECT readiness: direct I/O requires buffers aligned to the
-  //    filesystem block size (typically 4096). We don't use O_DIRECT today
-  //    (we use fstream), but this makes the switch zero-effort later.
-  //  - Cache-line / TLB efficiency: a 4096-aligned buffer maps cleanly to
-  //    hardware page boundaries, so no cache line or TLB entry is split
-  //    across two page buffers.
-  //
-  // Tradeoff: alignas(PAGE_SIZE) inflates sizeof(Page) from ~4105 to 8192
-  // because the compiler must pad each Page so the next one in a
-  // vector<Page> also starts at a 4096 boundary. For a 64-frame pool this
-  // wastes ~256 KB — negligible for the safety guarantees it provides.
-  //
-  // See book/memory_layout.md for a detailed write-up with examples.
-  alignas(PAGE_SIZE) char data_[PAGE_SIZE];
+  char* data_ = nullptr;
   page_id_t page_id_ = INVALID_PAGE_ID;
-  int pin_count_ = 0; // When this > 0 then this page is being requested/used. When > 0 page cannot be evicted from bpm.
-  bool is_dirty_ = false; // Page has been modified and is a candidate to be written to disk as some point
+  int pin_count_ = 0;
+  bool is_dirty_ = false;
 };
 
 }

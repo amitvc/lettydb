@@ -41,14 +41,16 @@ class IamManager {
    * @brief Finds a data page with sufficient free space within a table's extents.
    *
    * Strategy (in order):
-   *  1. Check the cached hint page for this table.
-   *  2. Scan forward within the hint's extent.
-   *  3. Full IAM chain scan (first-insert path only).
+   *  1. Check the cached hint page for this table (O(1) common case).
+   *  2. Scan forward within the hint's extent (up to 7 more pages).
+   *  3. Full IAM chain scan across all extents (hint miss or no hint yet).
    *
-   * @param iam_head_page_id The IAM page for the table.
-   * @param required_space The minimum free space needed (tuple size + slot overhead).
-   * @return Page ID of a suitable page, or INVALID_PAGE_ID if none exists.
-   *         INVALID_PAGE_ID means the caller must allocate a new extent.
+   * Returns INVALID_PAGE_ID when all known pages are full — caller must allocate
+   * a new extent via allocate_extent_for_table().
+   *
+   * @param iam_head_page_id The IAM head page for the table.
+   * @param required_space Minimum free bytes needed (tuple size only — slot overhead added internally).
+   * @return Page ID of a suitable page, or INVALID_PAGE_ID if none found.
    */
   page_id_t find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space);
 
@@ -66,14 +68,15 @@ class IamManager {
   /** Cached from header page on first access. Never changes after init. */
   page_id_t shared_extent_page_id_ = INVALID_PAGE_ID;
 
-  /** Per-table hint: iam_head_page_id → last known page with free space.
-   *  Avoids O(n) linear scan on every INSERT in the common (append) case. */
+  // Per-table hint: iam_head_page_id → last known data page with free space.
+  // On INSERT, the hint is checked first (O(1)). On a hint miss, the hint's
+  // extent is scanned forward, then the full IAM chain. Updated whenever a
+  // page with space is found or a new extent is allocated.
   std::unordered_map<page_id_t, page_id_t> table_page_hints_;
 
   /** Loads shared_extent_page_id_ from header if not yet cached. */
   page_id_t get_shared_extent_page_id();
 
-  // ——— find_page_with_space decomposition ———
 
   /** Check the cached hint page for space. Returns page ID or INVALID_PAGE_ID. */
   page_id_t find_hint_page(page_id_t iam_head_page_id, uint32_t total_needed);
@@ -81,10 +84,9 @@ class IamManager {
   /** Scan forward within the hint's extent for a page with space. Returns page ID or INVALID_PAGE_ID. */
   page_id_t scan_extent_forward(page_id_t iam_head_page_id, page_id_t hint_page_id, uint32_t total_needed);
 
-  /** Full IAM chain scan for a page with space (first-insert path). Returns page ID or INVALID_PAGE_ID. */
+  /** Scans all extents in the IAM chain for a page with space. Used when hint misses
+   *  and the hint's extent is exhausted. Returns page ID or INVALID_PAGE_ID. */
   page_id_t scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_needed);
-
-  // ——— allocate_metadata_page decomposition ———
 
   /**
    * @brief Allocates a page from the shared extent.
@@ -94,7 +96,7 @@ class IamManager {
   page_id_t allocate_shared_page();
 
   /** Allocates a new pool extent and links it to the current one. Returns new pool page ID or INVALID_PAGE_ID. */
-  page_id_t extend_shared_extent(SharedExtentDirectoryPage* current_header, page_id_t current_pool_page);
+  page_id_t extend_shared_extent();
 
   // ——— shared helpers ———
 

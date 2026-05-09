@@ -1,7 +1,9 @@
 #include "catalog/catalog_manager.h"
 #include "storage/slotted_page.h"
 #include "storage/tuple.h"
+#include "storage/page_utils.h"
 #include "catalog/catalog_defs.h"
+#include "common/logger.h"
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -12,13 +14,14 @@ CatalogManager::CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_m
     : buffer_pool_(buffer_pool), iam_manager_(iam_manager) {}
 
 void CatalogManager::init() {
-  Page* header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-  if (!header_page) return;
+  auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
+  if (!db_header) {
+	LOG_STORAGE_ERROR("Failed to fetch database header page during catalog initialization");
+	throw std::runtime_error("Failed to fetch database header page during catalog initialization");
+  }
 
-  auto* header = reinterpret_cast<const DatabaseHeader*>(header_page->get_data());
-  sys_tables_iam_ = header->sys_tables_iam_page;
-  sys_columns_iam_ = header->sys_columns_iam_page;
-  buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
+  sys_tables_iam_ = db_header->sys_tables_iam_page;
+  sys_columns_iam_ = db_header->sys_columns_iam_page;
 
   if (sys_tables_iam_ == INVALID_PAGE_ID) {
     bootstrap();
@@ -58,21 +61,22 @@ void CatalogManager::load_all_tables() {
 }
 
 void CatalogManager::bootstrap() {
-    Page* header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!header_page) {
+    Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
+    if (!db_header_frame) {
         throw std::runtime_error("Failed to fetch header page during bootstrap");
     }
-    auto* header = reinterpret_cast<DatabaseHeader*>(header_page->get_data());
+    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
 
     // Initialize shared extent at the designated page
-    iam_manager_.init_shared_extent(header->shared_extent_page_id);
+    iam_manager_.init_shared_extent(db_header_page.shared_extent_page_id);
 
     page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME);
     page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME);
 
     // Update header in-place and cache
-    header->sys_tables_iam_page = sys_tables_iam;
-    header->sys_columns_iam_page = sys_columns_iam;
+  	db_header_page.sys_tables_iam_page = sys_tables_iam;
+  	db_header_page.sys_columns_iam_page = sys_columns_iam;
+    store_page_layout(db_header_frame, db_header_page);
     buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
 
     sys_tables_iam_ = sys_tables_iam;
@@ -81,19 +85,34 @@ void CatalogManager::bootstrap() {
     page_id_t sys_tables_first_page = iam_manager_.allocate_extent_for_table(sys_tables_iam);
     page_id_t sys_columns_first_page = iam_manager_.allocate_extent_for_table(sys_columns_iam);
 
-    // Initialize these new data pages as SlottedPages via BPM
-    Page* st_page = buffer_pool_.fetch_page(sys_tables_first_page);
-    if (!st_page) {
-        throw std::runtime_error("Failed to fetch sys_tables first page during bootstrap");
+    Page* sys_tables_page = buffer_pool_.new_page(sys_tables_first_page);
+    if (!sys_tables_page) {
+	  sys_tables_page = buffer_pool_.fetch_page(sys_tables_first_page);
+      if (sys_tables_page && (sys_tables_page->get_pin_count() != 1 || sys_tables_page->is_dirty())) {
+        buffer_pool_.unpin_page(sys_tables_first_page, false);
+        sys_tables_page = nullptr;
+      }
+	}
+
+    if (!sys_tables_page) {
+        throw std::runtime_error("Failed to create sys_tables first page during bootstrap");
     }
-    SlottedPage::init(st_page->get_data());
+    SlottedPage::init(sys_tables_page->get_data());
     buffer_pool_.unpin_page(sys_tables_first_page, true);
 
-    Page* sc_page = buffer_pool_.fetch_page(sys_columns_first_page);
-    if (!sc_page) {
-        throw std::runtime_error("Failed to fetch sys_columns first page during bootstrap");
+    Page* sys_columns_page = buffer_pool_.new_page(sys_columns_first_page);
+    if (!sys_columns_page) {
+	  sys_columns_page = buffer_pool_.fetch_page(sys_columns_first_page);
+      if (sys_columns_page && (sys_columns_page->get_pin_count() != 1 || sys_columns_page->is_dirty())) {
+        buffer_pool_.unpin_page(sys_columns_first_page, false);
+        sys_columns_page = nullptr;
+      }
+	}
+
+    if (!sys_columns_page) {
+        throw std::runtime_error("Failed to create sys_columns first page during bootstrap");
     }
-    SlottedPage::init(sc_page->get_data());
+    SlottedPage::init(sys_columns_page->get_data());
     buffer_pool_.unpin_page(sys_columns_first_page, true);
 
     // Insert the metadata for sys_tables AND sys_columns INTO sys_tables
@@ -112,15 +131,16 @@ void CatalogManager::bootstrap() {
 }
 
 uint32_t CatalogManager::get_next_oid() {
-    Page* header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!header_page) {
+    Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
+    if (!db_header_frame) {
         throw std::runtime_error("Failed to fetch header page for OID allocation");
     }
-    auto* header = reinterpret_cast<DatabaseHeader*>(header_page->get_data());
+    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
 
-    uint16_t oid = header->next_table_oid;
-    header->next_table_oid++;
+    uint16_t oid = db_header_page.next_table_oid;
+  	db_header_page.next_table_oid++;
 
+    store_page_layout(db_header_frame, db_header_page);
     buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
     return oid;
 }
@@ -136,8 +156,17 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
             return false;
         }
 
-        // Initialize the new page as a SlottedPage
-        Page* new_pg = buffer_pool_.fetch_page(target_page_id);
+        // Prefer new_page for a freshly allocated page; fetch only handles the
+        // case where the frame was already cached by earlier file extension.
+        Page* new_pg = buffer_pool_.new_page(target_page_id);
+        if (!new_pg) {
+		  new_pg = buffer_pool_.fetch_page(target_page_id);
+          if (new_pg && (new_pg->get_pin_count() != 1 || new_pg->is_dirty())) {
+            buffer_pool_.unpin_page(target_page_id, false);
+            new_pg = nullptr;
+          }
+		}
+
         if (!new_pg) return false;
         SlottedPage::init(new_pg->get_data());
         buffer_pool_.unpin_page(target_page_id, true);
@@ -163,10 +192,8 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
 
     page_id_t current_iam = iam_head;
     while (current_iam != INVALID_PAGE_ID) {
-        Page* iam_pg = buffer_pool_.fetch_page(current_iam);
-        if (!iam_pg) break;
-
-        auto* iam_page = reinterpret_cast<const IAMPage*>(iam_pg->get_data());
+        auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam);
+        if (!iam_page) break;
 
         for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
             uint32_t extent_id = iam_page->extent_ids[i];
@@ -190,7 +217,6 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
         }
 
         page_id_t next_iam = iam_page->next_page_id;
-        buffer_pool_.unpin_page(current_iam, false);
         current_iam = next_iam;
     }
 

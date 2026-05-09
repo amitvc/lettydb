@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage_def.h"
+#include "page_utils.h"
 #include "buffer/buffer_pool_manager.h"
 #include <mutex>
 
@@ -11,7 +12,7 @@ struct DatabaseHeader;
  * @class ExtentManager
  * @brief Manages allocation and deallocation of Extent's within the database file.
  * An *extent* is a contiguous group of pages treated as a single allocation unit. All pages within an Extent typically
- * belong to a single database entity (either table, index or system catalog). For letty the size of extent is 8 pages
+ * belong to a single database entity (either table, index or system catalog). For lettydb the size of an extent is 8 pages
  * (see EXTENT_SIZE in config.h)
  * The ExtentManager sits above the BufferPoolManager and below higher-level components.
  *
@@ -31,7 +32,7 @@ struct DatabaseHeader;
  * Responsibilities:
  *  - Allocate new extents.
  *  - Free extents when objects are dropped or truncated.
- *  - Track global extent usage via the Global Allocation Map (GAM)
+ *  - Track global extent usage via the Global Allocation Map (GAM). Read more about GAMs here https://tinyurl.com/4ysf3yx3
  *
  * Reference:
  *  - GAM / IAM allocation strategy inspired by SQL Server internals
@@ -125,5 +126,7 @@ class ExtentManager {
    * @return true on success, false if the GAM page could not be fetched.
    */
   bool clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index);
+
+
 };
 }

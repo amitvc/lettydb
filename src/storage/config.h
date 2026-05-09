@@ -15,6 +15,8 @@ namespace letty {
   // Use a type alias for page IDs for clarity and future flexibility.
   using page_id_t = int32_t;
   using lsn_t = int32_t;
+  // Index into the buffer pool's fixed-size frame array. A frame is a slot that
+  // can hold any page — the page_table_ maps page_id → frame_id at runtime.
   using frame_id_t = int32_t;
 
   /**

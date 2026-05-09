@@ -27,6 +27,10 @@ class DatabaseEngine;
 class LettyCli {
 public:
 
+    /**
+     * This CLI is temporary CLI to help me test locally. It will be replaced with a more robust CLI to interact with DB
+     * @param db_path
+     */
     explicit LettyCli(const std::string& db_path = "letty.db", bool force_simple = false);
     
 

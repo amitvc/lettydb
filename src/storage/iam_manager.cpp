@@ -1,8 +1,7 @@
 #include "iam_manager.h"
 #include "slotted_page.h"
+#include "page_utils.h"
 #include "common/logger.h"
-#include <cstring>
-#include <new>
 
 namespace letty {
 
@@ -14,14 +13,13 @@ page_id_t IamManager::get_shared_extent_page_id() {
     return shared_extent_page_id_;
   }
 
-  Page* page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-  if (!page) {
+  auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
+  if (!db_header) {
     LOG_STORAGE_ERROR("Failed to fetch header page for shared extent lookup");
     return INVALID_PAGE_ID;
   }
 
-  shared_extent_page_id_ = reinterpret_cast<const DatabaseHeader*>(page->get_data())->shared_extent_page_id;
-  buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
+  shared_extent_page_id_ = db_header->shared_extent_page_id;
   LOG_STORAGE_DEBUG("Cached shared_extent_page_id = {}", shared_extent_page_id_);
   return shared_extent_page_id_;
 }
@@ -29,15 +27,15 @@ page_id_t IamManager::get_shared_extent_page_id() {
 void IamManager::init_shared_extent(page_id_t pool_page_id) {
   LOG_STORAGE_DEBUG("Initializing shared extent at page {}", pool_page_id);
 
-  Page* page = buffer_pool_.fetch_page(pool_page_id);
-  if (!page) {
+  Page* directory_frame = buffer_pool_.fetch_page(pool_page_id);
+  if (!directory_frame) {
     LOG_STORAGE_ERROR("Failed to fetch shared extent page {}", pool_page_id);
     return;
   }
 
-  auto* header = new(page->get_data()) SharedExtentDirectoryPage();
-  header->next_pool_page = INVALID_PAGE_ID;
-  header->slots_bitmap = 0;
+  auto directory_page = make_shared_extent_directory_page();
+  // Write data into the page->char * from the struct.
+  store_page_layout(directory_frame, directory_page);
   buffer_pool_.unpin_page(pool_page_id, true);
 
   // Cache it immediately since we know the value
@@ -56,17 +54,18 @@ page_id_t IamManager::allocate_shared_page() {
   page_id_t current_pool_page = pool_page_id;
 
   while (current_pool_page != INVALID_PAGE_ID) {
-    Page* pool_page_obj = buffer_pool_.fetch_page(current_pool_page);
-    if (!pool_page_obj) {
+    Page* pool_frame = buffer_pool_.fetch_page(current_pool_page);
+    if (!pool_frame) {
       LOG_STORAGE_ERROR("Failed to fetch shared extent page {}", current_pool_page);
       return INVALID_PAGE_ID;
     }
 
-    auto* pool_header = reinterpret_cast<SharedExtentDirectoryPage*>(pool_page_obj->get_data());
-    uint8_t free_slot = pool_header->find_free_slot();
+    auto pool_header = load_page_layout<SharedExtentDirectoryPage>(pool_frame);
+    uint8_t free_slot = pool_header.find_free_slot();
 
     if (free_slot != SharedExtentDirectoryPage::NO_FREE_SLOT) {
-      pool_header->mark_slot_used(free_slot);
+      pool_header.mark_slot_used(free_slot);
+      store_page_layout(pool_frame, pool_header);
       buffer_pool_.unpin_page(current_pool_page, true);
 
       // The directory page sits at current_pool_page; slots 1–7 are the adjacent
@@ -77,13 +76,15 @@ page_id_t IamManager::allocate_shared_page() {
     }
 
     // No free slot — advance or extend
-    page_id_t next_pool = pool_header->next_pool_page;
+    page_id_t next_pool = pool_header.next_pool_page;
     if (next_pool == INVALID_PAGE_ID) {
-      next_pool = extend_shared_extent(pool_header, current_pool_page);
+      next_pool = extend_shared_extent();
       if (next_pool == INVALID_PAGE_ID) {
         buffer_pool_.unpin_page(current_pool_page, false);
         return INVALID_PAGE_ID;
       }
+      pool_header.next_pool_page = next_pool;
+      store_page_layout(pool_frame, pool_header);
       buffer_pool_.unpin_page(current_pool_page, true);
     } else {
       buffer_pool_.unpin_page(current_pool_page, false);
@@ -95,25 +96,29 @@ page_id_t IamManager::allocate_shared_page() {
   return INVALID_PAGE_ID;
 }
 
-page_id_t IamManager::extend_shared_extent(SharedExtentDirectoryPage* current_header,
-                                            page_id_t current_pool_page) {
+page_id_t IamManager::extend_shared_extent() {
   page_id_t new_pool_extent = extent_manager_.allocate_extent();
   if (new_pool_extent == INVALID_PAGE_ID) {
     LOG_STORAGE_ERROR("Failed to allocate new shared extent");
     return INVALID_PAGE_ID;
   }
 
-  Page* new_page = buffer_pool_.fetch_page(new_pool_extent);
-  if (!new_page) {
-    LOG_STORAGE_ERROR("Failed to fetch new shared extent page {}", new_pool_extent);
+  Page* new_directory_frame = buffer_pool_.new_page(new_pool_extent);
+  if (!new_directory_frame) {
+    new_directory_frame = buffer_pool_.fetch_page(new_pool_extent);
+    if (new_directory_frame && (new_directory_frame->get_pin_count() != 1 || new_directory_frame->is_dirty())) {
+      buffer_pool_.unpin_page(new_pool_extent, false);
+      new_directory_frame = nullptr;
+    }
+  }
+  if (!new_directory_frame) {
+    LOG_STORAGE_ERROR("Failed to create new shared extent page {}", new_pool_extent);
     return INVALID_PAGE_ID;
   }
-  auto* new_pool_header = new(new_page->get_data()) SharedExtentDirectoryPage();
-  new_pool_header->next_pool_page = INVALID_PAGE_ID;
-  new_pool_header->slots_bitmap = 0;
+  auto shared_extent_directory_page = make_shared_extent_directory_page();
+  store_page_layout(new_directory_frame, shared_extent_directory_page);
   buffer_pool_.unpin_page(new_pool_extent, true);
 
-  current_header->next_pool_page = new_pool_extent;
   LOG_STORAGE_INFO("Created new shared extent at page {}", new_pool_extent);
   return new_pool_extent;
 }
@@ -127,16 +132,21 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
     return INVALID_PAGE_ID;
   }
 
-  // Use fetch_page (not new_page) — the page already exists on disk from the shared extent
-  Page* page = buffer_pool_.fetch_page(iam_page_id);
-  if (!page) {
-    LOG_STORAGE_ERROR("Failed to fetch newly allocated IAM page {}", table_name, iam_page_id);
+  Page* iam_frame = buffer_pool_.new_page(iam_page_id);
+  if (!iam_frame) {
+    iam_frame = buffer_pool_.fetch_page(iam_page_id);
+    if (iam_frame && (iam_frame->get_pin_count() != 1 || iam_frame->is_dirty())) {
+      buffer_pool_.unpin_page(iam_page_id, false);
+      iam_frame = nullptr;
+    }
+  }
+  if (!iam_frame) {
+    LOG_STORAGE_ERROR("Failed to create newly allocated IAM page {}", table_name, iam_page_id);
     return INVALID_PAGE_ID;
   }
 
-  auto* iam_page = new(page->get_data()) IAMPage();
-  iam_page->next_page_id = INVALID_PAGE_ID;
-  iam_page->extent_count = 0;
+  auto iam_page = make_iam_page();
+  store_page_layout(iam_frame, iam_page);
   buffer_pool_.unpin_page(iam_page_id, true);
 
   LOG_STORAGE_INFO("Created new IAM chain for table {} at page {}", table_name, iam_page_id);
@@ -145,9 +155,9 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
 
 
 bool IamManager::page_has_space(page_id_t page_id, uint32_t required) {
-  Page* page = buffer_pool_.fetch_page(page_id);
-  if (!page) return false;
-  SlottedPage sp(page->get_data());
+  Page* data_frame = buffer_pool_.fetch_page(page_id);
+  if (!data_frame) return false;
+  SlottedPage sp(data_frame->get_data());
   bool has_space = sp.get_free_space() >= required;
   buffer_pool_.unpin_page(page_id, false);
   return has_space;
@@ -160,24 +170,33 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
     return INVALID_PAGE_ID;
   }
 
-  Page* new_page = buffer_pool_.fetch_page(new_iam_page_id);
-  if (!new_page) {
-    LOG_STORAGE_ERROR("Failed to fetch new IAM page {}", new_iam_page_id);
+  Page* new_iam_frame = buffer_pool_.new_page(new_iam_page_id);
+  if (!new_iam_frame) {
+    new_iam_frame = buffer_pool_.fetch_page(new_iam_page_id);
+    if (new_iam_frame && (new_iam_frame->get_pin_count() != 1 || new_iam_frame->is_dirty())) {
+      buffer_pool_.unpin_page(new_iam_page_id, false);
+      new_iam_frame = nullptr;
+    }
+  }
+  if (!new_iam_frame) {
+    LOG_STORAGE_ERROR("Failed to create new IAM page {}", new_iam_page_id);
     return INVALID_PAGE_ID;
   }
-  auto* new_iam = new(new_page->get_data()) IAMPage();
-  new_iam->next_page_id = INVALID_PAGE_ID;
-  new_iam->add_extent(extent_id);
+  auto iam_page = make_iam_page();
+  iam_page.add_extent(extent_id);
+  store_page_layout(new_iam_frame, iam_page);
   buffer_pool_.unpin_page(new_iam_page_id, true);
 
   if (prev_iam_page == INVALID_PAGE_ID) return new_iam_page_id;
 
-  Page* prev_page_obj = buffer_pool_.fetch_page(prev_iam_page);
-  if (!prev_page_obj) {
+  Page* prev_iam_frame = buffer_pool_.fetch_page(prev_iam_page);
+  if (!prev_iam_frame) {
     LOG_STORAGE_ERROR("Failed to fetch previous IAM page {} for linking", prev_iam_page);
     return new_iam_page_id;  // New IAM page exists but chain is broken — log and return
   }
-  reinterpret_cast<IAMPage*>(prev_page_obj->get_data())->next_page_id = new_iam_page_id;
+  auto prev_iam = load_page_layout<IAMPage>(prev_iam_frame);
+  prev_iam.next_page_id = new_iam_page_id;
+  store_page_layout(prev_iam_frame, prev_iam);
   buffer_pool_.unpin_page(prev_iam_page, true);
 
   LOG_STORAGE_INFO("Created new IAM page {} and added extent {}", new_iam_page_id, extent_id);
@@ -206,15 +225,16 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   page_id_t prev_iam_page = INVALID_PAGE_ID;
 
   while (current_iam_page != INVALID_PAGE_ID) {
-    Page* iam_page_obj = buffer_pool_.fetch_page(current_iam_page);
-    if (!iam_page_obj) {
+    Page* iam_frame = buffer_pool_.fetch_page(current_iam_page);
+    if (!iam_frame) {
       LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
       return INVALID_PAGE_ID;
     }
 
-    auto* iam_page = reinterpret_cast<IAMPage*>(iam_page_obj->get_data());
-    if (iam_page->has_space()) {
-      iam_page->add_extent(extent_id);
+    auto iam_page = load_page_layout<IAMPage>(iam_frame);
+    if (iam_page.has_space()) {
+      iam_page.add_extent(extent_id);
+      store_page_layout(iam_frame, iam_page);
       buffer_pool_.unpin_page(current_iam_page, true);
       LOG_STORAGE_INFO("Added extent {} to IAM page {}", extent_id, current_iam_page);
       table_page_hints_[iam_head_page_id] = extent_start_page;
@@ -222,7 +242,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
     }
 
     prev_iam_page = current_iam_page;
-    page_id_t next_iam = iam_page->next_page_id;
+    page_id_t next_iam = iam_page.next_page_id;
     buffer_pool_.unpin_page(current_iam_page, false);
     current_iam_page = next_iam;
   }
@@ -255,17 +275,14 @@ page_id_t IamManager::find_page_with_space(page_id_t iam_head_page_id, uint32_t 
 
     result = scan_extent_forward(iam_head_page_id, hint_it->second, total_needed);
     if (result != INVALID_PAGE_ID) return result;
-
-    LOG_STORAGE_DEBUG("No space in hint extent, signaling new extent needed");
-    return INVALID_PAGE_ID;
   }
 
-  // No hint available (first insert) — full IAM chain scan
+  // Hint missed or hint extent exhausted — scan all extents in the IAM chain
   return scan_iam_chain(iam_head_page_id, total_needed);
 }
 
 page_id_t IamManager::find_hint_page(page_id_t iam_head_page_id, uint32_t total_needed) {
-  page_id_t hint_page_id = table_page_hints_[iam_head_page_id];
+  page_id_t hint_page_id = table_page_hints_.at(iam_head_page_id);
   if (!page_has_space(hint_page_id, total_needed)) return INVALID_PAGE_ID;
   LOG_STORAGE_DEBUG("Hint hit: page {} has sufficient space", hint_page_id);
   return hint_page_id;
@@ -291,13 +308,12 @@ page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_
   page_id_t current_iam_page = iam_head_page_id;
 
   while (current_iam_page != INVALID_PAGE_ID) {
-    Page* iam_page_obj = buffer_pool_.fetch_page(current_iam_page);
-    if (!iam_page_obj) {
+    auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page);
+    if (!iam_page) {
       LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
       return INVALID_PAGE_ID;
     }
 
-    auto* iam_page = reinterpret_cast<const IAMPage*>(iam_page_obj->get_data());
     page_id_t next_iam = iam_page->next_page_id;
 
     for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
@@ -307,13 +323,11 @@ page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_
         if (page_has_space(data_page_id, total_needed)) {
           LOG_STORAGE_DEBUG("Found page {} with sufficient space", data_page_id);
           table_page_hints_[iam_head_page_id] = data_page_id;
-          buffer_pool_.unpin_page(current_iam_page, false);
           return data_page_id;
         }
       }
     }
 
-    buffer_pool_.unpin_page(current_iam_page, false);
     current_iam_page = next_iam;
   }
 

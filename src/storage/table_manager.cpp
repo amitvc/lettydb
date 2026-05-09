@@ -1,6 +1,7 @@
 #include "table_manager.h"
 #include "slotted_page.h"
 #include "storage_def.h"
+#include "page_utils.h"
 #include <iostream>
 
 namespace letty {
@@ -16,11 +17,22 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
   pid = iam_manager_.allocate_extent_for_table(iam_head);
   if (pid == INVALID_PAGE_ID) return INVALID_PAGE_ID;
 
-  // Format the first page of the new extent as an empty SlottedPage
-  Page* pg = buffer_pool_.fetch_page(pid);
-  if (!pg) return INVALID_PAGE_ID;
-  SlottedPage::init(pg->get_data());
-  buffer_pool_.unpin_page(pid, true);
+  // Materialize all 8 pages in the new extent as empty SlottedPages.
+  // Without this, uninitialized pages have free_space_pointer = 0 and appear
+  // full to page_has_space, so only the first page of each extent would ever be used.
+  for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
+    Page* pg = buffer_pool_.new_page(pid + offset);
+    if (!pg) {
+      pg = buffer_pool_.fetch_page(pid + offset);
+      if (pg && (pg->get_pin_count() != 1 || pg->is_dirty())) {
+        buffer_pool_.unpin_page(pid + offset, false);
+        pg = nullptr;
+      }
+    }
+    if (!pg) return INVALID_PAGE_ID;
+    SlottedPage::init(pg->get_data());
+    buffer_pool_.unpin_page(pid + offset, true);
+  }
   return pid;
 }
 
@@ -164,20 +176,16 @@ bool TableManager::scan_table(const std::string& table_name,
 
   page_id_t current_iam_page_id = meta->iam_page_id;
   while (current_iam_page_id != INVALID_PAGE_ID) {
-    Page* iam_pg = buffer_pool_.fetch_page(current_iam_page_id);
-    if (!iam_pg) {
+    auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
+    if (!iam_page) {
       std::cerr << "Failed to fetch IAM page " << current_iam_page_id << std::endl;
       return false;
     }
 
-    auto* iam_page = reinterpret_cast<const IAMPage*>(iam_pg->get_data());
     for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
       scan_extent(iam_page->extent_ids[i], callback);
     }
-
-    page_id_t next_iam = iam_page->next_page_id;
-    buffer_pool_.unpin_page(current_iam_page_id, false);
-    current_iam_page_id = next_iam;
+    current_iam_page_id = iam_page->next_page_id;
   }
 
   return true;
@@ -195,22 +203,17 @@ bool TableManager::scan_table_tuples(const std::string& table_name,
   page_id_t current_iam_page_id = meta->iam_page_id;
 
   while (current_iam_page_id != INVALID_PAGE_ID) {
-    Page* iam_pg = buffer_pool_.fetch_page(current_iam_page_id);
-    if (!iam_pg) {
+    auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
+    if (!iam_page) {
       std::cerr << "Failed to fetch IAM page " << current_iam_page_id << std::endl;
       return false;
     }
 
-    auto* iam_page = reinterpret_cast<const IAMPage*>(iam_pg->get_data());
     for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
       scan_extent_tuples(iam_page->extent_ids[i], schema, callback);
     }
-
-    page_id_t next_iam = iam_page->next_page_id;
-    buffer_pool_.unpin_page(current_iam_page_id, false);
-    current_iam_page_id = next_iam;
+    current_iam_page_id = iam_page->next_page_id;
   }
-
   return true;
 }
 

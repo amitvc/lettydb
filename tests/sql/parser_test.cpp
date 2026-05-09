@@ -1492,3 +1492,22 @@ TEST_F(ParserTest, InsertMixedNegativeAndPositive) {
   	EXPECT_DOUBLE_EQ(std::get<double>(insert->values[0][3]->value), 3.14);
   	EXPECT_DOUBLE_EQ(std::get<double>(insert->values[0][4]->value), -3.0);
 }
+
+TEST_F(ParserTest, InsertNullLiteral) {
+    auto ast = parse_query("INSERT INTO t VALUES (NULL)");
+    auto* insert = dynamic_cast<InsertStatementNode*>(ast.get());
+    ASSERT_NE(insert, nullptr);
+    ASSERT_EQ(insert->values.size(), 1u);
+    ASSERT_EQ(insert->values[0].size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(insert->values[0][0]->value));
+}
+
+TEST_F(ParserTest, InsertNullMixedWithOtherValues) {
+    auto ast = parse_query("INSERT INTO t VALUES (1, NULL, 'hello')");
+    auto* insert = dynamic_cast<InsertStatementNode*>(ast.get());
+    ASSERT_NE(insert, nullptr);
+    ASSERT_EQ(insert->values[0].size(), 3u);
+    EXPECT_EQ(std::get<int64_t>(insert->values[0][0]->value), 1);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(insert->values[0][1]->value));
+    EXPECT_EQ(std::get<std::string>(insert->values[0][2]->value), "hello");
+}

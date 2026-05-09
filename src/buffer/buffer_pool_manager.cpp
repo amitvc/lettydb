@@ -1,5 +1,6 @@
 #include "buffer/buffer_pool_manager.h"
 #include "common/logger.h"
+#include <stdexcept>
 
 namespace letty {
 
@@ -10,14 +11,39 @@ BufferPoolManager::BufferPoolManager(IDiskManager& disk_manager, size_t pool_siz
       pages_(pool_size_),
       replacer_(std::move(replacer)) {
 
-  // All frames start on the free list
+  if (pool_size_ == 0) {
+	LOG_BPM_ERROR("Cannot have Buffer pool manager with pool size of 0");
+	throw std::invalid_argument("Cannot have Buffer pool manager with pool size of 0");
+  }
+
+  if (replacer_ == nullptr) {
+	LOG_BPM_ERROR("PageReplacer cannot be null");
+	throw std::invalid_argument("PageReplacer cannot be null");
+  }
+
+  page_data_buffer_ = static_cast<char*>(std::aligned_alloc(PAGE_SIZE, pool_size_ * PAGE_SIZE));
+  LOG_BPM_INFO("Allocating {} bytes of memory to load disk pages into the RAM", (pool_size_ * PAGE_SIZE));
+  if (page_data_buffer_ == nullptr) {
+	LOG_BPM_ERROR("Problem allocating initial memory required for loading disk pages into RAM");
+	throw std::bad_alloc();
+  }
+
+  // Attach each Page metadata object to its fixed PAGE_SIZE slice in the aligned frame buffer.
+  for (size_t i = 0; i < pool_size_; ++i) {
+    pages_[i].data_ = page_data_buffer_ + (i * PAGE_SIZE);
+    std::memset(pages_[i].data_, 0, PAGE_SIZE);
+  }
+
   for (frame_id_t i = 0; i < static_cast<frame_id_t>(pool_size); ++i) {
     free_list_.push_back(i);
   }
 }
 
 BufferPoolManager::~BufferPoolManager() {
-  checkpoint();
+  if (!checkpoint()) {
+	LOG_BPM_ERROR("Checkpoint failure encountered while BPM is being shutdown.");
+  }
+  std::free(page_data_buffer_);
 }
 
 Page* BufferPoolManager::fetch_page(page_id_t page_id) {
@@ -37,13 +63,22 @@ Page* BufferPoolManager::fetch_page(page_id_t page_id) {
   // Cache miss — need a frame
   ++cache_misses_;
   auto new_frame = acquire_frame();
-  if (!new_frame) return nullptr;
+  if (!new_frame) {
+	LOG_BPM_WARN("Failed to fetch page {}: no buffer frame available", page_id);
+	return nullptr;
+  }
   frame_id_t frame_id = new_frame.value();
 
   Page& page = pages_[frame_id];
   page.reset(); // Clear the current page
-  LOG_STORAGE_DEBUG("Buffer pool miss: page {}, frame {}", page_id, frame_id);
-  disk_manager_.read_page(page_id, page.get_data());
+  LOG_BPM_DEBUG("Buffer pool miss: page {}, frame {}", page_id, frame_id);
+  IOResult result = disk_manager_.read_page(page_id, page.get_data());
+  if (result != IOResult::SUCCESS) {
+    LOG_BPM_ERROR("Failed to read page {} into frame {}", page_id, frame_id);
+    page.reset();
+    free_list_.push_back(frame_id);
+	return nullptr;
+  }
   page.set_page_id(page_id);
   page.increment_pin();
 
@@ -62,6 +97,11 @@ bool BufferPoolManager::unpin_page(page_id_t page_id, bool is_dirty) {
 
   frame_id_t frame_id = it->second;
   Page& page = pages_[frame_id];
+
+  if (page.get_pin_count() <= 0) {
+    LOG_BPM_WARN("Failed to unpin page {}: pin count is already {}", page_id, page.get_pin_count());
+    return false;
+  }
 
   if (is_dirty) {
     page.set_dirty(true);
@@ -82,12 +122,16 @@ Page* BufferPoolManager::new_page(page_id_t page_id) {
 
   // Don't allow duplicate pages
   if (page_table_.find(page_id) != page_table_.end()) {
+	LOG_BPM_WARN("Failed to create page {}: page is already in buffer pool", page_id);
     return nullptr;
   }
 
   // Find a frame (free list or eviction)
   auto maybe_frame = acquire_frame();
-  if (!maybe_frame) return nullptr;
+  if (!maybe_frame) {
+	LOG_BPM_WARN("Failed to create page {}: no buffer frame available", page_id);
+	return nullptr;
+  }
   frame_id_t frame_id = *maybe_frame;
 
   // Initialize the new page
@@ -112,19 +156,24 @@ std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
   // No free frames available. We need to evict least recently used frame. Identify frame to evict.
   auto victim_id = replacer_->identify_frame_to_evict();
   if (!victim_id) {
-    LOG_STORAGE_WARN("Buffer pool full: {} frames, all pinned", pool_size_);
+	LOG_BPM_WARN("Buffer pool full: {} frames, all pinned", pool_size_);
     return std::nullopt;
   }
   frame_id_t frame_id = victim_id.value();
 
-  // Evict the victim
-  ++evictions_;
   Page& victim = pages_[frame_id];
   if (victim.is_dirty()) {
+    LOG_BPM_DEBUG("Dirty eviction: writing page {} to disk", victim.get_page_id());
+    IOResult result = disk_manager_.write_page(victim.get_page_id(), victim.get_data());
+    if (result != IOResult::SUCCESS) {
+      LOG_BPM_ERROR("Failed to evict dirty page {} from frame {}", victim.get_page_id(), frame_id);
+      replacer_->mark_evictable(frame_id);
+      return std::nullopt;
+    }
     ++dirty_evictions_;
-    LOG_STORAGE_DEBUG("Dirty eviction: writing page {} to disk", victim.get_page_id());
-    disk_manager_.write_page(victim.get_page_id(), victim.get_data());
   }
+
+  ++evictions_;
   page_table_.erase(victim.get_page_id());
   return frame_id;
 }
@@ -141,7 +190,11 @@ bool BufferPoolManager::flush_page(page_id_t page_id) {
   Page& page = pages_[frame_id];
 
   if (page.is_dirty()) {
-    disk_manager_.write_page(page_id, page.get_data());
+    IOResult result = disk_manager_.write_page(page_id, page.get_data());
+    if (result != IOResult::SUCCESS) {
+      LOG_BPM_ERROR("Failed to flush dirty page {}", page_id);
+      return false;
+    }
     page.set_dirty(false);
     ++flushes_;
   }
@@ -149,14 +202,20 @@ bool BufferPoolManager::flush_page(page_id_t page_id) {
   return true;
 }
 
-void BufferPoolManager::flush_all_pages() {
+bool BufferPoolManager::flush_all_pages() {
   std::lock_guard<std::mutex> lock(latch_);
 
   uint64_t flushed_count = 0;
+  uint64_t failed_count = 0;
   for (auto& [page_id, frame_id] : page_table_) {
     Page& page = pages_[frame_id];
     if (page.is_dirty()) {
-      disk_manager_.write_page(page_id, page.get_data());
+      IOResult result = disk_manager_.write_page(page_id, page.get_data());
+      if (result != IOResult::SUCCESS) {
+        ++failed_count;
+        LOG_BPM_ERROR("Failed to flush dirty page {}", page_id);
+        continue;
+      }
       page.set_dirty(false);
       ++flushed_count;
     }
@@ -164,13 +223,19 @@ void BufferPoolManager::flush_all_pages() {
 
   if (flushed_count > 0) {
     flushes_ += flushed_count;
-    LOG_STORAGE_INFO("Flushed {} dirty pages", flushed_count);
+    LOG_BPM_INFO("Flushed {} dirty pages", flushed_count);
   }
+  if (failed_count > 0) {
+    LOG_BPM_ERROR("Failed to flush {} dirty page(s)", failed_count);
+  }
+
+  return failed_count == 0;
 }
 
-void BufferPoolManager::checkpoint() {
-  flush_all_pages();
-  disk_manager_.sync();
+bool BufferPoolManager::checkpoint() {
+  bool flushed = flush_all_pages();
+  bool synced = disk_manager_.sync();
+  return flushed && synced;
 }
 
 bool BufferPoolManager::delete_page(page_id_t page_id) {
@@ -218,4 +283,4 @@ void BufferPoolManager::reset_cache_stats() {
   flushes_ = 0;
 }
 
-}  // namespace letty
+}

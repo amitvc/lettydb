@@ -9,8 +9,8 @@ namespace letty {
  * @class PageReplacer
  * @brief Abstract interface for buffer pool eviction policies.
  *
- * Tracks which frames are eligible for eviction and selects victims when
- * the BufferPoolManager needs to reclaim a frame. Implementations (e.g.,
+ * Tracks which page frames are eligible for eviction and selects eligible page frames when
+ * the BufferPoolManager needs to reclaim a page frame. Implementations (e.g.,
  * LRUPageReplacer, ClockReplacer) define the eviction policy.
  *
  * Thread safety: None. Caller (BufferPoolManager) must hold its own latch.

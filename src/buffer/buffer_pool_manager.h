@@ -14,7 +14,9 @@
 
 namespace letty {
 
-/** @brief Snapshot of buffer pool cache performance counters. */
+/** @brief
+ * Snapshot of buffer pool cache performance counters.
+ * */
 struct CacheStats {
   uint64_t hits             = 0;
   uint64_t misses           = 0;
@@ -33,9 +35,15 @@ struct CacheStats {
  * @brief Manages a fixed-size pool of in-memory pages, serving as the single
  *        point of access for all page reads and writes.
  *
+ * BufferPoolManager is the storage layer's access point for database page. It
+ * fetches pages into memory, pins frames while callers use them, tracks dirty
+ * pages, and writes dirty frames back on eviction, flush, checkpoint, or
+ * destruction.
+ * Callers must unpin every page returned by fetch_page() or new_page(). A page
+ * whose pin count is nonzero is not evictable. When a caller modifies page
+ * bytes, it must pass is_dirty=true to unpin_page().
  * All storage components (ExtentManager, IamManager, CatalogManager, TableManager)
  * access pages through the BufferPoolManager instead of calling DiskManager directly.
- * Pages are cached in memory and written back to disk only when evicted or flushed.
  *
  * Thread safety: All public methods are protected by an internal mutex.
  */
@@ -45,18 +53,16 @@ class BufferPoolManager {
                     std::unique_ptr<PageReplacer> replacer); // We can inject different implementation of PageReplacer
 
   /**
-   * @brief
    * Flush all dirty pages to disk.
    */
   ~BufferPoolManager();
 
-  // Non-copyable, non-movable
   BufferPoolManager(const BufferPoolManager&) = delete;
   BufferPoolManager& operator=(const BufferPoolManager&) = delete;
 
   /**
    * @brief Fetch a page from the pool. Reads from disk on cache miss.
-   * @param page_id The page to fetch.
+   * @param page_id id of page to be fetched. If the page is not in the cache it is read from disk using DiskManager
    * @return Pointer to the Page, or nullptr if pool is full and all frames are pinned.
    *         Caller MUST call unpin_page when done.
    */
@@ -73,8 +79,20 @@ class BufferPoolManager {
 
   /**
    * @brief Register a new page in the pool that does not yet exist on disk.
-   * @param page_id The page ID assigned by the caller (from ExtentManager).
-   * @return Pointer to the Page (pin_count=1, dirty=true), or nullptr if pool is full.
+   *
+   * The page ID is assigned by the caller. The returned frame is pinned
+   * (pin_count=1), zeroed, and marked dirty immediately so the page will be
+   * written to disk on flush or eviction.
+   *
+   * This function is strict: if page_id is already present in the buffer pool,
+   * it returns nullptr rather than reusing or overwriting the existing frame.
+   * Callers that are formatting a newly allocated logical page which may already
+   * be cached because of file pre-extension should handle that case explicitly,
+   * usually by falling back to fetch_page(page_id) and then writing the page
+   * layout.
+   *
+   * @return Pointer to the Page, or nullptr if the page is already cached or no
+   *         frame is available. Caller must unpin the page when done.
    */
   Page* new_page(page_id_t page_id);
 
@@ -85,15 +103,18 @@ class BufferPoolManager {
   bool flush_page(page_id_t page_id);
 
   /**
-   * @brief
-   * Write all dirty pages in the pool to disk.
-   * */
-  void flush_all_pages();
+   * @brief Write all dirty pages in the pool to disk.
+   * @return true if every dirty page was flushed successfully.
+   *         false if one or more dirty pages failed to flush.
+   */
+  bool flush_all_pages();
 
   /**
    * @brief Flush all dirty pages and sync to stable storage.
-   * */
-  void checkpoint();
+   * @return true if all dirty pages were flushed and the disk sync succeeded.
+   *         false if one or more dirty pages failed to flush, or sync failed.
+   */
+  bool checkpoint();
 
   /**
    * @brief Remove a page from the pool entirely.
@@ -120,7 +141,17 @@ class BufferPoolManager {
  private:
   IDiskManager& disk_manager_;
   size_t pool_size_;
+
+  // PAGE_SIZE-aligned slab. Frame i occupies page_data_buffer_ + (i * PAGE_SIZE).
+  // Each frame is exactly one database page and starts at a page-aligned address,
+  // which keeps the in-memory layout consistent with the disk page size.
+  // Freed in destructor via std::free.
+  char* page_data_buffer_ = nullptr;
   std::vector<Page> pages_;
+
+  // Runtime mapping of page_id → frame_id. Tells the BPM which frame currently
+  // holds a given page. A page can land in any frame — there is no fixed formula.
+  // On eviction the entry is removed; on fetch/new_page it is inserted.
   std::unordered_map<page_id_t, frame_id_t> page_table_;
   std::list<frame_id_t> free_list_;
   std::unique_ptr<PageReplacer> replacer_;

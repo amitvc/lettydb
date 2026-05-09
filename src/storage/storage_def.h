@@ -4,6 +4,7 @@
 #include "sql/utils.h"
 #include <cstddef>
 #include <cstring>
+#include <type_traits>
 
 
 namespace letty {
@@ -21,8 +22,8 @@ namespace letty {
  * @brief Page 0 — the entry point for all database metadata.
  *
  * Always the first page in the database file. Has a fixed layout and
- * occupies exactly one page (PAGE_SIZE bytes). All other pages are
- * located through this page.
+ * occupies exactly one page (PAGE_SIZE bytes). All other pages are reachable by
+ * following pointers stored in this page.
  *
  * @verbatim
  * Byte Offsets (PAGE_SIZE = 4096)
@@ -64,7 +65,7 @@ namespace letty {
  * @endverbatim
  *
  * @par Invariants
- *  - page_id is always 0
+ *  - database header page is always 0
  *  - Layout is fixed and backward-compatible via `version`
  *  - All other pages are bootstrapped through this page
  */
@@ -90,7 +91,7 @@ struct DatabaseHeader {
   // User tables start at 100 and increment from there.
   uint16_t next_table_oid = 100;
 
-  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam) + 4 (meta_pool) + 4 (sys_tables) + 4 (sys_cols) + 2 (next_oid) = 34 bytes
+  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam_pg_id) + 4 (shared_extent_pg_id) + 4 (sys_tables_pg_id) + 4 (sys_cols_pg_id) + 2 (next_oid) = 34 bytes
   uint8_t padding[PAGE_SIZE - 34]; // Padding to ensure the header completely fills the page.
 
   DatabaseHeader() {
@@ -101,6 +102,30 @@ struct DatabaseHeader {
 
 static_assert(sizeof(DatabaseHeader) == PAGE_SIZE, 
               "DatabaseHeader must be exactly PAGE_SIZE bytes");
+static_assert(std::is_trivially_copyable_v<DatabaseHeader>,
+              "DatabaseHeader must be safe to copy to/from page bytes");
+static_assert(std::is_standard_layout_v<DatabaseHeader>,
+              "DatabaseHeader must have stable field offsets");
+static_assert(offsetof(DatabaseHeader, version) == 8,
+              "DatabaseHeader::version offset changed");
+
+/**
+ * Create a DatabaseHeader object and initialize it.
+ * @return
+ */
+inline DatabaseHeader make_database_header() {
+  DatabaseHeader header{};
+  std::memset(header.signature, 0, sizeof(header.signature));
+  std::memcpy(header.signature, DB_SIGNATURE, sizeof(DB_SIGNATURE));
+  header.version = 1;
+  header.page_size = PAGE_SIZE;
+  header.gam_page_id = FIRST_GAM_PAGE_ID;
+  header.shared_extent_page_id = FIRST_SHARED_EXTENT_PAGE_ID;
+  header.sys_tables_iam_page = INVALID_PAGE_ID;
+  header.sys_columns_iam_page = INVALID_PAGE_ID;
+  header.next_table_oid = 100;
+  return header;
+}
 
 /**
  * @struct GAMPage
@@ -130,20 +155,47 @@ struct GAMPage {
   // Links GAM pages together when database grows beyond single page capacity
   page_id_t next_page_id = INVALID_PAGE_ID;
 
-  // Hint for where to start searching for free bits (optimization)
-  // Updated on allocation (set to next bit) and deallocation (rewind if earlier)
+  /* This is an optimization in order to avoid scanning all 4090 bits.
+   * We start from this bit until the end of the bitmap to find an unused gam slot.
+   * If we dont find one we rewind and search from 0 until this slot to find an empty gam page slot.
+   * The reason for doing this is to make sure we dont miss out on gam pages that are freed up after table or page deletions
+   **/
   uint16_t first_free_bit_hint = 0;
 
   // Bitmap tracking extent allocation (1 = allocated, 0 = free)
   char bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4090 = 4096 - (4 bytes PAGE_ID + 2 bytes hint)
 };
 
+static_assert(sizeof(GAMPage) == PAGE_SIZE,
+              "GAMPage must be exactly PAGE_SIZE bytes");
+static_assert(std::is_trivially_copyable_v<GAMPage>,
+              "GAMPage must be safe to copy to/from page bytes");
+static_assert(std::is_standard_layout_v<GAMPage>,
+              "GAMPage must have stable field offsets");
+static_assert(offsetof(GAMPage, bitmap) == 6,
+              "GAMPage::bitmap offset changed");
+
+inline GAMPage make_gam_page() {
+  GAMPage page{};
+  page.next_page_id = INVALID_PAGE_ID;
+  page.first_free_bit_hint = 0;
+  return page;
+}
+
 /**
  * @struct SharedExtentDirectoryPage
  * @brief Directory page for a shared extent.
  *
- * A shared extent holds up to 7 metadata pages (IAM pages, etc.).
- * Page 0 of the extent is this directory; pages 1–7 are allocatable slots.
+ * A shared extent allows IAM pages for different tables to coexist in the same
+ * extent instead of wasting a full extent per IAM page. For example, if each
+ * table's first IAM page used a dedicated 8-page extent, creating 20 small
+ * tables would reserve 160 pages even though only 20 IAM pages are needed.
+ * With shared extents, those 20 IAM pages fit into 3 shared extents, reserving
+ * 24 pages instead of 160.
+ *
+ * Page 0 of each shared extent serves as the directory page, while pages 1-7
+ * are allocatable metadata slots. The directory tracks which slots are occupied
+ * and links to the next shared extent when this one is full.
  *
  * @verbatim
  *  +--------------------------------------------------------------+ 0
@@ -151,19 +203,19 @@ struct GAMPage {
  *  |   - Links to the next pool extent when this one is full      |
  *  |   - INVALID_PAGE_ID if this is the last extent               |
  *  +--------------------------------------------------------------+ 4
- *  | slots_bitmap (uint8_t)                                       |
- *  |   - Bit i set means slot i is occupied (bits 1–7 only)       |
- *  |   - Bit 0 is unused (reserved for the directory page itself) |
- *  +--------------------------------------------------------------+ 5
- *  | padding[4091]                                                |
+ *  | slot_used[7] (uint8_t array)                                 |
+ *  |   - slot_used[i] is 1 when slot i+1 is occupied, otherwise 0 |
+ *  |   - Slot numbers are 1-7 because page 0 is the directory     |
+ *  +--------------------------------------------------------------+ 11
+ *  | padding[4085]                                                |
  *  |   - Zero-filled; ensures the struct fills exactly one page   |
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
 struct SharedExtentDirectoryPage {
   page_id_t next_pool_page = INVALID_PAGE_ID;  // 4 bytes
-  uint8_t slots_bitmap = 0;                     // 1 byte - bits 1-7 represent slots
-  char padding[PAGE_SIZE - 5];                  // Fill the rest of the page
+  uint8_t slot_used[SHARED_EXTENT_SLOTS] = {};  // 7 bytes - slot N is stored at index N - 1
+  char padding[PAGE_SIZE - 4 - SHARED_EXTENT_SLOTS]; // This padding is essentially not being used.
   
   static constexpr uint8_t NO_FREE_SLOT = 0;
 
@@ -172,9 +224,9 @@ struct SharedExtentDirectoryPage {
    * @return Slot number (1-7) or NO_FREE_SLOT if no free slot.
    */
   uint8_t find_free_slot() const {
-    for (uint8_t i = 1; i <= SHARED_EXTENT_SLOTS; ++i) {
-      if ((slots_bitmap & (1 << i)) == 0) {
-        return i;
+    for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
+      if (slot_used[slot - 1] == 0) {
+        return slot;
       }
     }
     return NO_FREE_SLOT;
@@ -184,23 +236,38 @@ struct SharedExtentDirectoryPage {
    * @brief Mark a slot as used.
    */
   void mark_slot_used(uint8_t slot) {
-    slots_bitmap |= (1 << slot);
+    slot_used[slot - 1] = 1;
   }
   
   /**
    * @brief Mark a slot as free.
    */
   void mark_slot_free(uint8_t slot) {
-    slots_bitmap &= ~(1 << slot);
+    slot_used[slot - 1] = 0;
   }
   
   /**
    * @brief Check if a slot is used.
    */
   bool is_slot_used(uint8_t slot) const {
-    return (slots_bitmap & (1 << slot)) != 0;
+    return slot_used[slot - 1] != 0;
   }
 };
+
+static_assert(sizeof(SharedExtentDirectoryPage) == PAGE_SIZE,
+              "SharedExtentDirectoryPage must be exactly PAGE_SIZE bytes");
+static_assert(std::is_trivially_copyable_v<SharedExtentDirectoryPage>,
+              "SharedExtentDirectoryPage must be safe to copy to/from page bytes");
+static_assert(std::is_standard_layout_v<SharedExtentDirectoryPage>,
+              "SharedExtentDirectoryPage must have stable field offsets");
+static_assert(offsetof(SharedExtentDirectoryPage, slot_used) == 4,
+              "SharedExtentDirectoryPage::slot_used offset changed");
+
+inline SharedExtentDirectoryPage make_shared_extent_directory_page() {
+  SharedExtentDirectoryPage page{};
+  page.next_pool_page = INVALID_PAGE_ID;
+  return page;
+}
 
 /**
  * @struct IAMPage
@@ -266,6 +333,23 @@ struct IAMPage {
     return false;
   }
 };
+
+static_assert(sizeof(IAMPage) == PAGE_SIZE,
+              "IAMPage must be exactly PAGE_SIZE bytes");
+static_assert(std::is_trivially_copyable_v<IAMPage>,
+              "IAMPage must be safe to copy to/from page bytes");
+static_assert(std::is_standard_layout_v<IAMPage>,
+              "IAMPage must have stable field offsets");
+static_assert(offsetof(IAMPage, extent_ids) == 8,
+              "IAMPage::extent_ids offset changed");
+
+inline IAMPage make_iam_page() {
+  IAMPage page{};
+  page.next_page_id = INVALID_PAGE_ID;
+  page.extent_count = 0;
+  page.reserved = 0;
+  return page;
+}
 #pragma pack(pop)
 
 /**

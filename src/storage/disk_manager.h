@@ -7,11 +7,10 @@
 #include "error_codes.h"
 
 namespace letty {
-
-
-/** @brief Snapshot of disk I/O counters.
- *
- **/
+/**
+ * @brief
+ * Capture i/o statistics
+ */
 struct IOStats {
   uint64_t reads  = 0;
   uint64_t writes = 0;
@@ -22,7 +21,7 @@ struct IOStats {
  * @brief Interface for disk management operations
  *
  * This interface defines the contract for disk I/O operations at the page level.
- * Page is nothing but a continuous block of bytes on disk. It is smallest unit we read/write to the disk.
+ * Page is nothing but a continuous block of bytes on disk. It is smallest unit we load/write to the disk.
  * Having an interface for this I/O functionality allows to simulate I/O failures in unit tests
  */
 class IDiskManager {
@@ -39,8 +38,9 @@ class IDiskManager {
 
   /**
    * Flush all buffered writes to the disk.
+   * @return true if the sync succeeds.
    */
-  virtual void sync() {}
+  virtual bool sync() { return true; }
 };
 
 /**
@@ -102,12 +102,14 @@ class DiskManager : public IDiskManager {
 
   IOStats get_io_stats() const override;
   void reset_io_stats() override;
-  void sync() override;
+  bool sync() override;
 
  private:
   std::string file_name_;
   int fd_ = -1;
   std::atomic<uint64_t> read_count_{0};
   std::atomic<uint64_t> write_count_{0};
+  std::atomic<uint64_t> read_error_{0};
+  std::atomic<uint64_t> write_error_{0};
 };
 }

@@ -16,6 +16,7 @@ class MockDiskManager : public IDiskManager {
   MOCK_METHOD(IOResult, write_page, (page_id_t page_id, const char* data), (override));
   MOCK_METHOD(IOResult, read_page, (page_id_t page_id, char* data), (override));
   MOCK_METHOD(page_id_t, get_file_size_in_pages, (), (override));
+  MOCK_METHOD(bool, sync, (), (override));
 };
 
 // ─── Test Fixture ──────────────────────────────────────────────────
@@ -294,7 +295,54 @@ TEST_F(BufferPoolManagerTest, FlushAllPagesWritesAllDirty) {
       .WillOnce(testing::Return(IOResult::SUCCESS));
   EXPECT_CALL(mock_disk_, write_page(2, testing::_)).Times(0);
 
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
+}
+
+TEST_F(BufferPoolManagerTest, FlushAllPagesReturnsFalseAndKeepsFailedPageDirty) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(1, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  Page* page = bpm->fetch_page(1);
+  ASSERT_NE(page, nullptr);
+  bpm->unpin_page(1, true);
+
+  EXPECT_CALL(mock_disk_, write_page(1, testing::_))
+      .WillOnce(testing::Return(IOResult::WRITE_ERROR))
+      .WillRepeatedly(testing::Return(IOResult::SUCCESS));
+
+  EXPECT_FALSE(bpm->flush_all_pages());
+  EXPECT_TRUE(page->is_dirty());
+}
+
+TEST_F(BufferPoolManagerTest, CheckpointReturnsTrueWhenFlushAndSyncSucceed) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(1, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  Page* page = bpm->fetch_page(1);
+  ASSERT_NE(page, nullptr);
+  bpm->unpin_page(1, true);
+
+  EXPECT_CALL(mock_disk_, write_page(1, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+  EXPECT_CALL(mock_disk_, sync())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(testing::Return(true));
+
+  EXPECT_TRUE(bpm->checkpoint());
+}
+
+TEST_F(BufferPoolManagerTest, CheckpointReturnsFalseWhenSyncFails) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, sync())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(testing::Return(false));
+
+  EXPECT_FALSE(bpm->checkpoint());
 }
 
 // ─── Delete Page ───────────────────────────────────────────────────
@@ -458,7 +506,7 @@ TEST_F(BufferPoolManagerTest, FlushAllCountsEachDirtyPage) {
     bpm->unpin_page(i, true);  // all dirty
   }
 
-  bpm->flush_all_pages();
+  EXPECT_TRUE(bpm->flush_all_pages());
 
   auto stats = bpm->get_cache_stats();
   EXPECT_EQ(stats.flushes, 3);

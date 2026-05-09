@@ -66,7 +66,7 @@ namespace letty {
         template<typename T>
         explicit LiteralNode(T val) : value(std::move(val)) {}
 
-        std::variant<int64_t, double, std::string, bool, SQLDate, SQLTimestamp> value;
+        std::variant<std::monostate, int64_t, double, std::string, bool, SQLDate, SQLTimestamp> value;
 
     };
 
