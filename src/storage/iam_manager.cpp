@@ -1,6 +1,7 @@
 #include "iam_manager.h"
 #include "slotted_page.h"
 #include "page_utils.h"
+#include "common/db_exception.h"
 #include "common/logger.h"
 
 namespace letty {
@@ -15,8 +16,7 @@ page_id_t IamManager::get_shared_extent_page_id() {
 
   auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
   if (!db_header) {
-    LOG_STORAGE_ERROR("Failed to fetch header page for shared extent lookup");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::IOError, "failed to fetch header page for shared extent lookup");
   }
 
   shared_extent_page_id_ = db_header->shared_extent_page_id;
@@ -29,8 +29,7 @@ void IamManager::init_shared_extent(page_id_t pool_page_id) {
 
   Page* directory_frame = buffer_pool_.fetch_page(pool_page_id);
   if (!directory_frame) {
-    LOG_STORAGE_ERROR("Failed to fetch shared extent page {}", pool_page_id);
-    return;
+    throw DbException(DbErrorCode::IOError, "failed to fetch shared extent page " + std::to_string(pool_page_id));
   }
 
   auto directory_page = make_shared_extent_directory_page();
@@ -47,8 +46,7 @@ page_id_t IamManager::allocate_shared_page() {
 
   page_id_t pool_page_id = get_shared_extent_page_id();
   if (pool_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("No shared extent available");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::Corruption, "shared extent page is not initialized");
   }
 
   page_id_t current_pool_page = pool_page_id;
@@ -56,8 +54,7 @@ page_id_t IamManager::allocate_shared_page() {
   while (current_pool_page != INVALID_PAGE_ID) {
     Page* pool_frame = buffer_pool_.fetch_page(current_pool_page);
     if (!pool_frame) {
-      LOG_STORAGE_ERROR("Failed to fetch shared extent page {}", current_pool_page);
-      return INVALID_PAGE_ID;
+      throw DbException(DbErrorCode::IOError, "failed to fetch shared extent page " + std::to_string(current_pool_page));
     }
 
     auto pool_header = load_page_layout<SharedExtentDirectoryPage>(pool_frame);
@@ -81,7 +78,7 @@ page_id_t IamManager::allocate_shared_page() {
       next_pool = extend_shared_extent();
       if (next_pool == INVALID_PAGE_ID) {
         buffer_pool_.unpin_page(current_pool_page, false);
-        return INVALID_PAGE_ID;
+        throw DbException(DbErrorCode::NoSpace, "failed to extend shared extent pool");
       }
       pool_header.next_pool_page = next_pool;
       store_page_layout(pool_frame, pool_header);
@@ -92,15 +89,13 @@ page_id_t IamManager::allocate_shared_page() {
     current_pool_page = next_pool;
   }
 
-  LOG_STORAGE_ERROR("Failed to allocate shared page - no extent available");
-  return INVALID_PAGE_ID;
+  throw DbException(DbErrorCode::NoSpace, "failed to allocate shared metadata page");
 }
 
 page_id_t IamManager::extend_shared_extent() {
   page_id_t new_pool_extent = extent_manager_.allocate_extent();
   if (new_pool_extent == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate new shared extent");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::NoSpace, "failed to allocate new shared extent");
   }
 
   Page* new_directory_frame = buffer_pool_.new_page(new_pool_extent);
@@ -112,8 +107,7 @@ page_id_t IamManager::extend_shared_extent() {
     }
   }
   if (!new_directory_frame) {
-    LOG_STORAGE_ERROR("Failed to create new shared extent page {}", new_pool_extent);
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::IOError, "failed to create new shared extent page " + std::to_string(new_pool_extent));
   }
   auto shared_extent_directory_page = make_shared_extent_directory_page();
   store_page_layout(new_directory_frame, shared_extent_directory_page);
@@ -128,8 +122,7 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
 
   page_id_t iam_page_id = allocate_shared_page();
   if (iam_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate IAM page from shared extent");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::NoSpace, "failed to allocate IAM page from shared extent");
   }
 
   Page* iam_frame = buffer_pool_.new_page(iam_page_id);
@@ -141,8 +134,8 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
     }
   }
   if (!iam_frame) {
-    LOG_STORAGE_ERROR("Failed to create newly allocated IAM page {}", table_name, iam_page_id);
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::IOError, "failed to create IAM page " + std::to_string(iam_page_id) +
+                                            " for table '" + table_name + "'");
   }
 
   auto iam_page = make_iam_page();
@@ -166,8 +159,7 @@ bool IamManager::page_has_space(page_id_t page_id, uint32_t required) {
 page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id) {
   page_id_t new_iam_page_id = allocate_shared_page();
   if (new_iam_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate new IAM page");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::NoSpace, "failed to allocate new IAM page");
   }
 
   Page* new_iam_frame = buffer_pool_.new_page(new_iam_page_id);
@@ -179,8 +171,7 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
     }
   }
   if (!new_iam_frame) {
-    LOG_STORAGE_ERROR("Failed to create new IAM page {}", new_iam_page_id);
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::IOError, "failed to create new IAM page " + std::to_string(new_iam_page_id));
   }
   auto iam_page = make_iam_page();
   iam_page.add_extent(extent_id);
@@ -191,8 +182,8 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
 
   Page* prev_iam_frame = buffer_pool_.fetch_page(prev_iam_page);
   if (!prev_iam_frame) {
-    LOG_STORAGE_ERROR("Failed to fetch previous IAM page {} for linking", prev_iam_page);
-    return new_iam_page_id;  // New IAM page exists but chain is broken — log and return
+    throw DbException(DbErrorCode::IOError, "failed to fetch previous IAM page " + std::to_string(prev_iam_page) +
+                                            " while linking IAM chain");
   }
   auto prev_iam = load_page_layout<IAMPage>(prev_iam_frame);
   prev_iam.next_page_id = new_iam_page_id;
@@ -208,14 +199,12 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   LOG_STORAGE_DEBUG("Allocating extent for IAM chain {}", iam_head_page_id);
 
   if (iam_head_page_id == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Invalid IAM head page ID");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::InvalidArgument, "invalid IAM head page ID");
   }
 
   page_id_t extent_start_page = extent_manager_.allocate_extent();
   if (extent_start_page == INVALID_PAGE_ID) {
-    LOG_STORAGE_ERROR("Failed to allocate physical extent");
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::NoSpace, "failed to allocate physical extent for table");
   }
 
   uint32_t extent_id = extent_id_from_page(extent_start_page);
@@ -227,8 +216,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   while (current_iam_page != INVALID_PAGE_ID) {
     Page* iam_frame = buffer_pool_.fetch_page(current_iam_page);
     if (!iam_frame) {
-      LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
-      return INVALID_PAGE_ID;
+      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page));
     }
 
     auto iam_page = load_page_layout<IAMPage>(iam_frame);
@@ -249,7 +237,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
 
   // No IAM page has space — allocate a new one and link it
   if (link_new_iam_page(prev_iam_page, extent_id) == INVALID_PAGE_ID) {
-    return INVALID_PAGE_ID;
+    throw DbException(DbErrorCode::NoSpace, "failed to link new IAM page");
   }
 
   table_page_hints_[iam_head_page_id] = extent_start_page;
@@ -310,8 +298,7 @@ page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_
   while (current_iam_page != INVALID_PAGE_ID) {
     auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page);
     if (!iam_page) {
-      LOG_STORAGE_ERROR("Failed to fetch IAM page {}", current_iam_page);
-      return INVALID_PAGE_ID;
+      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page));
     }
 
     page_id_t next_iam = iam_page->next_page_id;

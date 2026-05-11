@@ -7,6 +7,7 @@
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
+#include "common/db_exception.h"
 #include "common/logger.h"
 #include <filesystem>
 #include <memory>
@@ -335,8 +336,9 @@ TEST_F(IamManagerTest, PerformanceVerification) {
  */
 TEST_F(IamManagerTest, EdgeCases) {
     // Test with invalid IAM head
-    page_id_t invalid_extent = iam_manager->allocate_extent_for_table(INVALID_PAGE_ID);
-    EXPECT_EQ(invalid_extent, INVALID_PAGE_ID);
+    EXPECT_THROW({
+        iam_manager->allocate_extent_for_table(INVALID_PAGE_ID);
+    }, DbException);
     
     // Test find_page_with_space with invalid IAM
     page_id_t no_page = iam_manager->find_page_with_space(INVALID_PAGE_ID, 100);
