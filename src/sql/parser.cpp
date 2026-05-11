@@ -7,6 +7,7 @@
  */
 
 #include "parser.h"
+#include "common/db_exception.h"
 #include <sstream>
 
 
@@ -137,7 +138,7 @@ namespace letty {
 		  ensure(TokenType::RPAREN, "Expecting )");
 		} else if (match(TokenType::IDENTIFIER)) {
 		  // Error: identifier found without opening parenthesis
-		  throw std::runtime_error("Expected '(' before column list or VALUES keyword");
+		  throw DbException(DbErrorCode::ParseError, "Expected '(' before column list or VALUES keyword");
 		}
 
 		if (match(TokenType::VALUES)) {
@@ -189,7 +190,7 @@ namespace letty {
 					} else if (match(TokenType::FLOAT_LITERAL)) {
 						values.push_back(std::make_unique<LiteralNode>(-std::stod(peek().text)));
 					} else {
-						throw std::runtime_error("Expected number after '-' in VALUES");
+					  	throw DbException(DbErrorCode::ParseError, "Expected number after '-' in VALUES");
 					}
 					break;
 				case TokenType::NULL_LITERAL:
@@ -210,7 +211,7 @@ namespace letty {
         } else if (match(TokenType::INDEX)) {
             return parse_create_index_node();
         }
-        throw std::runtime_error("Expected TABLE or INDEX after CREATE");
+        throw DbException(DbErrorCode::ParseError, "Expected TABLE or INDEX after CREATE");
     }
 
 	std::unique_ptr<ASTNode> Parser::parse_create_table_node() {
@@ -260,7 +261,7 @@ namespace letty {
 			  ensure(TokenType::RPAREN, "Expected ')' after VARCHAR size");
 			}
 		  } else {
-			throw std::runtime_error("Unexpected Column type specified. Found " + peek().text);
+			throw DbException(DbErrorCode::ParseError, "Unexpected Column type specified. Found " + peek().text);
 		  }
 
 		  if (match(TokenType::NOT)) {
@@ -421,13 +422,13 @@ namespace letty {
 
     const Token &Parser::ensure(TokenType type, const std::string &message) {
         if (peek().type == type) return advance();
-        throw std::runtime_error(message + " Got token with text: " + peek().text);
+        throw DbException(DbErrorCode::ParseError, message + " Got token with text: " + peek().text);
     }
 
 
     std::unique_ptr<ExpressionNode> Parser::extract_column() {
         if (!match(TokenType::IDENTIFIER)) {
-            throw std::runtime_error("Expected identifier instead found " + peek().text);
+            throw DbException(DbErrorCode::ParseError, "Expected identifier instead found " + peek().text);
         } else {
             std::string name = advance().text;
             if (match(TokenType::DOT)) {
@@ -547,7 +548,7 @@ namespace letty {
             return expr;
         }
 
-        throw std::runtime_error("Unexpected token in expression: " + peek().text);
+        throw DbException(DbErrorCode::ParseError, "Unexpected token in expression: " + peek().text);
     }
 
 

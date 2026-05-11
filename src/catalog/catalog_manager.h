@@ -66,7 +66,8 @@ class CatalogManager {
    * @brief Creates a new table.
    * @param name The name of the table.
    * @param schema The schema of the table.
-   * @return The OID of the newly created table, or error if failed.
+   * @return true if the table was created.
+   * @throws DbException if the table already exists or catalog metadata cannot be written.
    */
   bool create_table(const std::string& name, const Schema& schema);
 
@@ -131,7 +132,8 @@ class CatalogManager {
    * @param iam_page_id The IAM page ID for the table.
    * @param data The tuple data to insert.
    * @param size The size of the tuple data.
-   * @return true if successful, false otherwise.
+   * @return true if successful.
+   * @throws DbException if the insert cannot complete.
    */
   bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
 

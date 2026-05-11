@@ -62,10 +62,7 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
   
   Schema schema(columns);
   
-  if (!catalog_manager_.create_table(table_name, schema)) {
-    return ExecutionResult::error("CREATE TABLE: failed to create table '" + table_name + "' (may already exist)");
-  }
-  
+  catalog_manager_.create_table(table_name, schema);
   return ExecutionResult::ok();
 }
 

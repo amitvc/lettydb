@@ -5,6 +5,7 @@
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
 #include "storage/iam_manager.h"
+#include "common/db_exception.h"
 #include <cstdio>
 #include <vector>
 
@@ -66,8 +67,9 @@ TEST_F(CreateTableTest, CreateAndGetTable) {
   EXPECT_EQ(loaded_cols[1].get_offset(), 4);
   
   // Verify duplicates are rejected
-  bool success2 = catalog_manager->create_table("users", schema);
-  EXPECT_FALSE(success2);
+  EXPECT_THROW({
+    catalog_manager->create_table("users", schema);
+  }, DbException);
 }
 
 } // namespace letty
