@@ -2,6 +2,7 @@
 
 #include "extent_manager.h"
 #include "common/logger.h"
+#include "common/db_exception.h"
 #include "page_utils.h"
 #include <limits>
 #include <stdexcept>
@@ -21,11 +22,11 @@ ExtentManager::ExtentManager(BufferPoolManager& buffer_pool) : buffer_pool_(buff
   } else {
 	auto opt_db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
 	if (!opt_db_header) {
-	  throw std::runtime_error("Failed to fetch database header page during extent manager initialization");
+	  throw DbException(DbErrorCode::IOError, "Failed to fetch database header page during extent manager initialization");
 	}
 
 	if (std::memcmp(opt_db_header.value().signature, DB_SIGNATURE, sizeof(DB_SIGNATURE)) != 0) {
-	  throw std::runtime_error("Corrupt or invalid database file: Signature mismatch. Expected 'LETTYDB'.");
+	  throw DbException(DbErrorCode::Corruption, "Corrupt or invalid database file: Signature mismatch. Expected 'LETTYDB'.");
 	}
 	print_database_header(&opt_db_header.value());
   }
@@ -37,7 +38,7 @@ void ExtentManager::initialize_new_db() {
   // Since we are starting with empty db file we first initialize the DB header page and write it back to file.
   Page* header_frame = buffer_pool_.new_page(HEADER_PAGE_ID);
   if (!header_frame) {
-    throw std::runtime_error("Failed to create header page during initialization");
+	throw DbException(DbErrorCode::IOError, "Failed to create header page during initialization");
   }
   auto header = make_database_header();
   store_page_layout(header_frame, header);
@@ -48,7 +49,7 @@ void ExtentManager::initialize_new_db() {
   // Prepare the first GAM Page (Page 8 — first page of extent 1)
   Page* gam_frame = buffer_pool_.new_page(FIRST_GAM_PAGE_ID);
   if (!gam_frame) {
-    throw std::runtime_error("Failed to create GAM page during initialization");
+	throw DbException(DbErrorCode::IOError, "Failed to create GAM page during initialization");
   }
   auto gam_page = make_gam_page();
 
@@ -68,7 +69,7 @@ void ExtentManager::initialize_new_db() {
 
   Page* extent0_end_frame = buffer_pool_.new_page(EXTENT_0_LAST_PAGE);
   if (!extent0_end_frame) {
-    throw std::runtime_error("Failed to reserve extent 0 during initialization");
+	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 0 during initialization");
   }
   buffer_pool_.flush_page(EXTENT_0_LAST_PAGE);
   buffer_pool_.unpin_page(EXTENT_0_LAST_PAGE, false);
@@ -76,7 +77,7 @@ void ExtentManager::initialize_new_db() {
   // new_page marks the frame dirty, so flush_page writes the zeroed page and
   Page* extent1_end_frame = buffer_pool_.new_page(EXTENT_1_LAST_PAGE);
   if (!extent1_end_frame) {
-    throw std::runtime_error("Failed to reserve extent 1 (GAM extent) during initialization");
+	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 1 (GAM extent) during initialization");
   }
   buffer_pool_.flush_page(EXTENT_1_LAST_PAGE);
   buffer_pool_.unpin_page(EXTENT_1_LAST_PAGE, false);
@@ -84,7 +85,7 @@ void ExtentManager::initialize_new_db() {
   // new_page marks the frame dirty, so flush_page writes the zeroed page and
   Page* extent2_end_frame = buffer_pool_.new_page(EXTENT_2_LAST_PAGE);
   if (!extent2_end_frame) {
-    throw std::runtime_error("Failed to reserve extent 2 (shared extent) during initialization");
+	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 2 (shared extent) during initialization");
   }
   buffer_pool_.flush_page(EXTENT_2_LAST_PAGE);
   buffer_pool_.unpin_page(EXTENT_2_LAST_PAGE, false);
