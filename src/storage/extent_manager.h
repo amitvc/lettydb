@@ -45,13 +45,15 @@ class ExtentManager {
   /**
    * @brief Allocates a new extent
    * @return PageId of the first page in the newly allocated extent.
+   * @throws DbException if allocation metadata cannot be read or extended.
    */
   page_id_t allocate_extent();
 
   /**
    * @brief Reclaims the extent
    * @param start_page_id The starting pageId of the extent that is being deallocated.
-   * @return true if deallocation succeeded, false if the page ID was invalid or an error occurred.
+   * @return true if deallocation succeeded, false if the page ID is not deallocatable.
+   * @throws DbException if GAM metadata cannot be read or is corrupt.
    */
   bool deallocate_extent(page_id_t start_page_id);
 
@@ -60,7 +62,7 @@ class ExtentManager {
   /**
    * @brief Finds a free extent in the GAM page, marks it allocated.
    * @param gam_page Pointer to the GAM page data.
-   * @return The starting page ID of the allocated extent, or INVALID_PAGE_ID if no free extent found.
+   * @return The starting page ID of the allocated extent, or INVALID_PAGE_ID if this GAM page is full.
    */
   page_id_t allocate_extent_in_gam_page(GAMPage* gam_page);
 
@@ -68,6 +70,7 @@ class ExtentManager {
    * @brief Marks bit_index as allocated in gam_page and returns the corresponding extent's first page ID.
    * @param gam_page Pointer to the GAM page
    * @param bit_index bit index that represents a free extent in the current gam page.
+   * @throws DbException if the calculated page ID overflows.
    */
   page_id_t claim_extent_at_bit(GAMPage* gam_page, size_t bit_index);
 
@@ -103,7 +106,8 @@ class ExtentManager {
 
   /**
    * @brief Creates a new GAM page, links it to the current chain, and updates the cursor to point to it.
-   * @return true if successful, false otherwise.
+   * @return true if successful.
+   * @throws DbException if the new GAM page cannot be created or linked.
    */
   bool create_and_link_new_gam();
 
@@ -116,14 +120,16 @@ class ExtentManager {
   /**
    * @brief Walks the GAM chain to find the GAM page that owns the given index.
    * @param gam_page_index Position of the target GAM page in the chain (0-indexed).
-   * @return Page ID of the target GAM page, or INVALID_PAGE_ID if chain is broken.
+   * @return Page ID of the target GAM page.
+   * @throws DbException if the GAM chain is broken or cannot be read.
    */
   page_id_t find_gam_page_at_index(size_t gam_page_index);
 
   /**
    * @brief Clears the extent bit in the given GAM page and rewinds the allocation
    *        cursor if the freed position is earlier than the current hint.
-   * @return true on success, false if the GAM page could not be fetched.
+   * @return true on success.
+   * @throws DbException if the GAM page cannot be fetched.
    */
   bool clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index);
 

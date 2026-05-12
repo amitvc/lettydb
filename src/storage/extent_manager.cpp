@@ -5,7 +5,6 @@
 #include "common/db_exception.h"
 #include "page_utils.h"
 #include <limits>
-#include <stdexcept>
 #include <string>
 
 namespace letty {
@@ -97,7 +96,10 @@ page_id_t ExtentManager::allocate_extent() {
 
   while (true) {
       Page* gam_frame = buffer_pool_.fetch_page(current_gam_page_id_);
-      if (!gam_frame) return INVALID_PAGE_ID;
+      if (!gam_frame) {
+        throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(current_gam_page_id_) +
+                                                " during extent allocation");
+      }
 
       auto gam_page = load_page_layout<GAMPage>(gam_frame);
 
@@ -118,13 +120,14 @@ page_id_t ExtentManager::allocate_extent() {
   }
 
   // No free space found in existing GAM pages. Create a new one.
-  if (!create_and_link_new_gam()) {
-    return INVALID_PAGE_ID;
-  }
+  create_and_link_new_gam();
 
   // Try one last time from the newly created GAM page (guaranteed to have space)
   Page* gam_frame = buffer_pool_.fetch_page(current_gam_page_id_);
-  if (!gam_frame) return INVALID_PAGE_ID;
+  if (!gam_frame) {
+    throw DbException(DbErrorCode::IOError, "failed to fetch newly created GAM page " +
+                                            std::to_string(current_gam_page_id_));
+  }
 
   auto gam_page = load_page_layout<GAMPage>(gam_frame);
   page_id_t result = allocate_extent_in_gam_page(&gam_page);
@@ -162,8 +165,7 @@ bool ExtentManager::create_and_link_new_gam() {
     }
   }
   if (!new_gam_frame) {
-    LOG_STORAGE_ERROR("Failed to create new GAM page {}", new_gam_page_id);
-    return false;
+    throw DbException(DbErrorCode::IOError, "failed to create new GAM page " + std::to_string(new_gam_page_id));
   }
   auto new_gam_page = make_gam_page();
   new_gam_page.next_page_id = INVALID_PAGE_ID;
@@ -180,8 +182,8 @@ bool ExtentManager::create_and_link_new_gam() {
   // Link the old GAM page to the new one
   Page* old_gam_frame = buffer_pool_.fetch_page(current_gam_page_id);
   if (!old_gam_frame) {
-      LOG_STORAGE_ERROR("Failed to load current GAM page {} to link new GAM", current_gam_page_id);
-      return false;
+      throw DbException(DbErrorCode::IOError, "failed to load current GAM page " +
+                                              std::to_string(current_gam_page_id) + " to link new GAM");
   }
   auto old_gam_page = load_page_layout<GAMPage>(old_gam_frame);
   old_gam_page.next_page_id = new_gam_page_id;
@@ -214,13 +216,13 @@ page_id_t ExtentManager::find_gam_page_at_index(size_t gam_page_index) {
     for (size_t steps = 0; steps < gam_page_index; ++steps) {
         auto gam_page = load_page_value<GAMPage>(buffer_pool_, current);
         if (!gam_page) {
-            LOG_STORAGE_ERROR("Failed to fetch GAM page {} during deallocation", current);
-            return INVALID_PAGE_ID;
+            throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(current) +
+                                                    " during deallocation");
         }
         page_id_t next_id = gam_page->next_page_id;
         if (next_id == INVALID_PAGE_ID) {
-            LOG_STORAGE_ERROR("GAM chain broken at page {} during deallocation", current);
-            return INVALID_PAGE_ID;
+            throw DbException(DbErrorCode::Corruption, "GAM chain broken at page " + std::to_string(current) +
+                                                        " during deallocation");
         }
         current = next_id;
     }
@@ -230,8 +232,8 @@ page_id_t ExtentManager::find_gam_page_at_index(size_t gam_page_index) {
 bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index) {
     Page* gam_frame = buffer_pool_.fetch_page(gam_page_id);
     if (!gam_frame) {
-        LOG_STORAGE_ERROR("Failed to fetch GAM page {} for bit clearing", gam_page_id);
-        return false;
+        throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(gam_page_id) +
+                                                " for bit clearing");
     }
 
     auto gam_page = load_page_layout<GAMPage>(gam_frame);
@@ -265,7 +267,10 @@ bool ExtentManager::deallocate_extent(page_id_t start_page_id) {
     uint16_t bit_in_gam = static_cast<uint16_t>(extent_index % GAM_MAX_BITS);
 
     page_id_t target_gam_page_id = find_gam_page_at_index(gam_page_index);
-    if (target_gam_page_id == INVALID_PAGE_ID) return false;
+    if (target_gam_page_id == INVALID_PAGE_ID) {
+        throw DbException(DbErrorCode::Corruption, "failed to find GAM page for extent " +
+                                                    std::to_string(extent_index));
+    }
 
     return clear_extent_bit(target_gam_page_id, bit_in_gam, gam_page_index);
 }
@@ -290,8 +295,7 @@ page_id_t ExtentManager::claim_extent_at_bit(GAMPage* gam_page,
 
   // Check for overflow before casting to page_id_t
   if (result > std::numeric_limits<page_id_t>::max()) {
-      LOG_STORAGE_ERROR("Page ID overflow: calculated page {} exceeds maximum", result);
-      return INVALID_PAGE_ID;
+      throw DbException(DbErrorCode::Internal, "page ID overflow while allocating extent");
   }
 
   LOG_STORAGE_INFO("Successfully allocated extent at page {}", result);
