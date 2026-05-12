@@ -1,6 +1,7 @@
 #include "disk_manager.h"
 #include "common/logger.h"
 #include "storage/config.h"
+#include "common/db_exception.h"
 #include <cassert>
 #include <cstring>
 #include <errno.h>
@@ -17,9 +18,8 @@ DiskManager::DiskManager(std::string db_file) : file_name_(std::move(db_file)) {
   mode_t mode = S_IRUSR | S_IWUSR;
   fd_ = open(file_name_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, mode);
   if (fd_ == -1) {
-	throw std::runtime_error("FATAL: Failed to create or open database file: " + file_name_ + " error no : ( " + std::strerror(errno) + ")");
+	throw DbException(DbErrorCode::IOError, "FATAL: Failed to create or open database file: " + file_name_ + " error no : ( " + std::strerror(errno) + ")");
   }
-
   LOG_STORAGE_INFO("Opening database file {}", file_name_);
 }
 
