@@ -728,18 +728,18 @@ TEST_F(ParserTest, CreateTableSimpleQuery) {
     ASSERT_EQ(createNode->columns.size(), 3);
     
     // First column: id INT
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
     EXPECT_EQ(createNode->columns[0]->size, 0);
     
     // Second column: username VARCHAR
-    EXPECT_EQ(createNode->columns[1]->name->name, "username");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "username");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[1]->size, 0);
     
     // Third column: is_active BOOL
-    EXPECT_EQ(createNode->columns[2]->name->name, "is_active");
-    EXPECT_EQ(createNode->columns[2]->type, TokenType::BOOL);
+    EXPECT_EQ(createNode->columns[2]->column_name->name, "is_active");
+    EXPECT_EQ(createNode->columns[2]->data_type, TokenType::BOOL);
     EXPECT_EQ(createNode->columns[2]->size, 0);
 }
 
@@ -757,18 +757,18 @@ TEST_F(ParserTest, CreateTableWithVarcharSize) {
     ASSERT_EQ(createNode->columns.size(), 3);
     
     // First column: id INT
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
     EXPECT_EQ(createNode->columns[0]->size, 0);
     
     // Second column: username VARCHAR(255)
-    EXPECT_EQ(createNode->columns[1]->name->name, "username");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "username");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[1]->size, 255);
     
     // Third column: description VARCHAR(1000)
-    EXPECT_EQ(createNode->columns[2]->name->name, "description");
-    EXPECT_EQ(createNode->columns[2]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[2]->column_name->name, "description");
+    EXPECT_EQ(createNode->columns[2]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[2]->size, 1000);
 }
 
@@ -784,8 +784,8 @@ TEST_F(ParserTest, CreateTableSingleColumn) {
     
     // Verify single column
     ASSERT_EQ(createNode->columns.size(), 1);
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
     EXPECT_EQ(createNode->columns[0]->size, 0);
 }
 
@@ -802,15 +802,15 @@ TEST_F(ParserTest, CreateTableAllDataTypes) {
     // Verify all supported data types
     ASSERT_EQ(createNode->columns.size(), 3);
     
-    EXPECT_EQ(createNode->columns[0]->name->name, "num");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "num");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
     
-    EXPECT_EQ(createNode->columns[1]->name->name, "text");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "text");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[1]->size, 50);
     
-    EXPECT_EQ(createNode->columns[2]->name->name, "flag");
-    EXPECT_EQ(createNode->columns[2]->type, TokenType::BOOL);
+    EXPECT_EQ(createNode->columns[2]->column_name->name, "flag");
+    EXPECT_EQ(createNode->columns[2]->data_type, TokenType::BOOL);
     
     // No primary key defined
     EXPECT_EQ(createNode->primary_key_columns.size(), 0);
@@ -828,8 +828,8 @@ TEST_F(ParserTest, CreateTableWithColumnLevelPrimaryKey) {
     
     // Verify columns
     ASSERT_EQ(createNode->columns.size(), 3);
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
     
     // Verify primary key
     ASSERT_EQ(createNode->primary_key_columns.size(), 1);
@@ -848,10 +848,10 @@ TEST_F(ParserTest, CreateTableWithTableLevelSinglePrimaryKey) {
     
     // Verify columns
     ASSERT_EQ(createNode->columns.size(), 2);
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
-    EXPECT_EQ(createNode->columns[1]->name->name, "name");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "name");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::VARCHAR);
     
     // Verify primary key
     ASSERT_EQ(createNode->primary_key_columns.size(), 1);
@@ -870,12 +870,12 @@ TEST_F(ParserTest, CreateTableWithTableLevelCompositePrimaryKey) {
     
     // Verify columns
     ASSERT_EQ(createNode->columns.size(), 3);
-    EXPECT_EQ(createNode->columns[0]->name->name, "user_id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
-    EXPECT_EQ(createNode->columns[1]->name->name, "role_id");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::INT);
-    EXPECT_EQ(createNode->columns[2]->name->name, "assigned_date");
-    EXPECT_EQ(createNode->columns[2]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "user_id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "role_id");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[2]->column_name->name, "assigned_date");
+    EXPECT_EQ(createNode->columns[2]->data_type, TokenType::VARCHAR);
     
     // Verify composite primary key
     ASSERT_EQ(createNode->primary_key_columns.size(), 2);
@@ -897,8 +897,8 @@ TEST_F(ParserTest, CreateTableWithFloat) {
     ASSERT_EQ(createNode->columns.size(), 1);
 
     // First column: price FLOAT
-    EXPECT_EQ(createNode->columns[0]->name->name, "price");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::FLOAT);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "price");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::FLOAT);
     EXPECT_EQ(createNode->columns[0]->size, 0);
 }
 
@@ -967,8 +967,8 @@ TEST_F(ParserTest, CreateTableWithDate) {
     ASSERT_EQ(createNode->columns.size(), 1);
 
     // First column: event_date DATE
-    EXPECT_EQ(createNode->columns[0]->name->name, "event_date");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::DATE);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "event_date");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::DATE);
     EXPECT_EQ(createNode->columns[0]->size, 0);
 }
 
@@ -1058,18 +1058,18 @@ TEST_F(ParserTest, CreateTableWithMixedColumns) {
     
     // Verify columns
     ASSERT_EQ(createNode->columns.size(), 5);
-    EXPECT_EQ(createNode->columns[0]->name->name, "id");
-    EXPECT_EQ(createNode->columns[0]->type, TokenType::INT);
-    EXPECT_EQ(createNode->columns[1]->name->name, "name");
-    EXPECT_EQ(createNode->columns[1]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[0]->column_name->name, "id");
+    EXPECT_EQ(createNode->columns[0]->data_type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[1]->column_name->name, "name");
+    EXPECT_EQ(createNode->columns[1]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[1]->size, 255);
-    EXPECT_EQ(createNode->columns[2]->name->name, "price");
-    EXPECT_EQ(createNode->columns[2]->type, TokenType::INT);
-    EXPECT_EQ(createNode->columns[3]->name->name, "description");
-    EXPECT_EQ(createNode->columns[3]->type, TokenType::VARCHAR);
+    EXPECT_EQ(createNode->columns[2]->column_name->name, "price");
+    EXPECT_EQ(createNode->columns[2]->data_type, TokenType::INT);
+    EXPECT_EQ(createNode->columns[3]->column_name->name, "description");
+    EXPECT_EQ(createNode->columns[3]->data_type, TokenType::VARCHAR);
     EXPECT_EQ(createNode->columns[3]->size, 1000);
-    EXPECT_EQ(createNode->columns[4]->name->name, "is_active");
-    EXPECT_EQ(createNode->columns[4]->type, TokenType::BOOL);
+    EXPECT_EQ(createNode->columns[4]->column_name->name, "is_active");
+    EXPECT_EQ(createNode->columns[4]->data_type, TokenType::BOOL);
     
     // Verify primary key
     ASSERT_EQ(createNode->primary_key_columns.size(), 1);

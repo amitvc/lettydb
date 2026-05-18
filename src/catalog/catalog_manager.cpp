@@ -282,6 +282,11 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
         throw DbException(DbErrorCode::DuplicateTable, "table '" + name + "' already exists");
     }
 
+    if (schema.get_columns().size() > MAX_COLUMNS) {
+        throw DbException(DbErrorCode::InvalidArgument,
+            "table '" + name + "' exceeds maximum column count of " + std::to_string(MAX_COLUMNS));
+    }
+
     if (sys_tables_iam_ == INVALID_PAGE_ID) {
         throw DbException(DbErrorCode::Corruption, "sys_tables IAM page is not initialized");
     }

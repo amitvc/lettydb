@@ -219,8 +219,8 @@ namespace letty {
          * @brief Represents the definition of a single column in a table.
          */
         struct ColumnDefinition {
-            std::unique_ptr<IdentifierNode> name;
-            TokenType type; // e.g., TokenType::INT, TokenType::VARCHAR or TokenType::BOOL
+            std::unique_ptr<IdentifierNode> column_name;
+            TokenType data_type; // e.g., TokenType::INT, TokenType::VARCHAR or TokenType::BOOL
             int size = 0; // For VARCHAR data type.
             bool nullable = true; // Default true: column is nullable unless NOT NULL is specified.
         };

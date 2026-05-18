@@ -42,12 +42,12 @@ ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
   uint16_t current_offset = 0;
   
   for (const auto& col_def : node->columns) {
-    if (!col_def || !col_def->name) {
+    if (!col_def || !col_def->column_name) {
       return ExecutionResult::error("CREATE TABLE: invalid column definition");
     }
     
-    std::string col_name = col_def->name->name;
-    DataType data_type = token_type_to_data_type(col_def->type);
+    std::string col_name = col_def->column_name->name;
+    DataType data_type = token_type_to_data_type(col_def->data_type);
     
     uint16_t col_length;
     if (data_type == DataType::VARCHAR) {

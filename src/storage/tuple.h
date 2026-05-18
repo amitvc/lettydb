@@ -60,13 +60,15 @@ using Value = std::variant<
  *   NULL values:
  *     Represented in-memory as std::monostate. On disk, a NULL bitmap
  *     at the head of the serialized buffer tracks which columns are NULL,
- *     allowing fixed-length columns to skip their slot entirely.
+ *     using one bit per column. The payload layout still reserves each
+ *     column's normal slot so deserialization can advance by schema order.
  *
  * Example (schema: id INTEGER, name VARCHAR, active BOOLEAN):
  *
  *   In-memory values : [42, "alice", true]
- *   Serialized bytes : [2A 00 00 00] [05 00 61 6C 69 63 65] [01]
- *                       ^^ int32_t    ^^ len  ^^ "alice"     ^^ bool
+ *   Serialized bytes : [00] [2A 00 00 00] [05 00 61 6C 69 63 65] [01]
+ *                       ^^   ^^ int32_t    ^^ len  ^^ "alice"     ^^ bool
+ *                       null bitmap
  *
  */
 class Tuple {

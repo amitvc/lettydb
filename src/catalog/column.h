@@ -8,7 +8,8 @@ namespace letty {
 
 /**
  * @class Column
- * @brief Represents the metadata of a column.
+ * @brief A database table contains 1 or mcre columns. This class represents a column for a table.
+ *
  */
 class Column {
  public:
@@ -23,8 +24,8 @@ class Column {
 	  case DataType::INTEGER:   return 4;
 	  case DataType::DOUBLE:    return 8;
 	  case DataType::BOOLEAN:   return 1;
-	  case DataType::DATE:      return 12; // 3 ints
-	  case DataType::TIMESTAMP: return 24; // 6 ints
+	  case DataType::DATE:      return 10; // "YYYY-MM-DD"
+	  case DataType::TIMESTAMP: return 19; // "YYYY-MM-DD HH:MM:SS"
 		// If you have VARCHAR / VARBINARY / TEXT etc:
 	  case DataType::VARCHAR:   return 0;  // variable-length
 	}

@@ -1,8 +1,19 @@
 #include "tuple.h"
 #include "common/db_exception.h"
-#include <stdexcept>
 
 namespace letty {
+
+uint32_t null_bitmap_size(size_t column_count) {
+  return static_cast<uint32_t>((column_count + 7) / 8); // ceil(column_count / 8)
+}
+
+bool is_null_bit_set(const uint8_t* bitmap, size_t index) {
+  return (bitmap[index / 8] & (1u << (index % 8))) != 0;
+}
+
+void set_null_bit(uint8_t* bitmap, size_t index) {
+  bitmap[index / 8] |= static_cast<uint8_t>(1u << (index % 8));
+}
 
 bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32_t *out_size) const {
   const auto &columns = schema.get_columns();
@@ -12,13 +23,13 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
   }
 
   // Calculate total size needed
-  uint32_t total_size = 0;
+  uint32_t bitmap_size = null_bitmap_size(columns.size());
+  uint32_t total_size = bitmap_size;
   for (size_t i = 0; i < columns.size(); ++i) {
 	const auto &col = columns[i];
 	if (col.get_type() == DataType::VARCHAR) {
-	  size_t str_len = std::holds_alternative<std::string>(values_[i])
-					   ? std::get<std::string>(values_[i]).size()
-					   : 0;
+	  const bool is_null = std::holds_alternative<std::monostate>(values_[i]);
+	  size_t str_len = is_null ? 0 : std::get<std::string>(values_[i]).size();
 	  total_size += 2 + str_len;
 	} else {
 	  total_size += col.get_length();
@@ -30,8 +41,15 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
 	return false;  // Buffer too small
   }
 
+  std::memset(buf, 0, bitmap_size);
+  for (size_t i = 0; i < values_.size(); ++i) {
+	if (std::holds_alternative<std::monostate>(values_[i])) {
+	  set_null_bit(reinterpret_cast<uint8_t*>(buf), i);
+	}
+  }
+
   // Serialize each value
-  uint32_t offset = 0;
+  uint32_t offset = bitmap_size;
   for (size_t i = 0; i < columns.size(); ++i) {
 	const auto &col = columns[i];
 	const auto &value = values_[i];
@@ -56,21 +74,20 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
 		offset += 1;
 		break;
 	  }
-	  case DataType::VARCHAR:
+	  case DataType::VARCHAR: {
+		const auto &str = is_null ? "" : std::get<std::string>(value);
+		uint16_t len = static_cast<uint16_t>(str.size());
+		std::memcpy(buf + offset, &len, sizeof(uint16_t));
+		offset += sizeof(uint16_t);
+		std::memcpy(buf + offset, str.data(), str.size());
+		offset += str.size();
+		break;
+	  }
 	  case DataType::DATE:
 	  case DataType::TIMESTAMP: {
-		const std::string empty;
-		const auto &str = is_null ? empty : std::get<std::string>(value);
-		if (col.get_type() == DataType::VARCHAR) {
-		  uint16_t len = static_cast<uint16_t>(str.size());
-		  std::memcpy(buf + offset, &len, sizeof(uint16_t));
-		  offset += sizeof(uint16_t);
-		  std::memcpy(buf + offset, str.data(), str.size());
-		  offset += str.size();
-		} else {
-		  std::memcpy(buf + offset, str.data(), std::min(str.size(), static_cast<size_t>(col.get_length())));
-		  offset += col.get_length();
-		}
+		const auto &str = is_null ? "" : std::get<std::string>(value);
+		std::memcpy(buf + offset, str.data(), std::min(str.size(), static_cast<size_t>(col.get_length())));
+		offset += col.get_length();
 		break;
 	  }
 	}
@@ -83,28 +100,38 @@ Tuple Tuple::deserialize(const Schema &schema, const char *data, uint32_t size) 
   Tuple tuple;
   const auto &columns = schema.get_columns();
 
-  uint32_t offset = 0;
-  for (const auto &col : columns) {
-	if (offset >= size) break;
+  uint32_t bitmap_size = null_bitmap_size(columns.size());
+  if (size < bitmap_size) {
+	throw DbException(DbErrorCode::Corruption, "Tuple data too short to contain null bitmap");
+  }
+
+  const uint8_t* null_bitmap = reinterpret_cast<const uint8_t*>(data);
+  uint32_t offset = bitmap_size;
+  for (size_t i = 0; i < columns.size(); ++i) {
+	const auto &col = columns[i];
+	if (offset >= size) {
+	  throw DbException(DbErrorCode::Corruption, "Tuple data truncated before all columns were read");
+	}
+	const bool is_null = is_null_bit_set(null_bitmap, i);
 
 	switch (col.get_type()) {
 	  case DataType::INTEGER: {
 		int32_t int_val;
 		std::memcpy(&int_val, data + offset, sizeof(int32_t));
-		tuple.add_value(int_val);
+		tuple.add_value(is_null ? Value{std::monostate{}} : Value{int_val});
 		offset += sizeof(int32_t);
 		break;
 	  }
 	  case DataType::DOUBLE: {
 		double dbl_val;
 		std::memcpy(&dbl_val, data + offset, sizeof(double));
-		tuple.add_value(dbl_val);
+		tuple.add_value(is_null ? Value{std::monostate{}} : Value{dbl_val});
 		offset += sizeof(double);
 		break;
 	  }
 	  case DataType::BOOLEAN: {
 		bool bool_val = (data[offset] != 0);
-		tuple.add_value(bool_val);
+		tuple.add_value(is_null ? Value{std::monostate{}} : Value{bool_val});
 		offset += 1;
 		break;
 	  }
@@ -114,7 +141,7 @@ Tuple Tuple::deserialize(const Schema &schema, const char *data, uint32_t size) 
 		std::memcpy(&len, data + offset, sizeof(uint16_t));
 		offset += sizeof(uint16_t);
 		std::string str(data + offset, len);
-		tuple.add_value(str);
+		tuple.add_value(is_null ? Value{std::monostate{}} : Value{str});
 		offset += len;
 		break;
 	  }
@@ -125,7 +152,7 @@ Tuple Tuple::deserialize(const Schema &schema, const char *data, uint32_t size) 
 		// Trim null padding
 		size_t end = str.find('\0');
 		if (end != std::string::npos) str.resize(end);
-		tuple.add_value(str);
+		tuple.add_value(is_null ? Value{std::monostate{}} : Value{str});
 		offset += col.get_length();
 		break;
 	  }

@@ -234,25 +234,25 @@ namespace letty {
 
 		  // Parse column name
 		  auto columnName = ensure(TokenType::IDENTIFIER, "Expected column name");
-		  columnDef->name = std::make_unique<IdentifierNode>(columnName.text);
+		  columnDef->column_name = std::make_unique<IdentifierNode>(columnName.text);
 
 		  if (match(TokenType::INT)) {
-			columnDef->type = TokenType::INT;
+			columnDef->data_type = TokenType::INT;
 			advance();
 		  } else if (match(TokenType::BOOL)) {
-			columnDef->type = TokenType::BOOL;
+			columnDef->data_type = TokenType::BOOL;
 			advance();
 		  } else if (match(TokenType::FLOAT)) {
-			columnDef->type = TokenType::FLOAT;
+			columnDef->data_type = TokenType::FLOAT;
 			advance();
 		  } else if (match(TokenType::DATE)) {
-			columnDef->type = TokenType::DATE;
+			columnDef->data_type = TokenType::DATE;
 			advance();
 		  } else if (match(TokenType::TIMESTAMP)) {
-			columnDef->type = TokenType::TIMESTAMP;
+			columnDef->data_type = TokenType::TIMESTAMP;
 			advance();
 		  } else if (match(TokenType::VARCHAR)) {
-			columnDef->type = TokenType::VARCHAR;
+			columnDef->data_type = TokenType::VARCHAR;
 			advance();
 			if (match(TokenType::LPAREN)) {
 			  advance(); // consume '('
