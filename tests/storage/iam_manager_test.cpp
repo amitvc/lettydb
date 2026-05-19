@@ -72,8 +72,9 @@ protected:
             if (disk_manager->read_page(current, buffer) != IOResult::SUCCESS) {
                 break;
             }
-            auto page = reinterpret_cast<IAMPage*>(buffer);
-            current = page->next_page_id;
+            IAMPage page{};
+            std::memcpy(&page, buffer, sizeof(IAMPage));
+            current = page.next_page_id;
         }
 
         return count;
@@ -92,9 +93,10 @@ protected:
             if (disk_manager->read_page(current, buffer) != IOResult::SUCCESS) {
                 break;
             }
-            auto page = reinterpret_cast<IAMPage*>(buffer);
-            count += page->extent_count;
-            current = page->next_page_id;
+            IAMPage page{};
+            std::memcpy(&page, buffer, sizeof(IAMPage));
+            count += page.extent_count;
+            current = page.next_page_id;
         }
 
         return count;
@@ -118,11 +120,12 @@ TEST_F(IamManagerTest, SharedExtentInit) {
     char buffer[PAGE_SIZE];
     ASSERT_EQ(disk_manager->read_page(FIRST_SHARED_EXTENT_PAGE_ID, buffer), IOResult::SUCCESS);
     
-    auto* pool_header = reinterpret_cast<SharedExtentDirectoryPage*>(buffer);
+    SharedExtentDirectoryPage pool_header{};
+    std::memcpy(&pool_header, buffer, sizeof(SharedExtentDirectoryPage));
     
     // Should have no slots used initially (just after init)
     // Note: After SetUp, we may have allocated IAM pages, so just check structure is valid
-    EXPECT_EQ(pool_header->next_pool_page, INVALID_PAGE_ID);
+    EXPECT_EQ(pool_header.next_pool_page, INVALID_PAGE_ID);
     
     LOG_STORAGE_INFO("Metadata pool init test passed");
 }
@@ -145,9 +148,10 @@ TEST_F(IamManagerTest, CreateIAMChain) {
     char buffer[PAGE_SIZE];
     ASSERT_EQ(disk_manager->read_page(table_iam, buffer), IOResult::SUCCESS);
 
-    auto* iam_page = reinterpret_cast<IAMPage*>(buffer);
-    EXPECT_EQ(iam_page->next_page_id, INVALID_PAGE_ID);
-    EXPECT_EQ(iam_page->extent_count, 0);
+    IAMPage iam_page{};
+    std::memcpy(&iam_page, buffer, sizeof(IAMPage));
+    EXPECT_EQ(iam_page.next_page_id, INVALID_PAGE_ID);
+    EXPECT_EQ(iam_page.extent_count, 0);
 
     LOG_STORAGE_INFO("Create IAM chain test passed, IAM page: {}", table_iam);
 }
@@ -234,26 +238,25 @@ TEST_F(IamManagerTest, MultipleTablesSharePool) {
  * Test IAMPage structure functionality
  */
 TEST_F(IamManagerTest, IAMPageStructure) {
-    char buffer[PAGE_SIZE] = {0};
-    auto* iam_page = new(buffer) IAMPage();
+    IAMPage iam_page = make_iam_page();
     
     // Test initial state
-    EXPECT_EQ(iam_page->extent_count, 0);
-    EXPECT_TRUE(iam_page->has_space());
-    EXPECT_FALSE(iam_page->contains_extent(100));
+    EXPECT_EQ(iam_page.extent_count, 0);
+    EXPECT_TRUE(iam_page.has_space());
+    EXPECT_FALSE(iam_page.contains_extent(100));
     
     // Test adding extents
-    EXPECT_TRUE(iam_page->add_extent(100));
-    EXPECT_EQ(iam_page->extent_count, 1);
-    EXPECT_TRUE(iam_page->contains_extent(100));
-    EXPECT_FALSE(iam_page->contains_extent(200));
+    EXPECT_TRUE(iam_page.add_extent(100));
+    EXPECT_EQ(iam_page.extent_count, 1);
+    EXPECT_TRUE(iam_page.contains_extent(100));
+    EXPECT_FALSE(iam_page.contains_extent(200));
     
     // Add more extents
-    EXPECT_TRUE(iam_page->add_extent(200));
-    EXPECT_TRUE(iam_page->add_extent(300));
-    EXPECT_EQ(iam_page->extent_count, 3);
-    EXPECT_TRUE(iam_page->contains_extent(200));
-    EXPECT_TRUE(iam_page->contains_extent(300));
+    EXPECT_TRUE(iam_page.add_extent(200));
+    EXPECT_TRUE(iam_page.add_extent(300));
+    EXPECT_EQ(iam_page.extent_count, 3);
+    EXPECT_TRUE(iam_page.contains_extent(200));
+    EXPECT_TRUE(iam_page.contains_extent(300));
     
     LOG_STORAGE_INFO("IAMPage structure test passed");
 }
@@ -262,38 +265,37 @@ TEST_F(IamManagerTest, IAMPageStructure) {
  * Test SharedExtentDirectoryPage structure functionality
  */
 TEST_F(IamManagerTest, SharedExtentDirectoryPageStructure) {
-    char buffer[PAGE_SIZE] = {0};
-    auto* pool_header = new(buffer) SharedExtentDirectoryPage();
+    SharedExtentDirectoryPage pool_header = make_shared_extent_directory_page();
     
     // Test initial state
     for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
-        EXPECT_FALSE(pool_header->is_slot_used(slot));
+        EXPECT_FALSE(pool_header.is_slot_used(slot));
     }
     
     // Find free slot should return 1 (slots are 1-7)
-    EXPECT_EQ(pool_header->find_free_slot(), 1);
+    EXPECT_EQ(pool_header.find_free_slot(), 1);
     
     // Mark slot 1 as used
-    pool_header->mark_slot_used(1);
-    EXPECT_TRUE(pool_header->is_slot_used(1));
-    EXPECT_FALSE(pool_header->is_slot_used(2));
-    EXPECT_EQ(pool_header->find_free_slot(), 2);
+    pool_header.mark_slot_used(1);
+    EXPECT_TRUE(pool_header.is_slot_used(1));
+    EXPECT_FALSE(pool_header.is_slot_used(2));
+    EXPECT_EQ(pool_header.find_free_slot(), 2);
     
     // Mark more slots
-    pool_header->mark_slot_used(2);
-    pool_header->mark_slot_used(3);
-    EXPECT_EQ(pool_header->find_free_slot(), 4);
+    pool_header.mark_slot_used(2);
+    pool_header.mark_slot_used(3);
+    EXPECT_EQ(pool_header.find_free_slot(), 4);
     
     // Free a slot
-    pool_header->mark_slot_free(2);
-    EXPECT_FALSE(pool_header->is_slot_used(2));
-    EXPECT_EQ(pool_header->find_free_slot(), 2);  // Should find slot 2 first
+    pool_header.mark_slot_free(2);
+    EXPECT_FALSE(pool_header.is_slot_used(2));
+    EXPECT_EQ(pool_header.find_free_slot(), 2);  // Should find slot 2 first
     
     // Mark all slots used
     for (uint8_t i = 1; i <= SHARED_EXTENT_SLOTS; ++i) {
-        pool_header->mark_slot_used(i);
+        pool_header.mark_slot_used(i);
     }
-    EXPECT_EQ(pool_header->find_free_slot(), 0);  // No free slot
+    EXPECT_EQ(pool_header.find_free_slot(), 0);  // No free slot
     
     LOG_STORAGE_INFO("SharedExtentDirectoryPage structure test passed");
 }

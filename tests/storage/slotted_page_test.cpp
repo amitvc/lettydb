@@ -90,8 +90,11 @@ TEST_F(SlottedPageTest, SlotReuse) {
 
   // Simulate deletion by zeroing slot 1's length directly
   // (delete_tuple was removed — this tests the slot-reuse path)
-  auto* slots = reinterpret_cast<Slot*>(buffer + sizeof(SlottedPageHeader));
-  slots[1].length = 0;
+  Slot slot{};
+  constexpr size_t slot_1_offset = sizeof(SlottedPageHeader) + sizeof(Slot);
+  std::memcpy(&slot, buffer + slot_1_offset, sizeof(Slot));
+  slot.length = 0;
+  std::memcpy(buffer + slot_1_offset, &slot, sizeof(Slot));
 
   // Insert should reuse slot 1
   auto id4 = page.insert_tuple("Tuple 4", 8);

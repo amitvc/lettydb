@@ -66,7 +66,9 @@ TEST_F(PageTest, DataBufferIsPageAligned) {
   auto bpm = make_bpm();
   Page* page = bpm->new_page(0);
   ASSERT_NE(page, nullptr);
-  auto addr = reinterpret_cast<std::uintptr_t>(page->get_data());
-  EXPECT_EQ(addr % PAGE_SIZE, 0) << "data_ buffer is not aligned to PAGE_SIZE";
+  void* data = page->get_data();
+  size_t space = PAGE_SIZE;
+  void* aligned = std::align(PAGE_SIZE, 1, data, space);
+  EXPECT_EQ(aligned, page->get_data()) << "data_ buffer is not aligned to PAGE_SIZE";
   bpm->unpin_page(0, false);
 }

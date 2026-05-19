@@ -6,6 +6,7 @@
 #include <set>
 #include "storage/extent_manager.h"
 #include "storage/disk_manager.h"
+#include "storage/page_utils.h"
 #include "storage/storage_def.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
@@ -57,23 +58,25 @@ TEST_F(ExtentManagerTest, TestInitialization) {
   // Check if Header page is initialized correctly
   char header_buffer[PAGE_SIZE];
   disk_manager->read_page(HEADER_PAGE_ID, header_buffer);
-  auto *header = reinterpret_cast<DatabaseHeader *>(header_buffer);
-  EXPECT_EQ(std::string(header->signature), DB_SIGNATURE);
+  DatabaseHeader header{};
+  std::memcpy(&header, header_buffer, sizeof(DatabaseHeader));
+  EXPECT_EQ(std::string(header.signature), DB_SIGNATURE);
   // File size is now 3 extents (extent 0: header, extent 1: GAM, extent 2: shared extent)
   EXPECT_EQ(disk_manager->get_file_size_in_pages(), 3 * EXTENT_SIZE);
-  EXPECT_EQ(header->gam_page_id, FIRST_GAM_PAGE_ID);
-  EXPECT_EQ(header->shared_extent_page_id, FIRST_SHARED_EXTENT_PAGE_ID);
+  EXPECT_EQ(header.gam_page_id, FIRST_GAM_PAGE_ID);
+  EXPECT_EQ(header.shared_extent_page_id, FIRST_SHARED_EXTENT_PAGE_ID);
   // sys_tables and sys_columns IAM pages are dynamically allocated (INVALID initially)
-  EXPECT_EQ(header->sys_tables_iam_page, INVALID_PAGE_ID);
-  EXPECT_EQ(header->sys_columns_iam_page, INVALID_PAGE_ID);
+  EXPECT_EQ(header.sys_tables_iam_page, INVALID_PAGE_ID);
+  EXPECT_EQ(header.sys_columns_iam_page, INVALID_PAGE_ID);
 
   // Check if GAM page is initialized
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
-  auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
+  GAMPage gam_page{};
+  std::memcpy(&gam_page, gam_buffer, sizeof(GAMPage));
 
   // Verify extent 0,1 & 2 are allocated
-  Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
+  Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
   EXPECT_TRUE(gam_bitmap.is_set(0));  // Extent 0: Header, GAM
   EXPECT_TRUE(gam_bitmap.is_set(1));  // Extent 1: GAM page extent
   EXPECT_TRUE(gam_bitmap.is_set(2));  // Extent 2: Shared extent
@@ -98,8 +101,9 @@ TEST_F(ExtentManagerTest, TestAllocation) {
   // Verify in GAM
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
-  auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
-  Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
+  GAMPage gam_page{};
+  std::memcpy(&gam_page, gam_buffer, sizeof(GAMPage));
+  Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
   EXPECT_TRUE(gam_bitmap.is_set(0));  // System
   EXPECT_TRUE(gam_bitmap.is_set(1));  // Gam pages extent
   EXPECT_TRUE(gam_bitmap.is_set(2));  // Shared iam extent
@@ -129,11 +133,12 @@ TEST_F(ExtentManagerTest, TestPersistence) {
 	// Flush and verify on disk
 	EXPECT_TRUE(bpm->flush_all_pages());
 
-	// Check that extents 0, 1, 2, 3 are all allocated
-	char gam_buffer[PAGE_SIZE];
-	disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
-	auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
-	Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
+    // Check that extents 0, 1, 2, 3 are all allocated
+    char gam_buffer[PAGE_SIZE];
+    disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
+    GAMPage gam_page{};
+    std::memcpy(&gam_page, gam_buffer, sizeof(GAMPage));
+    Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
 	EXPECT_TRUE(gam_bitmap.is_set(0));  // System
 	EXPECT_TRUE(gam_bitmap.is_set(1));  // GAM pages extent
 	EXPECT_TRUE(gam_bitmap.is_set(2));  // Shared iam extent
@@ -148,8 +153,9 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   // Fill the first GAM page (page 8) through BPM (it may be cached from init)
   Page* gam_page_obj = bpm->fetch_page(FIRST_GAM_PAGE_ID);
   ASSERT_NE(gam_page_obj, nullptr);
-  auto *gam_page = reinterpret_cast<GAMPage *>(gam_page_obj->get_data());
-  std::memset(gam_page->bitmap, 0xFF, sizeof(gam_page->bitmap));
+  GAMPage gam_page = load_page_layout<GAMPage>(gam_page_obj);
+  std::memset(gam_page.bitmap, 0xFF, sizeof(gam_page.bitmap));
+  store_page_layout(gam_page_obj, gam_page);
   bpm->unpin_page(FIRST_GAM_PAGE_ID, true);
 
   // Allocate extent. This should trigger creating a new GAM page.
@@ -164,13 +170,15 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   // The new GAM page should be at page 9 (next page in GAM extent after page 8)
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
-  auto *first_gam = reinterpret_cast<GAMPage *>(gam_buffer);
-  EXPECT_EQ(first_gam->next_page_id, 9); // Should point to page 9
+  GAMPage first_gam{};
+  std::memcpy(&first_gam, gam_buffer, sizeof(GAMPage));
+  EXPECT_EQ(first_gam.next_page_id, 9); // Should point to page 9
 
   // Validate the new GAM page itself
   char new_gam_buffer[PAGE_SIZE];
   disk_manager->read_page(9, new_gam_buffer);
-  auto *new_gam_page = reinterpret_cast<GAMPage *>(new_gam_buffer);
+  GAMPage new_gam_page{};
+  std::memcpy(&new_gam_page, new_gam_buffer, sizeof(GAMPage));
 
   // Validate allocation return value
   // The new extent should be at the start of the range covered by the second GAM page
@@ -195,9 +203,10 @@ TEST_F(ExtentManagerTest, TestDeallocation) {
 
   char gam_buffer[PAGE_SIZE];
   disk_manager->read_page(FIRST_GAM_PAGE_ID, gam_buffer);
-  auto *gam_page = reinterpret_cast<GAMPage *>(gam_buffer);
+  GAMPage gam_page{};
+  std::memcpy(&gam_page, gam_buffer, sizeof(GAMPage));
 
-  Bitmap gam_bitmap(gam_page->bitmap, GAM_MAX_BITS);
+  Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
 
   EXPECT_FALSE(gam_bitmap.is_set(3)); // Extent 3 should be free
   EXPECT_TRUE(gam_bitmap.is_set(4));  // Extent 4 should still be allocated
@@ -221,9 +230,10 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
   // Fill GAM page 8 (already exists, cached from init) and set chain
   Page* gam1_obj = bpm->fetch_page(FIRST_GAM_PAGE_ID);
   ASSERT_NE(gam1_obj, nullptr);
-  auto* gam1 = reinterpret_cast<GAMPage*>(gam1_obj->get_data());
-  gam1->next_page_id = 9;
-  std::memset(gam1->bitmap, 0xFF, sizeof(gam1->bitmap));
+  GAMPage gam1 = load_page_layout<GAMPage>(gam1_obj);
+  gam1.next_page_id = 9;
+  std::memset(gam1.bitmap, 0xFF, sizeof(gam1.bitmap));
+  store_page_layout(gam1_obj, gam1);
   bpm->unpin_page(FIRST_GAM_PAGE_ID, true);
 
   // Create GAM pages 9-15 through BPM
@@ -240,9 +250,10 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
       page_obj = bpm->new_page(current);
     }
     ASSERT_NE(page_obj, nullptr) << "Failed to create GAM page " << current;
-    auto* page = new(page_obj->get_data()) GAMPage();
-    page->next_page_id = next;
-    std::memset(page->bitmap, 0xFF, sizeof(page->bitmap));
+    GAMPage page = make_gam_page();
+    page.next_page_id = next;
+    std::memset(page.bitmap, 0xFF, sizeof(page.bitmap));
+    store_page_layout(page_obj, page);
     bpm->unpin_page(current, true);
   }
 
@@ -266,14 +277,16 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
   char new_gam_buffer[PAGE_SIZE];
   IOResult res = disk_manager->read_page(expected_new_gam_page, new_gam_buffer);
   EXPECT_EQ(res, IOResult::SUCCESS);
-  auto *new_gam = reinterpret_cast<GAMPage *>(new_gam_buffer);
-  EXPECT_EQ(new_gam->next_page_id, INVALID_PAGE_ID);
+  GAMPage new_gam{};
+  std::memcpy(&new_gam, new_gam_buffer, sizeof(GAMPage));
+  EXPECT_EQ(new_gam.next_page_id, INVALID_PAGE_ID);
 
   // Verify link from page 15 (last page in GAM extent) to new GAM
   char page15_buffer[PAGE_SIZE];
   disk_manager->read_page(15, page15_buffer);
-  auto *page15 = reinterpret_cast<GAMPage *>(page15_buffer);
-  EXPECT_EQ(page15->next_page_id, expected_new_gam_page);
+  GAMPage page15{};
+  std::memcpy(&page15, page15_buffer, sizeof(GAMPage));
+  EXPECT_EQ(page15.next_page_id, expected_new_gam_page);
 
   // Return ID should be valid and large
   EXPECT_GT(new_page_id, 0);
