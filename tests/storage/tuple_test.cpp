@@ -4,6 +4,7 @@
 #include "catalog/schema.h"
 #include "catalog/column.h"
 #include "catalog/catalog_defs.h"
+#include "common/db_exception.h"
 
 namespace letty {
 
@@ -182,8 +183,7 @@ TEST_F(TupleTest, SerializeInto_BufferTooSmall_ReturnsFalse_SetsRequiredSize) {
 
   char buf[4] = {};
   uint32_t out_size = 0;
-  bool ok = t.serialize(schema, buf, sizeof(buf), &out_size);
-  EXPECT_FALSE(ok);
+  EXPECT_THROW(t.serialize(schema, buf, sizeof(buf), &out_size), DbException);
   EXPECT_EQ(out_size, 13u);
 }
 

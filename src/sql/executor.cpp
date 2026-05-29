@@ -154,6 +154,9 @@ ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
     for (size_t si = 0; si < schema_columns.size(); ++si) {
       auto it = schema_to_value_idx->find(si);
       Value val = (it == schema_to_value_idx->end()) ? Value{std::monostate{}} : literal_to_value(row_values[it->second].get());
+      if (std::holds_alternative<std::monostate>(val) && !schema_columns[si].is_nullable()) {
+        return ExecutionResult::error("INSERT: column '" + schema_columns[si].get_name() + "' is NOT NULL");
+      }
       tuple.add_value(val);
     }
     tuples.push_back(std::move(tuple));
@@ -185,23 +188,47 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
   result.success = true;
   
   const auto& schema_columns = table_meta->schema.get_columns();
+  std::vector<size_t> selected_column_indexes;
   if (node->is_select_all) {
-    for (const auto& col : schema_columns) {
+    for (size_t i = 0; i < schema_columns.size(); ++i) {
+      const auto& col = schema_columns[i];
       result.column_names.push_back(col.get_name());
+      selected_column_indexes.push_back(i);
     }
   } else {
     for (const auto& sel_col : node->columns) {
+      std::string column_name;
       if (auto* ident = dynamic_cast<IdentifierNode*>(sel_col.expression.get())) {
-        result.column_names.push_back(ident->name);
+        column_name = ident->name;
+      } else if (auto* qualified = dynamic_cast<QualifiedIdentifierNode*>(sel_col.expression.get())) {
+        column_name = qualified->name->name;
       } else {
-        result.column_names.push_back("?");  // For expressions
+        return ExecutionResult::error("SELECT: unsupported select expression");
+      }
+
+      bool found = false;
+      for (size_t i = 0; i < schema_columns.size(); ++i) {
+        if (schema_columns[i].get_name() == column_name) {
+          result.column_names.push_back(sel_col.alias.empty() ? column_name : sel_col.alias);
+          selected_column_indexes.push_back(i);
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        return ExecutionResult::error("SELECT: unknown column '" + column_name + "'");
       }
     }
   }
   
 
-  bool scan_ok = table_manager_.scan_table_tuples(table_name, [&result](const Tuple& tuple) {
-    result.rows.push_back(tuple);
+  bool scan_ok = table_manager_.scan_table_tuples(table_name, [&result, &selected_column_indexes](const Tuple& tuple) {
+    Tuple projected;
+    for (size_t index : selected_column_indexes) {
+      projected.add_value(tuple.get_value(index));
+    }
+    result.rows.push_back(std::move(projected));
   });
   
   if (!scan_ok) {

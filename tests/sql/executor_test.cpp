@@ -222,6 +222,13 @@ TEST_F(ExecutorTest, NotNullColumnRejectsOmittedValue) {
   EXPECT_NE(result.error_message.find("NOT NULL"), std::string::npos);
 }
 
+TEST_F(ExecutorTest, NotNullColumnRejectsExplicitNullValue) {
+  execute_sql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))");
+  auto result = execute_sql("INSERT INTO t VALUES (NULL, 'alice')");
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error_message.find("NOT NULL"), std::string::npos);
+}
+
 TEST_F(ExecutorTest, NullableColumnAllowsOmittedValue) {
   execute_sql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))");
   auto result = execute_sql("INSERT INTO t (id) VALUES (1)");
@@ -246,6 +253,22 @@ TEST_F(ExecutorTest, InsertDuplicateColumnNames) {
   auto result = execute_sql("INSERT INTO t (id, id) VALUES (1, 2)");
   EXPECT_FALSE(result.success);
   EXPECT_NE(result.error_message.find("duplicate"), std::string::npos);
+}
+
+TEST_F(ExecutorTest, SelectSpecificColumnReturnsProjectedTuples) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')");
+
+  auto result = execute_sql("SELECT name FROM t");
+
+  ASSERT_TRUE(result.success) << result.error_message;
+  ASSERT_EQ(result.column_names.size(), 1u);
+  EXPECT_EQ(result.column_names[0], "name");
+  ASSERT_EQ(result.rows.size(), 2u);
+  ASSERT_EQ(result.rows[0].size(), 1u);
+  ASSERT_EQ(result.rows[1].size(), 1u);
+  EXPECT_EQ(std::get<std::string>(result.rows[0].get_value(0)), "alice");
+  EXPECT_EQ(std::get<std::string>(result.rows[1].get_value(0)), "bob");
 }
 
 }

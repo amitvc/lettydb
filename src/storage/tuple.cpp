@@ -8,11 +8,17 @@ uint32_t null_bitmap_size(size_t column_count) {
 }
 
 bool is_null_bit_set(const uint8_t* bitmap, size_t index) {
-  return (bitmap[index / 8] & (1u << (index % 8))) != 0;
+  const size_t byte_index = index / 8;
+  const size_t bit_index = index % 8;
+  const uint8_t bit_mask = static_cast<uint8_t>(1u << bit_index);
+  return (bitmap[byte_index] & bit_mask) != 0;
 }
 
 void set_null_bit(uint8_t* bitmap, size_t index) {
-  bitmap[index / 8] |= static_cast<uint8_t>(1u << (index % 8));
+  const size_t byte_index = index / 8;
+  const size_t bit_index = index % 8;
+  const uint8_t bit_mask = static_cast<uint8_t>(1u << bit_index);
+  bitmap[byte_index] |= bit_mask;
 }
 
 bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32_t *out_size) const {
@@ -38,7 +44,9 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
 
   *out_size = total_size;
   if (total_size > buf_size) {
-	return false;  // Buffer too small
+	throw DbException(DbErrorCode::InvalidArgument,
+					  "Tuple serialization requires " + std::to_string(total_size) +
+					  " bytes, but buffer only has " + std::to_string(buf_size) + " bytes");
   }
 
   std::memset(buf, 0, bitmap_size);
