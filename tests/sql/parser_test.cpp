@@ -1433,7 +1433,37 @@ TEST_F(ParserTest, BoolLiteralInWhere) {
     auto ast = parse_query("SELECT * FROM users WHERE id = 1 AND active = TRUE");
     auto* select = dynamic_cast<SelectStatementNode*>(ast.get());
     ASSERT_NE(select, nullptr);
-    EXPECT_NE(select->where_clause, nullptr);
+    ASSERT_NE(select->where_clause, nullptr);
+
+    auto* where = asBinaryOperation(select->where_clause);
+    ASSERT_NE(where, nullptr);
+    EXPECT_EQ(where->op, "AND");
+
+    auto* id_comparison = dynamic_cast<BinaryOperationNode*>(where->left.get());
+    ASSERT_NE(id_comparison, nullptr);
+    EXPECT_EQ(id_comparison->op, "=");
+
+    auto* id_column = dynamic_cast<IdentifierNode*>(id_comparison->left.get());
+    ASSERT_NE(id_column, nullptr);
+    EXPECT_EQ(id_column->name, "id");
+
+    auto* id_value = dynamic_cast<LiteralNode*>(id_comparison->right.get());
+    ASSERT_NE(id_value, nullptr);
+    ASSERT_TRUE(std::holds_alternative<int64_t>(id_value->value));
+    EXPECT_EQ(std::get<int64_t>(id_value->value), 1);
+
+    auto* active_comparison = dynamic_cast<BinaryOperationNode*>(where->right.get());
+    ASSERT_NE(active_comparison, nullptr);
+    EXPECT_EQ(active_comparison->op, "=");
+
+    auto* active_column = dynamic_cast<IdentifierNode*>(active_comparison->left.get());
+    ASSERT_NE(active_column, nullptr);
+    EXPECT_EQ(active_column->name, "active");
+
+    auto* active_value = dynamic_cast<LiteralNode*>(active_comparison->right.get());
+    ASSERT_NE(active_value, nullptr);
+    ASSERT_TRUE(std::holds_alternative<bool>(active_value->value));
+    EXPECT_TRUE(std::get<bool>(active_value->value));
 }
 
 TEST_F(ParserTest, CreateTableNotNullSetsNullableFalse) {

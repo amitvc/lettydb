@@ -271,4 +271,127 @@ TEST_F(ExecutorTest, SelectSpecificColumnReturnsProjectedTuples) {
   EXPECT_EQ(std::get<std::string>(result.rows[1].get_value(0)), "bob");
 }
 
+TEST_F(ExecutorTest, SelectWhereFiltersByIntegerEquality) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50), age INT, active BOOL, score FLOAT)");
+  execute_sql("INSERT INTO users VALUES "
+              "(1, 'alice', 31, TRUE, 95.5), "
+              "(2, 'bob', 22, FALSE, 72.0), "
+              "(3, 'carol', 45, TRUE, 88.25)");
+
+  auto result = execute_sql("SELECT * FROM users WHERE id = 2");
+
+  ASSERT_TRUE(result.success) << result.error_message;
+  ASSERT_EQ(result.rows.size(), 1u);
+  EXPECT_EQ(std::get<int32_t>(result.rows[0].get_value(0)), 2);
+  EXPECT_EQ(std::get<std::string>(result.rows[0].get_value(1)), "bob");
+}
+
+TEST_F(ExecutorTest, SelectWhereFiltersBeforeProjection) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50), age INT)");
+  execute_sql("INSERT INTO users VALUES (1, 'alice', 31), (2, 'bob', 22), (3, 'carol', 45)");
+
+  auto result = execute_sql("SELECT name FROM users WHERE age > 30");
+
+  ASSERT_TRUE(result.success) << result.error_message;
+  ASSERT_EQ(result.column_names.size(), 1u);
+  EXPECT_EQ(result.column_names[0], "name");
+  ASSERT_EQ(result.rows.size(), 2u);
+  ASSERT_EQ(result.rows[0].size(), 1u);
+  ASSERT_EQ(result.rows[1].size(), 1u);
+  EXPECT_EQ(std::get<std::string>(result.rows[0].get_value(0)), "alice");
+  EXPECT_EQ(std::get<std::string>(result.rows[1].get_value(0)), "carol");
+}
+
+TEST_F(ExecutorTest, SelectWhereSupportsBoolAndStringComparisons) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50), active BOOL)");
+  execute_sql("INSERT INTO users VALUES (1, 'alice', TRUE), (2, 'bob', FALSE), (3, 'carol', TRUE)");
+
+  auto active = execute_sql("SELECT name FROM users WHERE active = TRUE");
+
+  ASSERT_TRUE(active.success) << active.error_message;
+  ASSERT_EQ(active.rows.size(), 2u);
+  EXPECT_EQ(std::get<std::string>(active.rows[0].get_value(0)), "alice");
+  EXPECT_EQ(std::get<std::string>(active.rows[1].get_value(0)), "carol");
+
+  auto named = execute_sql("SELECT id FROM users WHERE name = 'bob'");
+
+  ASSERT_TRUE(named.success) << named.error_message;
+  ASSERT_EQ(named.rows.size(), 1u);
+  EXPECT_EQ(std::get<int32_t>(named.rows[0].get_value(0)), 2);
+}
+
+TEST_F(ExecutorTest, SelectWhereSupportsAndOr) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50), age INT, active BOOL)");
+  execute_sql("INSERT INTO users VALUES "
+              "(1, 'alice', 31, TRUE), "
+              "(2, 'bob', 22, FALSE), "
+              "(3, 'carol', 45, TRUE), "
+              "(4, 'dave', 29, TRUE)");
+
+  auto and_result = execute_sql("SELECT name FROM users WHERE age > 30 AND active = TRUE");
+
+  ASSERT_TRUE(and_result.success) << and_result.error_message;
+  ASSERT_EQ(and_result.rows.size(), 2u);
+  EXPECT_EQ(std::get<std::string>(and_result.rows[0].get_value(0)), "alice");
+  EXPECT_EQ(std::get<std::string>(and_result.rows[1].get_value(0)), "carol");
+
+  auto or_result = execute_sql("SELECT name FROM users WHERE id = 2 OR name = 'dave'");
+
+  ASSERT_TRUE(or_result.success) << or_result.error_message;
+  ASSERT_EQ(or_result.rows.size(), 2u);
+  EXPECT_EQ(std::get<std::string>(or_result.rows[0].get_value(0)), "bob");
+  EXPECT_EQ(std::get<std::string>(or_result.rows[1].get_value(0)), "dave");
+}
+
+TEST_F(ExecutorTest, SelectWhereSupportsRelationalAndNotEqualOperators) {
+  execute_sql("CREATE TABLE scores (id INT, name VARCHAR(50), score FLOAT)");
+  execute_sql("INSERT INTO scores VALUES (1, 'alice', 95.5), (2, 'bob', 72.0), (3, 'carol', -1.5)");
+
+  auto low_scores = execute_sql("SELECT name FROM scores WHERE score <= 72.0");
+
+  ASSERT_TRUE(low_scores.success) << low_scores.error_message;
+  ASSERT_EQ(low_scores.rows.size(), 2u);
+  EXPECT_EQ(std::get<std::string>(low_scores.rows[0].get_value(0)), "bob");
+  EXPECT_EQ(std::get<std::string>(low_scores.rows[1].get_value(0)), "carol");
+
+  auto not_bob = execute_sql("SELECT id FROM scores WHERE name != 'bob'");
+
+  ASSERT_TRUE(not_bob.success) << not_bob.error_message;
+  ASSERT_EQ(not_bob.rows.size(), 2u);
+  EXPECT_EQ(std::get<int32_t>(not_bob.rows[0].get_value(0)), 1);
+  EXPECT_EQ(std::get<int32_t>(not_bob.rows[1].get_value(0)), 3);
+}
+
+TEST_F(ExecutorTest, SelectWhereNullComparisonDoesNotMatchRows) {
+  execute_sql("CREATE TABLE users (id INT NOT NULL, name VARCHAR(50))");
+  execute_sql("INSERT INTO users (id) VALUES (1)");
+  execute_sql("INSERT INTO users VALUES (2, 'bob')");
+
+  auto result = execute_sql("SELECT * FROM users WHERE name = NULL");
+
+  ASSERT_TRUE(result.success) << result.error_message;
+  EXPECT_TRUE(result.rows.empty());
+}
+
+TEST_F(ExecutorTest, SelectWhereNoMatchesReturnsEmptyResult) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
+
+  auto result = execute_sql("SELECT * FROM users WHERE id > 100");
+
+  ASSERT_TRUE(result.success) << result.error_message;
+  EXPECT_TRUE(result.rows.empty());
+  EXPECT_EQ(result.affected_rows, 0u);
+}
+
+TEST_F(ExecutorTest, SelectWhereUnknownColumnReturnsError) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO users VALUES (1, 'alice')");
+
+  auto result = execute_sql("SELECT * FROM users WHERE age = 31");
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error_message.find("unknown column"), std::string::npos);
+}
+
 }

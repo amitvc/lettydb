@@ -57,9 +57,10 @@ TEST_F(TableManagerTest, InsertAndScanMixedTable) {
   ASSERT_TRUE(table_manager->insert_row("users", row2));
 
   std::vector<Tuple> results;
-  ASSERT_TRUE(table_manager->scan_table_tuples("users", [&results](const Tuple& t) {
-    results.push_back(t);
-  }));
+  TableScanner scanner = table_manager->scan_table("users");
+  while (scanner.next()) {
+    results.push_back(Tuple::deserialize(schema, scanner.get_tuple_data(), scanner.get_tuple_size()));
+  }
 
   ASSERT_EQ(results.size(), 2u);
   EXPECT_EQ(std::get<int32_t>(results[0].get_value(0)), 1);
@@ -93,11 +94,12 @@ TEST_F(TableManagerTest, InsertAndScanWithTuple) {
   
   // Scan and verify
   std::vector<Tuple> results;
-  bool scan_result = table_manager->scan_table_tuples("scores", [&results](const Tuple& tuple) {
-    results.push_back(tuple);
-  });
+  TableScanner scanner = table_manager->scan_table("scores");
+  while (scanner.next()) {
+	results.push_back(Tuple::deserialize(schema, scanner.get_tuple_data(), scanner.get_tuple_size()));
+  }
+
   
-  ASSERT_TRUE(scan_result);
   ASSERT_EQ(results.size(), 2);
   
   // Verify first row
@@ -113,7 +115,7 @@ TEST_F(TableManagerTest, InsertAndScanWithTuple) {
 
 TEST_F(TableManagerTest, ScanNonExistentTable) {
   EXPECT_THROW({
-    table_manager->scan_table("nonexistent", [](const char*, uint32_t) {});
+    table_manager->scan_table("nonexistent");
   }, DbException);
 }
 
@@ -142,12 +144,12 @@ TEST_F(TableManagerTest, MultipleInsertsFillPage) {
   }
   
   // Scan and verify count
-  int count = 0;
-  table_manager->scan_table_tuples("numbers", [&count](const Tuple& tuple) {
-    count++;
-  });
-  
-  EXPECT_EQ(count, 100);
+  TableScanner scanner = table_manager->scan_table("numbers");
+  std::vector<Tuple> results;
+  while (scanner.next()) {
+	results.push_back(Tuple::deserialize(schema, scanner.get_tuple_data(), scanner.get_tuple_size()));
+  }
+  EXPECT_EQ(results.size(), 100);
 }
 
 } // namespace letty

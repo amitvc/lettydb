@@ -103,10 +103,10 @@ class Tuple {
    * @param schema The table schema defining column types and offsets.
    * @param buf    Destination buffer (must be at least buf_size bytes).
    * @param buf_size Size of the destination buffer in bytes.
-   * @param[out] out_size The size of the serialized data.
-   * @return true if serialization succeeded, false if buffer too small.
+   * @return The size of the serialized data in bytes.
+   * @throws DbException if the tuple cannot be serialized into the given buffer.
    */
-  bool serialize(const Schema& schema, char* buf, uint32_t buf_size, uint32_t* out_size) const;
+  uint32_t serialize(const Schema& schema, char* buf, uint32_t buf_size) const;
 
   /**
    * @brief Deserializes a tuple from a raw byte buffer.

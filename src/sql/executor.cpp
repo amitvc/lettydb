@@ -1,8 +1,91 @@
 #include "executor.h"
+
 #include "token.h"
 #include "common/db_exception.h"
 
 namespace letty {
+
+namespace {
+
+bool is_numeric_value(const Value& value) {
+  return std::holds_alternative<int32_t>(value) || std::holds_alternative<double>(value);
+}
+
+double numeric_value_as_double(const Value& value) {
+  if (std::holds_alternative<int32_t>(value)) {
+    return static_cast<double>(std::get<int32_t>(value));
+  }
+
+  return std::get<double>(value);
+}
+
+int compare_values(const Value& lhs, const Value& rhs) {
+  if (is_numeric_value(lhs) && is_numeric_value(rhs)) {
+    double left = numeric_value_as_double(lhs);
+    double right = numeric_value_as_double(rhs);
+    if (left < right) {
+      return -1;
+    }
+    if (left > right) {
+      return 1;
+    }
+    return 0;
+  }
+
+  if (std::holds_alternative<std::string>(lhs) && std::holds_alternative<std::string>(rhs)) {
+    const auto& left = std::get<std::string>(lhs);
+    const auto& right = std::get<std::string>(rhs);
+    if (left < right) {
+      return -1;
+    }
+    if (left > right) {
+      return 1;
+    }
+    return 0;
+  }
+
+  if (std::holds_alternative<bool>(lhs) && std::holds_alternative<bool>(rhs)) {
+    bool left = std::get<bool>(lhs);
+    bool right = std::get<bool>(rhs);
+    if (left == right) {
+      return 0;
+    }
+    return left ? 1 : -1;
+  }
+
+  throw DbException(DbErrorCode::TypeMismatch, "SELECT: WHERE clause compares incompatible value types");
+}
+
+bool apply_comparison(const Value& lhs, const std::string& op, const Value& rhs) {
+  if (std::holds_alternative<std::monostate>(lhs) || std::holds_alternative<std::monostate>(rhs)) {
+    return false;
+  }
+
+  int cmp = compare_values(lhs, rhs);
+
+  if (op == "=") {
+    return cmp == 0;
+  }
+  if (op == "!=") {
+    return cmp != 0;
+  }
+  if (op == "<") {
+    return cmp < 0;
+  }
+  if (op == "<=") {
+    return cmp <= 0;
+  }
+  if (op == ">") {
+    return cmp > 0;
+  }
+  if (op == ">=") {
+    return cmp >= 0;
+  }
+
+  throw DbException(DbErrorCode::InvalidArgument, "SELECT: unsupported WHERE operator '" + op + "'");
+}
+
+}  // namespace
 
 Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager)
     : catalog_manager_(catalog_manager), table_manager_(table_manager) {}
@@ -223,16 +306,15 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
   }
   
 
-  bool scan_ok = table_manager_.scan_table_tuples(table_name, [&result, &selected_column_indexes](const Tuple& tuple) {
-    Tuple projected;
-    for (size_t index : selected_column_indexes) {
-      projected.add_value(tuple.get_value(index));
+  TableScanner scanner = table_manager_.scan_table(table_name);
+  while (scanner.next()) {
+    Tuple tuple = Tuple::deserialize(table_meta->schema, scanner.get_tuple_data(), scanner.get_tuple_size());
+    if (!tuple_matches_where(node, tuple, schema_columns)) {
+      continue;
     }
-    result.rows.push_back(std::move(projected));
-  });
-  
-  if (!scan_ok) {
-    return ExecutionResult::error("SELECT: failed to scan table '" + table_name + "'");
+
+    Tuple projected_tuple = project_tuple(tuple, selected_column_indexes);
+    result.rows.push_back(std::move(projected_tuple));
   }
   
   result.affected_rows = result.rows.size();
@@ -289,6 +371,88 @@ Value Executor::literal_to_value(const LiteralNode* literal) {
       return std::monostate{};
     }
   }, literal->value);
+}
+
+std::optional<size_t> Executor::find_column_index(const std::vector<Column>& schema_columns,
+										const std::string& column_name) {
+  for (size_t i = 0; i < schema_columns.size(); ++i) {
+	if (schema_columns[i].get_name() == column_name) {
+	  return i;
+	}
+  }
+  return std::nullopt;
+}
+
+Value Executor::evaluate_expression(const ExpressionNode* expression,
+                                    const Tuple& tuple,
+                                    const std::vector<Column>& schema_columns) {
+  if (auto* literal = dynamic_cast<const LiteralNode*>(expression)) {
+    return literal_to_value(literal);
+  }
+
+  if (auto* identifier = dynamic_cast<const IdentifierNode*>(expression)) {
+    auto column_index = find_column_index(schema_columns, identifier->name);
+    if (!column_index) {
+      throw DbException(DbErrorCode::NotFound, "SELECT: unknown column '" + identifier->name + "'");
+    }
+    return tuple.get_value(*column_index);
+  }
+
+  if (auto* qualified = dynamic_cast<const QualifiedIdentifierNode*>(expression)) {
+    auto column_index = find_column_index(schema_columns, qualified->name->name);
+    if (!column_index) {
+      throw DbException(DbErrorCode::NotFound, "SELECT: unknown column '" + qualified->name->name + "'");
+    }
+    return tuple.get_value(*column_index);
+  }
+
+  throw DbException(DbErrorCode::InvalidArgument, "SELECT: unsupported expression in WHERE clause");
+}
+
+bool Executor::evaluate_where_clause(const ExpressionNode* expression,
+                                     const Tuple& tuple,
+                                     const std::vector<Column>& schema_columns) {
+  auto* binary = dynamic_cast<const BinaryOperationNode*>(expression);
+  if (!binary) {
+    Value value = evaluate_expression(expression, tuple, schema_columns);
+    if (std::holds_alternative<bool>(value)) {
+      return std::get<bool>(value);
+    }
+    throw DbException(DbErrorCode::TypeMismatch, "SELECT: WHERE clause expression must evaluate to BOOLEAN");
+  }
+
+  if (binary->op == "AND") {
+    return evaluate_where_clause(binary->left.get(), tuple, schema_columns) &&
+           evaluate_where_clause(binary->right.get(), tuple, schema_columns);
+  }
+
+  if (binary->op == "OR") {
+    return evaluate_where_clause(binary->left.get(), tuple, schema_columns) ||
+           evaluate_where_clause(binary->right.get(), tuple, schema_columns);
+  }
+
+  Value left = evaluate_expression(binary->left.get(), tuple, schema_columns);
+  Value right = evaluate_expression(binary->right.get(), tuple, schema_columns);
+  return apply_comparison(left, binary->op, right);
+}
+
+bool Executor::tuple_matches_where(const SelectStatementNode* node,
+                                   const Tuple& tuple,
+                                   const std::vector<Column>& schema_columns) {
+  if (!node->where_clause) {
+    return true;
+  }
+
+  return evaluate_where_clause(node->where_clause.get(), tuple, schema_columns);
+}
+
+Tuple Executor::project_tuple(const Tuple& tuple,
+                              const std::vector<size_t>& selected_column_indexes) {
+  Tuple projected_tuple;
+  for (size_t index : selected_column_indexes) {
+    projected_tuple.add_value(tuple.get_value(index));
+  }
+  return projected_tuple;
 }
 
 } // namespace letty

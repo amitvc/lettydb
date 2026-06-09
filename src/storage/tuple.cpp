@@ -21,7 +21,7 @@ void set_null_bit(uint8_t* bitmap, size_t index) {
   bitmap[byte_index] |= bit_mask;
 }
 
-bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32_t *out_size) const {
+uint32_t Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size) const {
   const auto &columns = schema.get_columns();
 
   if (values_.size() != columns.size()) {
@@ -42,7 +42,6 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
 	}
   }
 
-  *out_size = total_size;
   if (total_size > buf_size) {
 	throw DbException(DbErrorCode::InvalidArgument,
 					  "Tuple serialization requires " + std::to_string(total_size) +
@@ -101,7 +100,7 @@ bool Tuple::serialize(const Schema &schema, char *buf, uint32_t buf_size, uint32
 	}
   }
 
-  return true;
+  return total_size;
 }
 
 Tuple Tuple::deserialize(const Schema &schema, const char *data, uint32_t size) {

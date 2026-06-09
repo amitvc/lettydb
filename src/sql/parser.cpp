@@ -464,9 +464,8 @@ namespace letty {
 
         while (match(TokenType::OR)) {
             advance();
-            std::string op = tokens[pos - 1].text;
             auto right = parse_and_expression();
-            left = std::make_unique<BinaryOperationNode>(std::move(left), op, std::move(right));
+            left = std::make_unique<BinaryOperationNode>(std::move(left), "OR", std::move(right));
         }
         return left;
     }
@@ -476,9 +475,8 @@ namespace letty {
 
         while (match(TokenType::AND)) {
             advance();
-            std::string op = tokens[pos - 1].text;
             auto right = parse_relational_expression();
-            left = std::make_unique<BinaryOperationNode>(std::move(left), op, std::move(right));
+            left = std::make_unique<BinaryOperationNode>(std::move(left), "AND", std::move(right));
         }
         return left;
     }
@@ -506,6 +504,22 @@ namespace letty {
             advance();
             double val = std::stod(tokens[pos - 1].text);
             return std::make_unique<LiteralNode>(val);
+        }
+        if (match(TokenType::MINUS)) {
+            advance();
+            if (match(TokenType::INT_LITERAL)) {
+                advance();
+                return std::make_unique<LiteralNode>(-std::stoll(tokens[pos - 1].text));
+            }
+            if (match(TokenType::FLOAT_LITERAL)) {
+                advance();
+                return std::make_unique<LiteralNode>(-std::stod(tokens[pos - 1].text));
+            }
+            throw DbException(DbErrorCode::ParseError, "Expected number after '-' in expression");
+        }
+        if (match(TokenType::NULL_LITERAL)) {
+            advance();
+            return std::make_unique<LiteralNode>(std::monostate{});
         }
         if (match(TokenType::DATE_LITERAL)) {
             advance();
@@ -559,4 +573,3 @@ namespace letty {
         throw std::out_of_range("Cannot advance past the end of tokens.");
     }
 }
-

@@ -26,24 +26,6 @@ namespace letty {
  */
     class ASTNode {
     public:
-        enum class NodeType {
-            // Statements
-            SELECT_STATEMENT,
-            INSERT_STATEMENT,
-            UPDATE_STATEMENT,
-            DELETE_STATEMENT,
-            CREATE_TABLE_STATEMENT,
-
-            // Expressions
-            LITERAL,
-            IDENTIFIER,
-            QUALIFIED_IDENTIFIER,
-            BINARY_OPERATION,
-            UNARY_OPERATION,
-            FUNCTION_CALL,
-            STAR_EXPRESSION  // For SELECT *
-        };
-
         virtual ~ASTNode() = default;
     };
 

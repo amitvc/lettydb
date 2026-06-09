@@ -1,9 +1,9 @@
 #pragma once
 
-#include <functional>
 #include <string>
 #include "buffer/buffer_pool_manager.h"
 #include "iam_manager.h"
+#include "table_scanner.h"
 #include "tuple.h"
 #include "catalog/catalog_manager.h"
 
@@ -21,7 +21,7 @@ namespace letty {
  *
  * Responsibilities:
  * - Insert rows into tables
- * - Scan table data using callbacks
+ * - Create scanners for table data
  * - Manage page allocation when tables grow
  *
  * Non-responsibilities:
@@ -67,29 +67,13 @@ class TableManager {
   uint32_t insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples);
 
   /**
-   * @brief Scans all rows in a table.
-   *
-   * Traverses the table's IAM chain, reads each SlottedPage, and
-   * invokes the callback for each tuple found.
+   * @brief Creates a scanner for streaming raw tuple bytes from a table.
    *
    * @param table_name The name of the table.
-   * @param callback Function called for each tuple (raw data, size).
-   * @return true if scan completed successfully.
-   * @throws DbException if the table is missing or scan metadata cannot be read.
+   * @return Scanner positioned before the first tuple.
+   * @throws DbException if the table is missing.
    */
-  bool scan_table(const std::string& table_name,
-                  const std::function<void(const char* data, uint32_t size)>& callback);
-
-  /**
-   * @brief Scans all rows in a table, deserializing to Tuples.
-   *
-   * @param table_name The name of the table.
-   * @param callback Function called for each deserialized tuple.
-   * @return true if scan completed successfully.
-   * @throws DbException if the table is missing or scan metadata cannot be read.
-   */
-  bool scan_table_tuples(const std::string& table_name,
-                         const std::function<void(const Tuple& tuple)>& callback);
+  TableScanner scan_table(const std::string& table_name);
 
  private:
   BufferPoolManager& buffer_pool_;
@@ -108,19 +92,6 @@ class TableManager {
    */
   bool try_insert_into_page(Page* page, const char* buf, uint32_t data_size);
 
-  /**
-   * @brief Scans all live tuples across every page in one extent, invoking
-   *        callback with raw (data, size) for each.
-   */
-  void scan_extent(uint32_t extent_id,
-                   const std::function<void(const char*, uint32_t)>& callback);
-
-  /**
-   * @brief Scans all live tuples across every page in one extent, deserializing
-   *        each into a Tuple before invoking callback.
-   */
-  void scan_extent_tuples(uint32_t extent_id, const Schema& schema,
-                          const std::function<void(const Tuple&)>& callback);
 };
 
 }

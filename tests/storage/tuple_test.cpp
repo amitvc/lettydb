@@ -4,7 +4,6 @@
 #include "catalog/schema.h"
 #include "catalog/column.h"
 #include "catalog/catalog_defs.h"
-#include "common/db_exception.h"
 
 namespace letty {
 
@@ -53,8 +52,7 @@ TEST_F(TupleTest, SerializeInto_Integer_WritesCorrectBytes) {
   Tuple t(std::vector<Value>{int32_t{400}});
 
   char buf[16] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 5u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
 
@@ -68,8 +66,7 @@ TEST_F(TupleTest, SerializeInto_NegativeInteger_WritesCorrectBytes) {
   Tuple t(std::vector<Value>{int32_t{-1}});
 
   char buf[16] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
 
   int32_t val;
   std::memcpy(&val, buf + 1, sizeof(int32_t));
@@ -82,8 +79,7 @@ TEST_F(TupleTest, SerializeInto_Double_WritesCorrectBytes) {
   Tuple t(std::vector<Value>{expected});
 
   char buf[16] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 9u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
 
@@ -97,8 +93,7 @@ TEST_F(TupleTest, SerializeInto_BooleanTrue_WritesOneByte1) {
   Tuple t(std::vector<Value>{bool{true}});
 
   char buf[8] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 2u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
   EXPECT_EQ(static_cast<uint8_t>(buf[1]), 1u);
@@ -109,8 +104,7 @@ TEST_F(TupleTest, SerializeInto_BooleanFalse_WritesOneByte0) {
   Tuple t(std::vector<Value>{bool{false}});
 
   char buf[8] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 2u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
   EXPECT_EQ(static_cast<uint8_t>(buf[1]), 0u);
@@ -121,8 +115,7 @@ TEST_F(TupleTest, SerializeInto_MultipleFixedColumns_TotalSizeIsSum) {
   Tuple t(std::vector<Value>{int32_t{1}, double{2.0}});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 13u);
 }
 
@@ -133,8 +126,7 @@ TEST_F(TupleTest, SerializeInto_Varchar_Writes2ByteLengthPrefixThenData) {
   Tuple t(std::vector<Value>{name});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 3u + name.size());
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
 
@@ -149,8 +141,7 @@ TEST_F(TupleTest, SerializeInto_EmptyVarchar_WritesTwoZeroBytes) {
   Tuple t(std::vector<Value>{std::string{""}});
 
   char buf[16] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 3u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
 
@@ -164,8 +155,7 @@ TEST_F(TupleTest, SerializeInto_NumericSchema_WritesCorrectContent) {
   Tuple t(std::vector<Value>{int32_t{7}, double{1.5}});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(t.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 13u);  // 1-byte null bitmap + 4 + 8
 
   int32_t id;
@@ -177,14 +167,12 @@ TEST_F(TupleTest, SerializeInto_NumericSchema_WritesCorrectContent) {
 }
 
 
-TEST_F(TupleTest, SerializeInto_BufferTooSmall_ReturnsFalse_SetsRequiredSize) {
+TEST_F(TupleTest, SerializeInto_BufferTooSmall_Throws) {
   Schema schema = make_numeric_schema();  // needs 12 bytes
   Tuple t(std::vector<Value>{int32_t{1}, double{2.0}});
 
   char buf[4] = {};
-  uint32_t out_size = 0;
-  EXPECT_THROW(t.serialize(schema, buf, sizeof(buf), &out_size), DbException);
-  EXPECT_EQ(out_size, 13u);
+  EXPECT_THROW(t.serialize(schema, buf, sizeof(buf)), std::runtime_error);
 }
 
 TEST_F(TupleTest, SerializeInto_ValueCountMismatch_Throws) {
@@ -192,8 +180,7 @@ TEST_F(TupleTest, SerializeInto_ValueCountMismatch_Throws) {
   Tuple t(std::vector<Value>{int32_t{1}});  // only 1 value
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  EXPECT_THROW(t.serialize(schema, buf, sizeof(buf), &out_size), std::runtime_error);
+  EXPECT_THROW(t.serialize(schema, buf, sizeof(buf)), std::runtime_error);
 }
 
 TEST_F(TupleTest, Deserialize_Integer_ReturnsCorrectValue) {
@@ -275,8 +262,7 @@ TEST_F(TupleTest, RoundTrip_NumericSchema_PreservesAllValues) {
   Tuple original(std::vector<Value>{int32_t{-1}, double{99.9}});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 2u);
@@ -289,8 +275,7 @@ TEST_F(TupleTest, RoundTrip_NullValue_PreservesNull) {
   Tuple original(std::vector<Value>{int32_t{7}, std::monostate{}});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0b00000010);
 
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
@@ -305,8 +290,7 @@ TEST_F(TupleTest, RoundTrip_MixedSchema_PreservesAllValues) {
   Tuple original(std::vector<Value>{int32_t{42}, std::string{"alice"}, bool{true}});
 
   char buf[256] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 3u);
@@ -320,8 +304,7 @@ TEST_F(TupleTest, RoundTrip_EmptyVarchar_PreservesEmptyString) {
   Tuple original(std::vector<Value>{std::string{""}});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 1u);
@@ -335,8 +318,7 @@ TEST_F(TupleTest, RoundTrip_LargeVarchar_PreservesAllCharacters) {
 
   // 2-byte length prefix + 500 bytes of data
   char buf[512] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 1u);
@@ -349,8 +331,7 @@ TEST_F(TupleTest, RoundTrip_DateField_PreservesValue) {
   Tuple original(std::vector<Value>{date});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 1u);
@@ -363,8 +344,7 @@ TEST_F(TupleTest, RoundTrip_TimestampField_PreservesValue) {
   Tuple original(std::vector<Value>{ts});
 
   char buf[64] = {};
-  uint32_t out_size = 0;
-  ASSERT_TRUE(original.serialize(schema, buf, sizeof(buf), &out_size));
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
   ASSERT_EQ(restored.size(), 1u);

@@ -122,6 +122,30 @@ class Executor {
    * @brief Converts an AST LiteralNode value to a storage Value.
    */
   Value literal_to_value(const LiteralNode* literal);
+
+  /**
+   * Returns the index of column from the list of Column.
+   * @param schema_columns
+   * @param column_name
+   * @return column index
+   */
+  std::optional<size_t> find_column_index(const std::vector<Column>& schema_columns,
+						const std::string& column_name);
+
+  Value evaluate_expression(const ExpressionNode* expression,
+                            const Tuple& tuple,
+                            const std::vector<Column>& schema_columns);
+
+  bool evaluate_where_clause(const ExpressionNode* expression,
+                             const Tuple& tuple,
+                             const std::vector<Column>& schema_columns);
+
+  bool tuple_matches_where(const SelectStatementNode* node,
+                           const Tuple& tuple,
+                           const std::vector<Column>& schema_columns);
+
+  Tuple project_tuple(const Tuple& tuple,
+                      const std::vector<size_t>& selected_column_indexes);
 };
 
 }

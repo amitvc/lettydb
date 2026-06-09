@@ -24,7 +24,6 @@ void CatalogManager::init() {
     bootstrap();
   }
 
-  // Eagerly load all tables into the cache
   load_all_tables();
 }
 
@@ -241,9 +240,7 @@ bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
                        record.table_name,
                        static_cast<int32_t>(record.iam_page_id),
                        static_cast<int32_t>(record.column_count)});
-    if (!table_tuple.serialize(st_schema, buf, PAGE_SIZE, &data_size)) {
-        throw DbException(DbErrorCode::InvalidArgument, "failed to serialize sys_tables record");
-    }
+    data_size = table_tuple.serialize(st_schema, buf, PAGE_SIZE);
 
     return insert_into_table(sys_tables_iam_, buf, data_size);
 }
@@ -258,9 +255,7 @@ bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& 
                      static_cast<int32_t>(col.get_type()),
                      static_cast<int32_t>(col.get_length()),
                      static_cast<int32_t>(col.get_offset())});
-    if (!col_tuple.serialize(sc_schema, buf, PAGE_SIZE, &data_size)) {
-        throw DbException(DbErrorCode::InvalidArgument, "failed to serialize sys_columns record");
-    }
+    data_size = col_tuple.serialize(sc_schema, buf, PAGE_SIZE);
     return insert_into_table(sys_columns_iam_, buf, data_size);
 }
 

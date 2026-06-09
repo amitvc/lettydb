@@ -1,7 +1,6 @@
 #include "table_manager.h"
 #include "slotted_page.h"
 #include "storage_def.h"
-#include "page_utils.h"
 #include "common/db_exception.h"
 
 namespace letty {
@@ -41,42 +40,6 @@ bool TableManager::try_insert_into_page(Page* page, const char* buf, uint32_t da
   return sp.insert_tuple(buf, data_size).has_value();
 }
 
-void TableManager::scan_extent(uint32_t extent_id,
-                               const std::function<void(const char*, uint32_t)>& callback) {
-  page_id_t extent_start = static_cast<page_id_t>(extent_id * EXTENT_SIZE);
-  for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
-    page_id_t data_page_id = extent_start + offset;
-    Page* data_pg = buffer_pool_.fetch_page(data_page_id);
-    if (!data_pg) continue;
-
-    SlottedPage sp(data_pg->get_data());
-    for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
-      uint32_t size;
-      const char* data = sp.get_tuple(slot, &size);
-      if (data) callback(data, size);
-    }
-    buffer_pool_.unpin_page(data_page_id, false);
-  }
-}
-
-void TableManager::scan_extent_tuples(uint32_t extent_id, const Schema& schema,
-                                      const std::function<void(const Tuple&)>& callback) {
-  page_id_t extent_start = static_cast<page_id_t>(extent_id * EXTENT_SIZE);
-  for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
-    page_id_t data_page_id = extent_start + offset;
-    Page* data_pg = buffer_pool_.fetch_page(data_page_id);
-    if (!data_pg) continue;
-
-    SlottedPage sp(data_pg->get_data());
-    for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
-      uint32_t size;
-      const char* data = sp.get_tuple(slot, &size);
-      if (data) callback(Tuple::deserialize(schema, data, size));
-    }
-    buffer_pool_.unpin_page(data_page_id, false);
-  }
-}
-
 bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
   auto* meta = catalog_manager_.get_table(table_name);
   if (!meta) {
@@ -87,10 +50,7 @@ bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple)
 
 bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   char buf[PAGE_SIZE];
-  uint32_t data_size;
-  if (!tuple.serialize(meta.schema, buf, PAGE_SIZE, &data_size)) {
-    throw DbException(DbErrorCode::InvalidArgument, "tuple is too large for page");
-  }
+  uint32_t data_size = tuple.serialize(meta.schema, buf, PAGE_SIZE);
 
   page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size);
   if (target_page_id == INVALID_PAGE_ID) {
@@ -126,9 +86,11 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
   for (const auto& tuple : tuples) {
     char buf[PAGE_SIZE];
     uint32_t data_size;
-    if (!tuple.serialize(schema, buf, PAGE_SIZE, &data_size)) {
+    try {
+      data_size = tuple.serialize(schema, buf, PAGE_SIZE);
+    } catch (...) {
       if (current_page) buffer_pool_.unpin_page(current_page_id, true);
-      throw DbException(DbErrorCode::InvalidArgument, "tuple is too large for page");
+      throw;
     }
 
     if (current_page && try_insert_into_page(current_page, buf, data_size)) {
@@ -167,51 +129,13 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
   return inserted;
 }
 
-bool TableManager::scan_table(const std::string& table_name,
-                              const std::function<void(const char* data, uint32_t size)>& callback) {
-  auto* meta = catalog_manager_.get_table(table_name);
-  if (!meta) {
+TableScanner TableManager::scan_table(const std::string& table_name) {
+  auto* table_metadata = catalog_manager_.get_table(table_name);
+  if (!table_metadata) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
-  page_id_t current_iam_page_id = meta->iam_page_id;
-  while (current_iam_page_id != INVALID_PAGE_ID) {
-    auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
-    if (!iam_page) {
-      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page_id));
-    }
-
-    for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
-      scan_extent(iam_page->extent_ids[i], callback);
-    }
-    current_iam_page_id = iam_page->next_page_id;
-  }
-
-  return true;
-}
-
-bool TableManager::scan_table_tuples(const std::string& table_name,
-                                     const std::function<void(const Tuple& tuple)>& callback) {
-  auto* meta = catalog_manager_.get_table(table_name);
-  if (!meta) {
-    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
-  }
-
-  const Schema& schema = meta->schema;
-  page_id_t current_iam_page_id = meta->iam_page_id;
-
-  while (current_iam_page_id != INVALID_PAGE_ID) {
-    auto iam_page = load_page_value<IAMPage>(buffer_pool_, current_iam_page_id);
-    if (!iam_page) {
-      throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page_id));
-    }
-
-    for (uint16_t i = 0; i < iam_page->extent_count; ++i) {
-      scan_extent_tuples(iam_page->extent_ids[i], schema, callback);
-    }
-    current_iam_page_id = iam_page->next_page_id;
-  }
-  return true;
+  return {buffer_pool_, table_metadata->iam_page_id};
 }
 
 }
