@@ -20,14 +20,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
   // Without this, uninitialized pages have free_space_pointer = 0 and appear
   // full to page_has_space, so only the first page of each extent would ever be used.
   for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
-    Page* pg = buffer_pool_.new_page(pid + offset);
-    if (!pg) {
-      pg = buffer_pool_.fetch_page(pid + offset);
-      if (pg && (pg->get_pin_count() != 1 || pg->is_dirty())) {
-        buffer_pool_.unpin_page(pid + offset, false);
-        pg = nullptr;
-      }
-    }
+    Page* pg = buffer_pool_.new_or_fetch_page(pid + offset);
     if (!pg) return INVALID_PAGE_ID;
     SlottedPage::init(pg->get_data());
     buffer_pool_.unpin_page(pid + offset, true);

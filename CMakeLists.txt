@@ -36,8 +36,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog replxx json tabulate)
 
-file(GLOB_RECURSE DB_SOURCES "src/*.cpp")
-file(GLOB_RECURSE DB_HEADERS "src/*.h")
+file(GLOB_RECURSE DB_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB_RECURSE DB_HEADERS CONFIGURE_DEPENDS "src/*.h")
 
 # Remove main.cpp from library sources
 list(REMOVE_ITEM DB_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")

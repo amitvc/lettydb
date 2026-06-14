@@ -125,6 +125,11 @@ class CatalogManager {
   uint32_t get_next_oid();
 
   /**
+   * @brief Formats every page in an allocated extent as an empty SlottedPage.
+   */
+  void initialize_data_extent(page_id_t extent_start_page);
+
+  /**
    * @brief Inserts a tuple into a table, automatically finding a page with space.
    *
    * If no page has enough space, allocates a new extent for the table.

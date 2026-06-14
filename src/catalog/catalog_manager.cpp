@@ -89,35 +89,8 @@ void CatalogManager::bootstrap() {
         throw DbException(DbErrorCode::NoSpace, "failed to allocate system catalog data extents");
     }
 
-    Page* sys_tables_page = buffer_pool_.new_page(sys_tables_first_page);
-    if (!sys_tables_page) {
-      sys_tables_page = buffer_pool_.fetch_page(sys_tables_first_page);
-      if (sys_tables_page && (sys_tables_page->get_pin_count() != 1 || sys_tables_page->is_dirty())) {
-        buffer_pool_.unpin_page(sys_tables_first_page, false);
-        sys_tables_page = nullptr;
-      }
-    }
-
-    if (!sys_tables_page) {
-        throw DbException(DbErrorCode::IOError, "failed to create sys_tables first page during catalog bootstrap");
-    }
-    SlottedPage::init(sys_tables_page->get_data());
-    buffer_pool_.unpin_page(sys_tables_first_page, true);
-
-    Page* sys_columns_page = buffer_pool_.new_page(sys_columns_first_page);
-    if (!sys_columns_page) {
-      sys_columns_page = buffer_pool_.fetch_page(sys_columns_first_page);
-      if (sys_columns_page && (sys_columns_page->get_pin_count() != 1 || sys_columns_page->is_dirty())) {
-        buffer_pool_.unpin_page(sys_columns_first_page, false);
-        sys_columns_page = nullptr;
-      }
-    }
-
-    if (!sys_columns_page) {
-        throw DbException(DbErrorCode::IOError, "failed to create sys_columns first page during catalog bootstrap");
-    }
-    SlottedPage::init(sys_columns_page->get_data());
-    buffer_pool_.unpin_page(sys_columns_first_page, true);
+    initialize_data_extent(sys_tables_first_page);
+    initialize_data_extent(sys_columns_first_page);
 
     // Insert the metadata for sys_tables AND sys_columns INTO sys_tables
     insert_sys_table_record({SYS_TABLES_TABLE_OID, SYS_TABLES_NAME, sys_tables_iam, SYS_TABLES_COLUMN_COUNT});
@@ -149,6 +122,18 @@ uint32_t CatalogManager::get_next_oid() {
     return oid;
 }
 
+void CatalogManager::initialize_data_extent(page_id_t extent_start_page) {
+    for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
+        page_id_t page_id = extent_start_page + offset;
+        Page* page = buffer_pool_.new_or_fetch_page(page_id);
+        if (!page) {
+            throw DbException(DbErrorCode::IOError, "failed to create catalog data page " + std::to_string(page_id));
+        }
+        SlottedPage::init(page->get_data());
+        buffer_pool_.unpin_page(page_id, true);
+    }
+}
+
 bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size) {
     page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, size);
 
@@ -159,22 +144,7 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
             throw DbException(DbErrorCode::NoSpace, "failed to allocate new extent for catalog table");
         }
 
-        // Prefer new_page for a freshly allocated page; fetch only handles the
-        // case where the frame was already cached by earlier file extension.
-        Page* new_pg = buffer_pool_.new_page(target_page_id);
-        if (!new_pg) {
-          new_pg = buffer_pool_.fetch_page(target_page_id);
-          if (new_pg && (new_pg->get_pin_count() != 1 || new_pg->is_dirty())) {
-            buffer_pool_.unpin_page(target_page_id, false);
-            new_pg = nullptr;
-          }
-        }
-
-        if (!new_pg) {
-            throw DbException(DbErrorCode::IOError, "failed to create catalog data page");
-        }
-        SlottedPage::init(new_pg->get_data());
-        buffer_pool_.unpin_page(target_page_id, true);
+        initialize_data_extent(target_page_id);
     }
 
     Page* page = buffer_pool_.fetch_page(target_page_id);

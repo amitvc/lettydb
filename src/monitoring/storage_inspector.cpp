@@ -4,6 +4,7 @@
 #include "storage/slotted_page.h"
 #include "storage/tuple.h"
 #include "storage/page_utils.h"
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -19,31 +20,31 @@ StorageInspector::StorageInspector(BufferPoolManager& bpm, ExtentManager& em,
 std::string StorageInspector::get_summary() {
     nlohmann::json j;
     
-    // Basic stats
-    page_id_t total_pages = buffer_pool_.get_file_size_in_pages();
-    j["total_pages"] = total_pages;
+    page_id_t physical_pages = buffer_pool_.get_file_size_in_pages();
+    j["total_pages"] = physical_pages;
+    j["physical_pages"] = physical_pages;
     
-    // Scan GAM for allocation stats
-    // We start at FIRST_GAM_PAGE_ID and walk the chain
     uint32_t allocated_extents = 0;
     uint32_t total_extents = 0;
+    uint32_t highest_allocated_extent = 0;
+    bool has_allocated_extent = false;
     
     page_id_t curr_gam = FIRST_GAM_PAGE_ID;
-    while (curr_gam != INVALID_PAGE_ID && curr_gam < total_pages) {
+    while (curr_gam != INVALID_PAGE_ID) {
         Page* page = buffer_pool_.fetch_page(curr_gam);
         if (page) {
             auto gam_page = load_page_layout<GAMPage>(page);
 
             Bitmap bitmap(gam_page.bitmap, GAM_BITMAP_ARRAY_SIZE * 8);
             
-            // Count bits
             for (size_t i = 0; i < bitmap.get_size_in_bits(); ++i) {
                 if (bitmap.is_set(i)) {
                     allocated_extents++;
+                    highest_allocated_extent = total_extents + static_cast<uint32_t>(i);
+                    has_allocated_extent = true;
                 }
             }
-            // Count capacity (approx, depends on file size vs GAM capacity)
-            // But we can just report what the GAM *covers*
+
             total_extents += (GAM_BITMAP_ARRAY_SIZE * 8);
             
             page_id_t next = gam_page.next_page_id;
@@ -55,14 +56,19 @@ std::string StorageInspector::get_summary() {
     }
     
     j["allocated_extents"] = allocated_extents;
-    j["percent_full"] = total_extents > 0 ? (100.0 * allocated_extents / total_extents) : 0.0;
+    uint32_t physical_extents = (physical_pages + EXTENT_SIZE - 1) / EXTENT_SIZE;
+    uint32_t logical_extents = has_allocated_extent ? highest_allocated_extent + 1 : physical_extents;
+    logical_extents = std::max(logical_extents, physical_extents);
+    page_id_t logical_pages = static_cast<page_id_t>(logical_extents * EXTENT_SIZE);
+    j["logical_pages"] = logical_pages;
+    j["percent_full"] = logical_extents > 0 ? (100.0 * allocated_extents / logical_extents) : 0.0;
     
-    // Extent stats
     j["extent_manager"] = {
-        {"total_extents", total_extents}, // Capacity covered by current GAMs
-        {"file_extents", (total_pages + EXTENT_SIZE - 1) / EXTENT_SIZE}, // Current file size in extents
+        {"total_extents", total_extents},
+        {"file_extents", physical_extents},
+        {"logical_extents", logical_extents},
         {"used_extents", allocated_extents},
-        {"free_extents", (GAM_BITMAP_ARRAY_SIZE * 8) - allocated_extents} // Approximate from GAM
+        {"free_extents", total_extents > allocated_extents ? total_extents - allocated_extents : 0}
     };
     
     // Cache stats
@@ -83,7 +89,7 @@ std::string StorageInspector::get_gam() {
     nlohmann::json result = nlohmann::json::array();
     
     page_id_t curr_gam = FIRST_GAM_PAGE_ID;
-    page_id_t total_pages = buffer_pool_.get_file_size_in_pages();
+    page_id_t physical_pages = buffer_pool_.get_file_size_in_pages();
     int gam_idx = 0;
 
     // We also want to know who owns these extents to color them.
@@ -92,7 +98,7 @@ std::string StorageInspector::get_gam() {
     // The frontend can combine this with get_page_map info or we can do it here.
     // Let's just return the bitmap status first.
 
-    while (curr_gam != INVALID_PAGE_ID && curr_gam < total_pages) {
+    while (curr_gam != INVALID_PAGE_ID) {
         Page* page = buffer_pool_.fetch_page(curr_gam);
         if (!page) break;
 
@@ -100,11 +106,15 @@ std::string StorageInspector::get_gam() {
         Bitmap bitmap(gam_page.bitmap, GAM_BITMAP_ARRAY_SIZE * 8);
         
         std::vector<int> allocation;
-        // Optimization: don't dump 32k bits if file is small. 
-        // Only dump up to file size / 8 (extent size).
-        size_t max_extent = (total_pages + EXTENT_SIZE - 1) / EXTENT_SIZE;
-        // Also respect GAM coverage
-        size_t limit = std::min((size_t)bitmap.get_size_in_bits(), max_extent);
+        size_t physical_extents = (physical_pages + EXTENT_SIZE - 1) / EXTENT_SIZE;
+        size_t logical_extents = physical_extents;
+        for (size_t i = 0; i < bitmap.get_size_in_bits(); ++i) {
+            if (bitmap.is_set(i)) {
+                logical_extents = std::max(logical_extents, i + 1);
+            }
+        }
+
+        size_t limit = std::min(static_cast<size_t>(bitmap.get_size_in_bits()), logical_extents);
         
         for (size_t i = 0; i < limit; ++i) {
             allocation.push_back(bitmap.is_set(i) ? 1 : 0);

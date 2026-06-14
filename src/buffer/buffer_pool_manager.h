@@ -69,6 +69,17 @@ class BufferPoolManager {
   Page* fetch_page(page_id_t page_id);
 
   /**
+   * @brief Register a new page or pin an existing in-memory page without reading from disk.
+   *
+   * Use this when formatting a logical page that may not exist on disk yet.
+   * If page_id is already in the buffer pool, the existing frame is pinned and
+   * returned. Otherwise a zeroed dirty frame is created for page_id.
+   *
+   * @return Pointer to the pinned page, or nullptr if no frame is available.
+   */
+  Page* new_or_fetch_page(page_id_t page_id);
+
+  /**
    * @brief Unpin a page allowing it to be evicted if the page cache is full.
    * @param page_id The page to unpin.
    * @param is_dirty If true, marks the page as dirty (modified).

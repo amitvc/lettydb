@@ -209,12 +209,14 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 auto json = nlohmann::json::parse(db_engine_->get_inspector().get_summary());
 
                 int    total_pages   = json["total_pages"].get<int>();
+                int    logical_pages = json.value("logical_pages", total_pages);
                 int    alloc_extents = json["allocated_extents"].get<int>();
                 int    file_extents  = json["extent_manager"]["file_extents"].get<int>();
+                int    logical_extents = json["extent_manager"].value("logical_extents", file_extents);
                 int    gam_capacity  = json["extent_manager"]["total_extents"].get<int>();
                 double pct_full      = json["percent_full"].get<double>();
                 int    pool_size     = json["bpm"]["pool_size"].get<int>();
-                double hit_ratio     = json["bpm"]["hit_ratio"].get<double>() * 100.0;
+                double hit_ratio     = json["bpm"]["hit_ratio"].get<double>();
                 long   hits          = json["bpm"]["hits"].get<long>();
                 long   misses        = json["bpm"]["misses"].get<long>();
                 long   evictions     = json["bpm"]["evictions"].get<long>();
@@ -223,13 +225,20 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 fmt::print("\n┌─────────────────────────────────┐\n");
                 fmt::print("│        Database Summary         │\n");
                 fmt::print("└─────────────────────────────────┘\n");
-                fmt::print("  File Size   : {} pages ({} KB)\n", total_pages, total_pages * 4);
+                fmt::print("  Physical Size : {} pages ({} KB)\n", total_pages, total_pages * 4);
+                if (logical_pages != total_pages) {
+                    fmt::print("  Logical Size  : {} pages ({} KB)\n", logical_pages, logical_pages * 4);
+                }
 
                 fmt::print("\n  Extents\n");
-                fmt::print("  ├─ In file   : {}\n", file_extents);
+                fmt::print("  ├─ Physical   : {}\n", file_extents);
+                if (logical_extents != file_extents) {
+                    fmt::print("  ├─ Logical    : {}\n", logical_extents);
+                }
                 fmt::print("  ├─ Allocated : {}\n", alloc_extents);
-                fmt::print("  ├─ Free      : {}\n", file_extents - alloc_extents);
-                fmt::print("  ├─ Used      : {:.1f}%\n", pct_full);
+                int    free_extents  = json["extent_manager"]["free_extents"].get<int>();
+                fmt::print("  ├─ GAM free  : {}\n", free_extents);
+                fmt::print("  ├─ Alloc map : {:.1f}%\n", pct_full);
                 fmt::print("  └─ GAM cap   : {} extents\n", gam_capacity);
 
                 fmt::print("\n  Buffer Pool ({} pages)\n", pool_size);
@@ -381,7 +390,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
 
                         if (node.contains("extents") && !node["extents"].empty()) {
                             tabulate::Table t;
-                            t.add_row({"Extent", "Pages", "Size"});
+                            t.add_row({"Extent", "Allocated Pages", "Reserved"});
                             for (const auto& ext : node["extents"]) {
                                 int eid        = ext.get<int>();
                                 int page_start = eid * EXTENT_SIZE;
@@ -399,7 +408,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                             std::cout << t << "\n";
                         }
                     }
-                    fmt::print("  Total: {} IAM page(s), {} extent(s), {} data pages\n\n",
+                    fmt::print("  Total: {} IAM page(s), {} extent(s), {} allocated data page(s)\n\n",
                                total_iam_pages, total_extents, total_data_pages);
                 }
 

@@ -146,6 +146,35 @@ Page* BufferPoolManager::new_page(page_id_t page_id) {
   return &page;
 }
 
+Page* BufferPoolManager::new_or_fetch_page(page_id_t page_id) {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    frame_id_t frame_id = it->second;
+    Page& page = pages_[frame_id];
+    page.increment_pin();
+    replacer_->mark_not_evictable(frame_id);
+    return &page;
+  }
+
+  auto maybe_frame = acquire_frame();
+  if (!maybe_frame) {
+    LOG_BPM_WARN("Failed to create page {}: no buffer frame available", page_id);
+    return nullptr;
+  }
+
+  frame_id_t frame_id = *maybe_frame;
+  Page& page = pages_[frame_id];
+  page.reset();
+  page.set_page_id(page_id);
+  page.set_dirty(true);
+  page.increment_pin();
+
+  page_table_[page_id] = frame_id;
+  return &page;
+}
+
 std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
   if (!free_list_.empty()) {
     frame_id_t frame_id = free_list_.front();
