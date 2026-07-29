@@ -1,4 +1,6 @@
-// Test suite for list-based IAM and metadata pool functionality
+// Test suite for list-based IAM functionality. IAM chains live in dedicated
+// extents: the head is extent-aligned and the chain fills the extent's pages
+// front to back before a new extent is allocated.
 //
 
 #include <gtest/gtest.h>
@@ -29,10 +31,7 @@ protected:
         extent_manager = std::make_unique<ExtentManager>(*bpm);
         ASSERT_TRUE(bpm->flush_all_pages());  // Flush init pages for components still using DiskManager directly
         iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
-        
-        // Initialize the metadata pool (needed for the new design)
-        iam_manager->init_shared_extent(FIRST_SHARED_EXTENT_PAGE_ID);
-        
+
         LOG_STORAGE_INFO("Test setup complete for IAMManager tests");
     }
     
@@ -110,37 +109,15 @@ protected:
 };
 
 /**
- * Test metadata pool initialization
- */
-TEST_F(IamManagerTest, SharedExtentInit) {
-    // Flush BPM so init_shared_extent writes are visible on disk
-    EXPECT_TRUE(bpm->flush_all_pages());
-
-    // Read the metadata pool header
-    char buffer[PAGE_SIZE];
-    ASSERT_EQ(disk_manager->read_page(FIRST_SHARED_EXTENT_PAGE_ID, buffer), IOResult::SUCCESS);
-    
-    SharedExtentDirectoryPage pool_header{};
-    std::memcpy(&pool_header, buffer, sizeof(SharedExtentDirectoryPage));
-    
-    // Should have no slots used initially (just after init)
-    // Note: After SetUp, we may have allocated IAM pages, so just check structure is valid
-    EXPECT_EQ(pool_header.next_pool_page, INVALID_PAGE_ID);
-    
-    LOG_STORAGE_INFO("Metadata pool init test passed");
-}
-
-/**
  * Test basic IAM chain creation
  */
 TEST_F(IamManagerTest, CreateIAMChain) {
     page_id_t table_iam = create_test_table_iam();
     ASSERT_NE(table_iam, INVALID_PAGE_ID);
-    
-    // Verify the IAM page is from the metadata pool (pages 9-15)
-    EXPECT_GE(table_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
-    EXPECT_LE(table_iam, FIRST_SHARED_EXTENT_PAGE_ID + SHARED_EXTENT_SLOTS);
-    
+
+    // The IAM head is the first page of a dedicated extent
+    EXPECT_EQ(table_iam % EXTENT_SIZE, 0);
+
     // Flush BPM so create_iam_chain writes are visible on disk
     EXPECT_TRUE(bpm->flush_all_pages());
 
@@ -209,29 +186,29 @@ TEST_F(IamManagerTest, MultipleExtentAllocations) {
 }
 
 /**
- * Test multiple tables sharing metadata pool
+ * Test that each table's IAM chain gets its own dedicated extent
  */
-TEST_F(IamManagerTest, MultipleTablesSharePool) {
+TEST_F(IamManagerTest, MultipleTablesGetDedicatedExtents) {
     // Create multiple table IAM chains
     page_id_t table1_iam = create_test_table_iam();
     page_id_t table2_iam = create_test_table_iam();
     page_id_t table3_iam = create_test_table_iam();
-    
+
     ASSERT_NE(table1_iam, INVALID_PAGE_ID);
     ASSERT_NE(table2_iam, INVALID_PAGE_ID);
     ASSERT_NE(table3_iam, INVALID_PAGE_ID);
-    
-    // All should be different pages
-    EXPECT_NE(table1_iam, table2_iam);
-    EXPECT_NE(table2_iam, table3_iam);
-    EXPECT_NE(table1_iam, table3_iam);
-    
-    // All should be in metadata pool extent (pages 9-15)
-    EXPECT_GE(table1_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
-    EXPECT_GE(table2_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
-    EXPECT_GE(table3_iam, FIRST_SHARED_EXTENT_PAGE_ID + 1);
-    
-    LOG_STORAGE_INFO("Multiple tables share pool test passed");
+
+    // Each head is extent-aligned
+    EXPECT_EQ(table1_iam % EXTENT_SIZE, 0);
+    EXPECT_EQ(table2_iam % EXTENT_SIZE, 0);
+    EXPECT_EQ(table3_iam % EXTENT_SIZE, 0);
+
+    // Each table's IAM lives in a different extent
+    EXPECT_NE(extent_id_from_page(table1_iam), extent_id_from_page(table2_iam));
+    EXPECT_NE(extent_id_from_page(table2_iam), extent_id_from_page(table3_iam));
+    EXPECT_NE(extent_id_from_page(table1_iam), extent_id_from_page(table3_iam));
+
+    LOG_STORAGE_INFO("Multiple tables get dedicated extents test passed");
 }
 
 /**
@@ -262,42 +239,31 @@ TEST_F(IamManagerTest, IAMPageStructure) {
 }
 
 /**
- * Test SharedExtentDirectoryPage structure functionality
+ * Test that a full IAM page grows the chain into the next page of the
+ * same extent rather than allocating a new extent.
  */
-TEST_F(IamManagerTest, SharedExtentDirectoryPageStructure) {
-    SharedExtentDirectoryPage pool_header = make_shared_extent_directory_page();
-    
-    // Test initial state
-    for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
-        EXPECT_FALSE(pool_header.is_slot_used(slot));
+TEST_F(IamManagerTest, ChainGrowthStaysInIamExtent) {
+    page_id_t table_iam = create_test_table_iam();
+    ASSERT_NE(table_iam, INVALID_PAGE_ID);
+
+    // Fill the head IAM page (IAM_MAX_EXTENTS entries) plus one to force growth
+    for (size_t i = 0; i < IAM_MAX_EXTENTS + 1; ++i) {
+        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam);
+        ASSERT_NE(extent, INVALID_PAGE_ID);
     }
-    
-    // Find free slot should return 1 (slots are 1-7)
-    EXPECT_EQ(pool_header.find_free_slot(), 1);
-    
-    // Mark slot 1 as used
-    pool_header.mark_slot_used(1);
-    EXPECT_TRUE(pool_header.is_slot_used(1));
-    EXPECT_FALSE(pool_header.is_slot_used(2));
-    EXPECT_EQ(pool_header.find_free_slot(), 2);
-    
-    // Mark more slots
-    pool_header.mark_slot_used(2);
-    pool_header.mark_slot_used(3);
-    EXPECT_EQ(pool_header.find_free_slot(), 4);
-    
-    // Free a slot
-    pool_header.mark_slot_free(2);
-    EXPECT_FALSE(pool_header.is_slot_used(2));
-    EXPECT_EQ(pool_header.find_free_slot(), 2);  // Should find slot 2 first
-    
-    // Mark all slots used
-    for (uint8_t i = 1; i <= SHARED_EXTENT_SLOTS; ++i) {
-        pool_header.mark_slot_used(i);
-    }
-    EXPECT_EQ(pool_header.find_free_slot(), 0);  // No free slot
-    
-    LOG_STORAGE_INFO("SharedExtentDirectoryPage structure test passed");
+
+    EXPECT_EQ(count_iam_chain_length(table_iam), 2);
+    EXPECT_EQ(count_extents_in_iam(table_iam), IAM_MAX_EXTENTS + 1);
+
+    // The second IAM page is the next page of the head's extent
+    EXPECT_TRUE(bpm->flush_all_pages());
+    char buffer[PAGE_SIZE];
+    ASSERT_EQ(disk_manager->read_page(table_iam, buffer), IOResult::SUCCESS);
+    IAMPage head{};
+    std::memcpy(&head, buffer, sizeof(IAMPage));
+    EXPECT_EQ(head.next_page_id, table_iam + 1);
+
+    LOG_STORAGE_INFO("Chain growth stays in IAM extent test passed");
 }
 
 /**

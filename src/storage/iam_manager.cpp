@@ -9,120 +9,12 @@ namespace letty {
 IamManager::IamManager(BufferPoolManager &buffer_pool, ExtentManager &extent_manager)
     : buffer_pool_(buffer_pool), extent_manager_(extent_manager) {}
 
-page_id_t IamManager::get_shared_extent_page_id() {
-  if (shared_extent_page_id_ != INVALID_PAGE_ID) {
-    return shared_extent_page_id_;
-  }
-
-  auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
-  if (!db_header) {
-    throw DbException(DbErrorCode::IOError, "failed to fetch header page for shared extent lookup");
-  }
-
-  shared_extent_page_id_ = db_header->shared_extent_page_id;
-  LOG_STORAGE_DEBUG("Cached shared_extent_page_id = {}", shared_extent_page_id_);
-  return shared_extent_page_id_;
-}
-
-void IamManager::init_shared_extent(page_id_t pool_page_id) {
-  LOG_STORAGE_DEBUG("Initializing shared extent at page {}", pool_page_id);
-
-  Page* directory_frame = buffer_pool_.fetch_page(pool_page_id);
-  if (!directory_frame) {
-    throw DbException(DbErrorCode::IOError, "failed to fetch shared extent page " + std::to_string(pool_page_id));
-  }
-
-  auto directory_page = make_shared_extent_directory_page();
-  // Write data into the page->char * from the struct.
-  store_page_layout(directory_frame, directory_page);
-  buffer_pool_.unpin_page(pool_page_id, true);
-
-  // Cache it immediately since we know the value
-  shared_extent_page_id_ = pool_page_id;
-}
-
-page_id_t IamManager::allocate_shared_page() {
-  LOG_STORAGE_DEBUG("Allocating page from shared extent");
-
-  page_id_t pool_page_id = get_shared_extent_page_id();
-  if (pool_page_id == INVALID_PAGE_ID) {
-    throw DbException(DbErrorCode::Corruption, "shared extent page is not initialized");
-  }
-
-  page_id_t current_pool_page = pool_page_id;
-
-  while (current_pool_page != INVALID_PAGE_ID) {
-    Page* pool_frame = buffer_pool_.fetch_page(current_pool_page);
-    if (!pool_frame) {
-      throw DbException(DbErrorCode::IOError, "failed to fetch shared extent page " + std::to_string(current_pool_page));
-    }
-
-    auto pool_header = load_page_layout<SharedExtentDirectoryPage>(pool_frame);
-    uint8_t free_slot = pool_header.find_free_slot();
-
-    if (free_slot != SharedExtentDirectoryPage::NO_FREE_SLOT) {
-      pool_header.mark_slot_used(free_slot);
-      store_page_layout(pool_frame, pool_header);
-      buffer_pool_.unpin_page(current_pool_page, true);
-
-      // The directory page sits at current_pool_page; slots 1–7 are the adjacent
-      // pages in the same extent. Slot N maps directly to page (current_pool_page + N).
-      page_id_t allocated_page = current_pool_page + free_slot;
-      LOG_STORAGE_INFO("Allocated shared page {} (slot {})", allocated_page, free_slot);
-      return allocated_page;
-    }
-
-    // No free slot — advance or extend
-    page_id_t next_pool = pool_header.next_pool_page;
-    if (next_pool == INVALID_PAGE_ID) {
-      next_pool = extend_shared_extent();
-      if (next_pool == INVALID_PAGE_ID) {
-        buffer_pool_.unpin_page(current_pool_page, false);
-        throw DbException(DbErrorCode::NoSpace, "failed to extend shared extent pool");
-      }
-      pool_header.next_pool_page = next_pool;
-      store_page_layout(pool_frame, pool_header);
-      buffer_pool_.unpin_page(current_pool_page, true);
-    } else {
-      buffer_pool_.unpin_page(current_pool_page, false);
-    }
-    current_pool_page = next_pool;
-  }
-
-  throw DbException(DbErrorCode::NoSpace, "failed to allocate shared metadata page");
-}
-
-page_id_t IamManager::extend_shared_extent() {
-  page_id_t new_pool_extent = extent_manager_.allocate_extent();
-  if (new_pool_extent == INVALID_PAGE_ID) {
-    throw DbException(DbErrorCode::NoSpace, "failed to allocate new shared extent");
-  }
-
-  Page* new_directory_frame = buffer_pool_.new_page(new_pool_extent);
-  if (!new_directory_frame) {
-    new_directory_frame = buffer_pool_.fetch_page(new_pool_extent);
-    if (new_directory_frame && (new_directory_frame->get_pin_count() != 1 || new_directory_frame->is_dirty())) {
-      buffer_pool_.unpin_page(new_pool_extent, false);
-      new_directory_frame = nullptr;
-    }
-  }
-  if (!new_directory_frame) {
-    throw DbException(DbErrorCode::IOError, "failed to create new shared extent page " + std::to_string(new_pool_extent));
-  }
-  auto shared_extent_directory_page = make_shared_extent_directory_page();
-  store_page_layout(new_directory_frame, shared_extent_directory_page);
-  buffer_pool_.unpin_page(new_pool_extent, true);
-
-  LOG_STORAGE_INFO("Created new shared extent at page {}", new_pool_extent);
-  return new_pool_extent;
-}
-
 page_id_t IamManager::create_iam_chain(const std::string &table_name) {
   LOG_STORAGE_DEBUG("Creating new IAM chain");
 
-  page_id_t iam_page_id = allocate_shared_page();
+  page_id_t iam_page_id = extent_manager_.allocate_extent();
   if (iam_page_id == INVALID_PAGE_ID) {
-    throw DbException(DbErrorCode::NoSpace, "failed to allocate IAM page from shared extent");
+    throw DbException(DbErrorCode::NoSpace, "failed to allocate extent for IAM chain of table '" + table_name + "'");
   }
 
   Page* iam_frame = buffer_pool_.new_page(iam_page_id);
@@ -157,7 +49,14 @@ bool IamManager::page_has_space(page_id_t page_id, uint32_t required) {
 }
 
 page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id) {
-  page_id_t new_iam_page_id = allocate_shared_page();
+  // IAM pages fill their extent front to back, so the tail's position tells us
+  // whether the next page is free or a new extent is needed.
+  page_id_t new_iam_page_id;
+  if (prev_iam_page != INVALID_PAGE_ID && (prev_iam_page % EXTENT_SIZE) < EXTENT_SIZE - 1) {
+    new_iam_page_id = prev_iam_page + 1;
+  } else {
+    new_iam_page_id = extent_manager_.allocate_extent();
+  }
   if (new_iam_page_id == INVALID_PAGE_ID) {
     throw DbException(DbErrorCode::NoSpace, "failed to allocate new IAM page");
   }
@@ -196,7 +95,7 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
 
 
 page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
-  LOG_STORAGE_DEBUG("Allocating extent for IAM chain {}", iam_head_page_id);
+  LOG_STORAGE_DEBUG("Allocating extent for IAM chain at page {}", iam_head_page_id);
 
   if (iam_head_page_id == INVALID_PAGE_ID) {
     throw DbException(DbErrorCode::InvalidArgument, "invalid IAM head page ID");
@@ -208,7 +107,6 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   }
 
   uint32_t extent_id = extent_id_from_page(extent_start_page);
-  LOG_STORAGE_DEBUG("Got extent {} (page {})", extent_id, extent_start_page);
 
   page_id_t current_iam_page = iam_head_page_id;
   page_id_t prev_iam_page = INVALID_PAGE_ID;
@@ -224,7 +122,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
       iam_page.add_extent(extent_id);
       store_page_layout(iam_frame, iam_page);
       buffer_pool_.unpin_page(current_iam_page, true);
-      LOG_STORAGE_INFO("Added extent {} to IAM page {}", extent_id, current_iam_page);
+      LOG_STORAGE_DEBUG("Added extent {} to IAM page {}", extent_id, current_iam_page);
       table_page_hints_[iam_head_page_id] = extent_start_page;
       return extent_start_page;
     }
@@ -246,9 +144,6 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
 
 
 page_id_t IamManager::find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space) {
-  LOG_STORAGE_DEBUG("Finding page with {} bytes of space in IAM chain {}",
-                   required_space, iam_head_page_id);
-
   if (iam_head_page_id == INVALID_PAGE_ID) {
     LOG_STORAGE_ERROR("Invalid IAM head page ID");
     return INVALID_PAGE_ID;

@@ -22,7 +22,7 @@ BufferPoolManager::BufferPoolManager(IDiskManager& disk_manager, size_t pool_siz
   }
 
   page_data_buffer_ = static_cast<char*>(std::aligned_alloc(PAGE_SIZE, pool_size_ * PAGE_SIZE));
-  LOG_BPM_INFO("Allocating {} bytes of memory to load disk pages into the RAM", (pool_size_ * PAGE_SIZE));
+  LOG_BPM_DEBUG("Allocating {} bytes of memory to load disk pages into the RAM", (pool_size_ * PAGE_SIZE));
   if (page_data_buffer_ == nullptr) {
 	LOG_BPM_ERROR("Problem allocating initial memory required for loading disk pages into RAM");
 	throw std::bad_alloc();
@@ -192,7 +192,6 @@ std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
 
   Page& victim = pages_[frame_id];
   if (victim.is_dirty()) {
-    LOG_BPM_DEBUG("Dirty eviction: writing page {} to disk", victim.get_page_id());
     IOResult result = disk_manager_.write_page(victim.get_page_id(), victim.get_data());
     if (result != IOResult::SUCCESS) {
       LOG_BPM_ERROR("Failed to evict dirty page {} from frame {}", victim.get_page_id(), frame_id);

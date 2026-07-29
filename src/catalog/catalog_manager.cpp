@@ -63,9 +63,6 @@ void CatalogManager::bootstrap() {
     }
     auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
 
-    // Initialize shared extent at the designated page
-    iam_manager_.init_shared_extent(db_header_page.shared_extent_page_id);
-
     page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME);
     page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME);
 

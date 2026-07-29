@@ -173,8 +173,6 @@ std::string StorageInspector::get_page_map() {
          }
     }
 
-    // Metadata Pool pages
-    page_id_t meta_head = INVALID_PAGE_ID;
     page_id_t sys_tables_iam = INVALID_PAGE_ID;
     page_id_t sys_cols_iam = INVALID_PAGE_ID;
 
@@ -182,42 +180,9 @@ std::string StorageInspector::get_page_map() {
         Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
         if (db_header_frame) {
             auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
-            meta_head = db_header_page.shared_extent_page_id;
             sys_tables_iam = db_header_page.sys_tables_iam_page;
             sys_cols_iam = db_header_page.sys_columns_iam_page;
             buffer_pool_.unpin_page(0, false);
-        }
-    }
-
-    // Walk Metadata Pool
-    page_id_t curr_pool = meta_head;
-    while (curr_pool != INVALID_PAGE_ID && curr_pool < num_pages) {
-        // Mark the entire extent (8 pages) as Metadata Pool
-        // The pool is allocated in extents.
-        // Wait, shared_extent_page_id points to the *first page* of the shared extent.
-        // Pools are linked via next_pool_page in the directory page (page 0 of extent).
-        
-        // Mark the directory page itself
-        map[curr_pool]["type"] = "METADATA_DIR";
-        map[curr_pool]["owner"] = "system";
-        
-        // Mark the other 7 pages in the extent as "METADATA_SLOT" (initially)
-        // We will override them if they are used as IAM pages later
-        for(int i=1; i<EXTENT_SIZE; ++i) {
-             if (curr_pool + i < num_pages) {
-                 map[curr_pool + i]["type"] = "METADATA";
-                 map[curr_pool + i]["owner"] = "system";
-             }
-        }
-
-        Page* raw_page = buffer_pool_.fetch_page(curr_pool);
-        if (raw_page) {
-            auto shared_extent_directory_page = load_page_layout<SharedExtentDirectoryPage>(raw_page);
-            page_id_t next = shared_extent_directory_page.next_pool_page;
-            buffer_pool_.unpin_page(curr_pool, false);
-            curr_pool = next;
-        } else {
-            break;
         }
     }
 
@@ -231,6 +196,17 @@ std::string StorageInspector::get_page_map() {
              map[curr_iam]["type"] = "IAM";
              map[curr_iam]["owner"] = name;
              map[curr_iam]["info"] = "IAM Page";
+
+             // Unused pages of the IAM extent are reserved for chain growth.
+             // Later chain pages override this with type IAM as the walk continues.
+             page_id_t iam_extent_start = (curr_iam / EXTENT_SIZE) * EXTENT_SIZE;
+             for(int i=0; i<EXTENT_SIZE; ++i) {
+                 page_id_t pid = iam_extent_start + i;
+                 if (pid < num_pages && map[pid]["type"] == "UNKNOWN") {
+                     map[pid]["type"] = "IAM_RESERVED";
+                     map[pid]["owner"] = name;
+                 }
+             }
              
              Page* raw_page = buffer_pool_.fetch_page(curr_iam);
              if (!raw_page) break;

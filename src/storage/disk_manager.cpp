@@ -34,7 +34,8 @@ IOResult DiskManager::write_page(page_id_t page_id, const char *page_data) {
   off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
   ssize_t written = pwrite(fd_, page_data, PAGE_SIZE, offset);
   if (written != PAGE_SIZE) {
-	LOG_STORAGE_ERROR("Problem while writing page to disk {}", page_id);
+	LOG_STORAGE_ERROR("Failed to write page {} to disk: {} (wrote {} of {} bytes)",
+                      page_id, std::strerror(errno), written, PAGE_SIZE);
 	++write_error_;
 	return IOResult::WRITE_ERROR;
   }
@@ -47,7 +48,8 @@ IOResult DiskManager::read_page(page_id_t page_id, char *page_data) {
   off_t offset = static_cast<off_t>(page_id) * PAGE_SIZE;
   ssize_t bytes_read = pread(fd_, page_data, PAGE_SIZE, offset);
   if (bytes_read != PAGE_SIZE) {
-	LOG_STORAGE_ERROR("Problem while load page to disk {}", page_id);
+	LOG_STORAGE_ERROR("Failed to read page {} from disk: {} (read {} of {} bytes)",
+                      page_id, std::strerror(errno), bytes_read, PAGE_SIZE);
 	++read_error_;
 	return IOResult::READ_ERROR;
   }

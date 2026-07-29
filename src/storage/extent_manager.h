@@ -80,10 +80,9 @@ class ExtentManager {
    * file is empty. It creates and writes the initial Header and GAM pages.
    * - Extent 0 (Pages 0-7):   Database Header (page 0), pages 1-7 reserved
    * - Extent 1 (Pages 8-15):  GAM extent (first GAM page at page 8)
-   * - Extent 2 (Pages 16-23): Shared extent (for IAM pages)
    *
-   * Note: IAM pages for sys_tables and sys_columns are allocated dynamically
-   * from the shared extent during CatalogManager::bootstrap()
+   * Note: IAM chains for sys_tables and sys_columns get their own dedicated
+   * extents, allocated through allocate_extent() during CatalogManager::bootstrap()
    */
   void initialize_new_db();
 

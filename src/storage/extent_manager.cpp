@@ -10,7 +10,7 @@
 namespace letty {
 
 ExtentManager::ExtentManager(BufferPoolManager& buffer_pool) : buffer_pool_(buffer_pool) {
-  LOG_STORAGE_INFO("Initializing ExtentManager");
+  LOG_STORAGE_DEBUG("Initializing ExtentManager");
 
   // Detect empty database by checking file size.
   // We cannot rely on fetch_page returning nullptr for an empty file because
@@ -56,7 +56,6 @@ void ExtentManager::initialize_new_db() {
   Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
   gam_bitmap.set(0);  // Extent 0 (pages 0-7)   - database header
   gam_bitmap.set(1);  // Extent 1 (pages 8-15)  - GAM pages
-  gam_bitmap.set(2);  // Extent 2 (pages 16-23) - shared extent (IAM pages)
   store_page_layout(gam_frame, gam_page);
   buffer_pool_.unpin_page(FIRST_GAM_PAGE_ID, true);
 
@@ -64,7 +63,6 @@ void ExtentManager::initialize_new_db() {
   // to cover all pages in that extent, so subsequent reads won't return garbage.
   constexpr page_id_t EXTENT_0_LAST_PAGE = EXTENT_SIZE - 1;        // page 7
   constexpr page_id_t EXTENT_1_LAST_PAGE = 2 * EXTENT_SIZE - 1;    // page 15
-  constexpr page_id_t EXTENT_2_LAST_PAGE = 3 * EXTENT_SIZE - 1;    // page 23
 
   Page* extent0_end_frame = buffer_pool_.new_page(EXTENT_0_LAST_PAGE);
   if (!extent0_end_frame) {
@@ -80,18 +78,9 @@ void ExtentManager::initialize_new_db() {
   }
   buffer_pool_.flush_page(EXTENT_1_LAST_PAGE);
   buffer_pool_.unpin_page(EXTENT_1_LAST_PAGE, false);
-
-  // new_page marks the frame dirty, so flush_page writes the zeroed page and
-  Page* extent2_end_frame = buffer_pool_.new_page(EXTENT_2_LAST_PAGE);
-  if (!extent2_end_frame) {
-	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 2 (shared extent) during initialization");
-  }
-  buffer_pool_.flush_page(EXTENT_2_LAST_PAGE);
-  buffer_pool_.unpin_page(EXTENT_2_LAST_PAGE, false);
 }
 
 page_id_t ExtentManager::allocate_extent() {
-  LOG_STORAGE_DEBUG("Starting extent allocation");
   std::lock_guard<std::mutex> guard(lock_);
 
   while (true) {
@@ -256,7 +245,7 @@ bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam,
 }
 
 bool ExtentManager::deallocate_extent(page_id_t start_page_id) {
-    LOG_STORAGE_INFO("Deallocating extent at page {}", start_page_id);
+    LOG_STORAGE_DEBUG("Deallocating extent at page {}", start_page_id);
 
     if (!is_valid_extent_for_deallocation(start_page_id)) return false;
 
@@ -283,14 +272,11 @@ page_id_t ExtentManager::claim_extent_at_bit(GAMPage* gam_page,
   // Advance the hint so the next allocation starts after this bit.
   gam_page->first_free_bit_hint = static_cast<uint16_t>(bit_index + 1);
 
-  LOG_STORAGE_DEBUG("Found free bit {} in GAM page {}", bit_index, current_gam_page_id_);
-
   // Page ID formula:
   // (chain_index * GAM_MAX_BITS + bit_index) * EXTENT_SIZE
   // chain_index tells us how many full GAM pages precede this one;
   // bit_index is the extent's position within this GAM page.
   int64_t base_page_id = static_cast<int64_t>(current_gam_chain_index_) * GAM_MAX_BITS * EXTENT_SIZE;
-  LOG_STORAGE_DEBUG("Base Page ID: {}, GAM Page Chain ID {}", base_page_id, current_gam_chain_index_);
   int64_t result = base_page_id + static_cast<int64_t>(bit_index * EXTENT_SIZE);
 
   // Check for overflow before casting to page_id_t
@@ -298,7 +284,7 @@ page_id_t ExtentManager::claim_extent_at_bit(GAMPage* gam_page,
       throw DbException(DbErrorCode::Internal, "page ID overflow while allocating extent");
   }
 
-  LOG_STORAGE_INFO("Successfully allocated extent at page {}", result);
+  LOG_STORAGE_DEBUG("Allocated extent at page {} (GAM chain {}, bit {})", result, current_gam_chain_index_, bit_index);
   return static_cast<page_id_t>(result);
 }
 

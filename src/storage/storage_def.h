@@ -31,7 +31,7 @@ namespace letty {
  *  |   - Identifies this file as a Letty database                 |
  *  +--------------------------------------------------------------+ 8
  *  | version (uint32)                                             |
- *  |   - Database file format version (currently 2)               |
+ *  |   - Database file format version (currently 1)               |
  *  +--------------------------------------------------------------+ 12
  *  | page_size (uint32)                                           |
  *  |   - Size of each page in bytes (e.g., 4096)                  |
@@ -40,23 +40,19 @@ namespace letty {
  *  |   - Page ID of the Global Allocation Map (GAM)               |
  *  |   - Always page 8                                            |
  *  +--------------------------------------------------------------+ 20
- *  | shared_extent_page_id (page_id_t)                            |
- *  |   - First page of the shared extent                          |
- *  |   - Used to allocate IAM pages dynamically                   |
- *  +--------------------------------------------------------------+ 24
  *  | sys_tables_iam_page (page_id_t)                              |
- *  |   - IAM page for system catalog: sys_tables                  |
- *  |   - Dynamically allocated from shared extent                 |
- *  +--------------------------------------------------------------+ 28
+ *  |   - IAM head page for system catalog: sys_tables             |
+ *  |   - Allocated from a dedicated extent during bootstrap       |
+ *  +--------------------------------------------------------------+ 24
  *  | sys_columns_iam_page (page_id_t)                             |
- *  |   - IAM page for system catalog: sys_columns                 |
- *  |   - Dynamically allocated from shared extent                 |
- *  +--------------------------------------------------------------+ 32
+ *  |   - IAM head page for system catalog: sys_columns            |
+ *  |   - Allocated from a dedicated extent during bootstrap       |
+ *  +--------------------------------------------------------------+ 28
  *  | next_table_oid (uint16)                                      |
  *  |   - Next available OID for user tables                       |
  *  |   - System tables use OIDs 1-99, users start at 100          |
- *  +--------------------------------------------------------------+ 34
- *  | padding[4062]                                                |
+ *  +--------------------------------------------------------------+ 30
+ *  | padding[4066]                                                |
  *  |   - Zero-filled; reserved for future metadata                |
  *  |   - Ensures the header occupies exactly one full page        |
  *  +--------------------------------------------------------------+ PAGE_SIZE
@@ -76,21 +72,18 @@ struct DatabaseHeader {
   // The first GAM page is always the 1st page in extent 1. Extent 1 covers pages 8 to 15.
   page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
-  // Points to the first shared extent (for IAM pages and other metadata)
-  page_id_t shared_extent_page_id = FIRST_SHARED_EXTENT_PAGE_ID;
-
-  // Points to the IAM page for the 'sys_tables' table (dynamically assigned from shared extent)
+  // Points to the IAM head page for the 'sys_tables' table
   page_id_t sys_tables_iam_page = INVALID_PAGE_ID;
 
-  // Points to the IAM page for the 'sys_columns' table (dynamically assigned from shared extent)
+  // Points to the IAM head page for the 'sys_columns' table
   page_id_t sys_columns_iam_page = INVALID_PAGE_ID;
 
   // Next available OID for user tables. System tables use OIDs 1-99.
   // User tables start at 100 and increment from there.
   uint16_t next_table_oid = 100;
 
-  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam_pg_id) + 4 (shared_extent_pg_id) + 4 (sys_tables_pg_id) + 4 (sys_cols_pg_id) + 2 (next_oid) = 34 bytes
-  uint8_t padding[PAGE_SIZE - 34]; // Padding to ensure the header completely fills the page.
+  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam_pg_id) + 4 (sys_tables_pg_id) + 4 (sys_cols_pg_id) + 2 (next_oid) = 30 bytes
+  uint8_t padding[PAGE_SIZE - 30]; // Padding to ensure the header completely fills the page.
 
   DatabaseHeader() {
 	  std::memset(signature, 0, sizeof(signature));  // zero pad the entire field
@@ -118,7 +111,6 @@ inline DatabaseHeader make_database_header() {
   header.version = 1;
   header.page_size = PAGE_SIZE;
   header.gam_page_id = FIRST_GAM_PAGE_ID;
-  header.shared_extent_page_id = FIRST_SHARED_EXTENT_PAGE_ID;
   header.sys_tables_iam_page = INVALID_PAGE_ID;
   header.sys_columns_iam_page = INVALID_PAGE_ID;
   header.next_table_oid = 100;
@@ -177,93 +169,6 @@ inline GAMPage make_gam_page() {
   GAMPage page{};
   page.next_page_id = INVALID_PAGE_ID;
   page.first_free_bit_hint = 0;
-  return page;
-}
-
-/**
- * @struct SharedExtentDirectoryPage
- * @brief Directory page for a shared extent.
- *
- * A shared extent allows IAM pages for different tables to coexist in the same
- * extent instead of wasting a full extent per IAM page. For example, if each
- * table's first IAM page used a dedicated 8-page extent, creating 20 small
- * tables would reserve 160 pages even though only 20 IAM pages are needed.
- * With shared extents, those 20 IAM pages fit into 3 shared extents, reserving
- * 24 pages instead of 160.
- *
- * Page 0 of each shared extent serves as the directory page, while pages 1-7
- * are allocatable metadata slots. The directory tracks which slots are occupied
- * and links to the next shared extent when this one is full.
- *
- * @verbatim
- *  +--------------------------------------------------------------+ 0
- *  | next_pool_page (page_id_t)                                   |
- *  |   - Links to the next pool extent when this one is full      |
- *  |   - INVALID_PAGE_ID if this is the last extent               |
- *  +--------------------------------------------------------------+ 4
- *  | slot_used[7] (uint8_t array)                                 |
- *  |   - slot_used[i] is 1 when slot i+1 is occupied, otherwise 0 |
- *  |   - Slot numbers are 1-7 because page 0 is the directory     |
- *  +--------------------------------------------------------------+ 11
- *  | padding[4085]                                                |
- *  |   - Zero-filled; ensures the struct fills exactly one page   |
- *  +--------------------------------------------------------------+ 4096
- * @endverbatim
- */
-struct SharedExtentDirectoryPage {
-  page_id_t next_pool_page = INVALID_PAGE_ID;  // 4 bytes
-  uint8_t slot_used[SHARED_EXTENT_SLOTS] = {};  // 7 bytes - slot N is stored at index N - 1
-  char padding[PAGE_SIZE - 4 - SHARED_EXTENT_SLOTS]; // This padding is essentially not being used.
-  
-  static constexpr uint8_t NO_FREE_SLOT = 0;
-
-  /**
-   * @brief Find a free slot in this pool (1-7).
-   * @return Slot number (1-7) or NO_FREE_SLOT if no free slot.
-   */
-  uint8_t find_free_slot() const {
-    for (uint8_t slot = 1; slot <= SHARED_EXTENT_SLOTS; ++slot) {
-      if (slot_used[slot - 1] == 0) {
-        return slot;
-      }
-    }
-    return NO_FREE_SLOT;
-  }
-  
-  /**
-   * @brief Mark a slot as used.
-   */
-  void mark_slot_used(uint8_t slot) {
-    slot_used[slot - 1] = 1;
-  }
-  
-  /**
-   * @brief Mark a slot as free.
-   */
-  void mark_slot_free(uint8_t slot) {
-    slot_used[slot - 1] = 0;
-  }
-  
-  /**
-   * @brief Check if a slot is used.
-   */
-  bool is_slot_used(uint8_t slot) const {
-    return slot_used[slot - 1] != 0;
-  }
-};
-
-static_assert(sizeof(SharedExtentDirectoryPage) == PAGE_SIZE,
-              "SharedExtentDirectoryPage must be exactly PAGE_SIZE bytes");
-static_assert(std::is_trivially_copyable_v<SharedExtentDirectoryPage>,
-              "SharedExtentDirectoryPage must be safe to copy to/from page bytes");
-static_assert(std::is_standard_layout_v<SharedExtentDirectoryPage>,
-              "SharedExtentDirectoryPage must have stable field offsets");
-static_assert(offsetof(SharedExtentDirectoryPage, slot_used) == 4,
-              "SharedExtentDirectoryPage::slot_used offset changed");
-
-inline SharedExtentDirectoryPage make_shared_extent_directory_page() {
-  SharedExtentDirectoryPage page{};
-  page.next_pool_page = INVALID_PAGE_ID;
   return page;
 }
 

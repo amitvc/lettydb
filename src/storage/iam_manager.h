@@ -13,7 +13,10 @@ namespace letty {
  * @brief Manages Index Allocation Maps (IAM) for tables using list-based extent tracking.
  *
  * Each table has an IAM page that stores a list of extent IDs belonging to that table.
- * IAM pages are allocated from a shared extent to minimize space waste.
+ * IAM pages live in dedicated extents owned by their table: the chain head sits at
+ * the first page of an extent and grows into the remaining pages before a new
+ * extent is allocated. Usage within an IAM extent is append-only, so the tail
+ * page's position encodes the allocation state — no directory or bitmap needed.
  *
  * All page access goes through BufferPoolManager. No direct DiskManager calls.
  */
@@ -23,10 +26,11 @@ class IamManager {
 
   /**
    * @brief Creates a new IAM chain for a table.
-   * Allocates a page from the shared extent and initializes it as an empty IAMPage.
+   * Allocates a dedicated extent and initializes its first page as an empty IAMPage.
+   * The returned page ID is always extent-aligned.
    * @param table_name Table name for which the IAM chain is being created.
-   * @return The Page ID of the new IAM page.
-   * @throws DbException if the IAM page cannot be allocated or initialized.
+   * @return The Page ID of the new IAM head page.
+   * @throws DbException if the extent cannot be allocated or the page initialized.
    */
   page_id_t create_iam_chain(const std::string &table_name);
 
@@ -57,29 +61,15 @@ class IamManager {
    */
   page_id_t find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space);
 
-  /**
-   * @brief Initializes the first shared extent.
-   * Called during database bootstrap.
-   * @param pool_page_id The page ID where the shared extent should start.
-   * @throws DbException if the shared extent directory page cannot be fetched.
-   */
-  void init_shared_extent(page_id_t pool_page_id);
-
  private:
   BufferPoolManager& buffer_pool_;
   ExtentManager& extent_manager_;
-
-  /** Cached from header page on first access. Never changes after init. */
-  page_id_t shared_extent_page_id_ = INVALID_PAGE_ID;
 
   // Per-table hint: iam_head_page_id → last known data page with free space.
   // On INSERT, the hint is checked first (O(1)). On a hint miss, the hint's
   // extent is scanned forward, then the full IAM chain. Updated whenever a
   // page with space is found or a new extent is allocated.
   std::unordered_map<page_id_t, page_id_t> table_page_hints_;
-
-  /** Loads shared_extent_page_id_ from header if not yet cached. */
-  page_id_t get_shared_extent_page_id();
 
 
   /** Check the cached hint page for space. Returns page ID or INVALID_PAGE_ID. */
@@ -92,17 +82,6 @@ class IamManager {
    *  and the hint's extent is exhausted. Returns page ID or INVALID_PAGE_ID. */
   page_id_t scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_needed);
 
-  /**
-   * @brief Allocates a page from the shared extent.
-   * Used internally by create_iam_chain.
-   * @return The Page ID of the allocated metadata page.
-   * @throws DbException if a metadata page cannot be allocated.
-   */
-  page_id_t allocate_shared_page();
-
-  /** Allocates a new pool extent and links it to the current one. Throws DbException on failure. */
-  page_id_t extend_shared_extent();
-
   // ——— shared helpers ———
 
   /**
@@ -112,8 +91,9 @@ class IamManager {
   bool page_has_space(page_id_t page_id, uint32_t required);
 
   /**
-   * @brief Allocates a new IAM page from the shared extent, appends extent_id to it,
-   *        and links it to prev_iam_page (if valid).
+   * @brief Allocates a new IAM page, appends extent_id to it, and links it to
+   *        prev_iam_page (if valid). Uses the next page of prev_iam_page's extent
+   *        when one is free; otherwise allocates a fresh extent.
    * @return Page ID of the new IAM page.
    * @throws DbException if the new IAM page cannot be allocated, initialized, or linked.
    */
