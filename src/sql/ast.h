@@ -21,8 +21,6 @@ namespace letty {
  * @brief The base class for all nodes in the Abstract Syntax Tree.
  *
  * This class provides a common interface for all parts of a parsed SQL query.
- * The virtual destructor is crucial for ensuring that derived-class objects
- * are properly destroyed when deleted through a base-class pointer.
  */
     class ASTNode {
     public:
