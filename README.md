@@ -4,15 +4,15 @@ Designed as a comprehensive educational initiative, this project aims to demysti
 
 ## Features
 
-- Custom SQL Parser: A handwritten recursive descent parser that builds a detailed Abstract Syntax Tree (AST) from raw SQL queries.
+- [DONE] Custom SQL Parser: A handwritten recursive descent parser that builds a detailed Abstract Syntax Tree (AST) from raw SQL queries.
 
-- ACID Compliance: Designed to ensure Atomicity, Consistency, Isolation, and Durability for all transactions.
+- [WIP]ACID Compliance: Designed to ensure Atomicity, Consistency, Isolation, and Durability for all transactions.
 
-- Disk-Based Storage: A page-oriented storage engine that persists data to disk.
+- [DONE] Disk-Based Storage: A page-oriented storage engine that persists data to disk.
 
-- B+ Tree Indexing: For efficient data retrieval and query optimization.
+- [TODO] B+ Tree Indexing: For efficient data retrieval and query optimization.
 
-- Client-Server Architecture: A simple TCP-based server and client library for remote connections.
+- [TODO] Client-Server Architecture: A simple TCP-based server and client library for remote connections.
 
 - Command-Line Interface (CLI): A user-friendly tool for interacting with the database.
 
