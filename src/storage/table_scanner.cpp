@@ -32,6 +32,7 @@ bool TableScanner::next() {
     SlottedPage slotted_page(current_page_->get_data());
     while (current_slot_ < slotted_page.get_num_slots()) {
       const char* data = slotted_page.get_tuple(current_slot_, &current_tuple_size_);
+      last_found_slot_ = current_slot_;
       ++current_slot_;
       if (data) {
         current_tuple_data_ = data;
@@ -101,6 +102,14 @@ void TableScanner::release_current_page() {
   current_page_ = nullptr;
   current_page_id_ = INVALID_PAGE_ID;
   current_slot_ = 0;
+}
+
+page_id_t TableScanner::current_page_id() const {
+  return current_page_id_;
+}
+
+uint16_t TableScanner::current_slot_id() const {
+  return last_found_slot_;
 }
 
 }

@@ -108,6 +108,14 @@ ExecutionResult Executor::execute(ASTNode* node) {
       return execute_select(select);
     }
 
+    if (auto* del = dynamic_cast<DeleteStatementNode*>(node)) {
+      return execute_delete(del);
+    }
+
+    if (auto* compact = dynamic_cast<CompactStatementNode*>(node)) {
+      return execute_compact(compact);
+    }
+
     return ExecutionResult::error("Unsupported statement type");
   } catch (const DbException& e) {
     return ExecutionResult::error(e.what());
@@ -414,6 +422,13 @@ bool Executor::evaluate_where_clause(const ExpressionNode* expression,
                                      const std::vector<Column>& schema_columns) {
   auto* binary = dynamic_cast<const BinaryOperationNode*>(expression);
   if (!binary) {
+    auto* is_null = dynamic_cast<const IsNullExpressionNode*>(expression);
+    if (is_null) {
+      Value val = evaluate_expression(is_null->expression.get(), tuple, schema_columns);
+      bool is_null_actual = std::holds_alternative<std::monostate>(val);
+      return is_null->is_not ? !is_null_actual : is_null_actual;
+    }
+
     Value value = evaluate_expression(expression, tuple, schema_columns);
     if (std::holds_alternative<bool>(value)) {
       return std::get<bool>(value);
@@ -453,6 +468,53 @@ Tuple Executor::project_tuple(const Tuple& tuple,
     projected_tuple.add_value(tuple.get_value(index));
   }
   return projected_tuple;
+}
+
+ExecutionResult Executor::execute_delete(DeleteStatementNode* node) {
+  if (!node->table_name) {
+    return ExecutionResult::error("DELETE: missing table name");
+  }
+
+  std::string table_name = node->table_name->name;
+
+  auto* table_meta = catalog_manager_.get_table(table_name);
+  if (!table_meta) {
+    return ExecutionResult::error("DELETE: table '" + table_name + "' does not exist");
+  }
+
+  const auto& schema_columns = table_meta->schema.get_columns();
+
+  uint32_t deleted_count = 0;
+  TableScanner scanner = table_manager_.scan_table(table_name);
+  while (scanner.next()) {
+    Tuple tuple = Tuple::deserialize(table_meta->schema, scanner.get_tuple_data(), scanner.get_tuple_size());
+
+    // If there's a WHERE clause, check if this row matches
+    if (node->where_clause) {
+      bool matches = evaluate_where_clause(node->where_clause.get(), tuple, schema_columns);
+      if (!matches) {
+        continue;
+      }
+    }
+
+    // Delete the row
+    bool ok = table_manager_.delete_row(*table_meta, scanner.current_page_id(), scanner.current_slot_id());
+    if (ok) {
+      deleted_count++;
+    }
+  }
+
+  return ExecutionResult::ok(deleted_count);
+}
+
+ExecutionResult Executor::execute_compact(CompactStatementNode* node) {
+  auto* table_meta = catalog_manager_.get_table(node->table_name);
+  if (!table_meta) {
+    return ExecutionResult::error("COMPACT: table '" + node->table_name + "' does not exist");
+  }
+
+  table_manager_.compact_table(*table_meta);
+  return ExecutionResult::ok(0);
 }
 
 } // namespace letty

@@ -50,7 +50,7 @@ TEST_F(CreateTableTest, CreateAndGetTable) {
   auto table_meta = catalog_manager->get_table("users");
   ASSERT_NE(table_meta, nullptr);
   EXPECT_EQ(table_meta->name, "users");
-  EXPECT_GT(table_meta->oid, 0); // Should be valid OID
+  EXPECT_GT(table_meta->table_id, 0); // Should be valid table_id
   
   // Verify columns loaded correctly
   auto& loaded_cols = table_meta->schema.get_columns();

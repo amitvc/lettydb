@@ -91,6 +91,19 @@ namespace letty {
     };
 
     /**
+     * @class IsNullExpressionNode
+     * @brief Represents an IS [NOT] NULL expression, such as 'col IS NULL' or 'col IS NOT NULL'.
+     */
+    class IsNullExpressionNode : public ExpressionNode {
+    public:
+        std::unique_ptr<ExpressionNode> expression;
+        bool is_not; // true for IS NOT NULL, false for IS NULL
+
+        explicit IsNullExpressionNode(std::unique_ptr<ExpressionNode> expression, bool is_not = false)
+                : expression(std::move(expression)), is_not(is_not) {}
+    };
+
+    /**
      * @class SelectStatementNode
      * @brief Represents a full SELECT statement. This is a top-level AST node.
      */
@@ -186,6 +199,16 @@ namespace letty {
         std::unique_ptr<IdentifierNode> table_name;
         std::vector<UpdateSet> updates;
         std::unique_ptr<ExpressionNode> where_clause; // Optional
+    };
+
+    /**
+     * @class CompactStatementNode
+     * @brief Represents a COMPACT TABLE statement.
+     */
+    class CompactStatementNode final : public ASTNode {
+    public:
+        std::string table_name;
+        explicit CompactStatementNode(std::string table_name) : table_name(std::move(table_name)) {}
     };
 
     /**

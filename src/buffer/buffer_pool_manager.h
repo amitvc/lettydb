@@ -156,7 +156,6 @@ class BufferPoolManager {
   // PAGE_SIZE-aligned slab. Frame i occupies page_data_buffer_ + (i * PAGE_SIZE).
   // Each frame is exactly one database page and starts at a page-aligned address,
   // which keeps the in-memory layout consistent with the disk page size.
-  // Freed in destructor via std::free.
   char* page_data_buffer_ = nullptr;
   std::vector<Page> pages_;
 

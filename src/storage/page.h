@@ -13,11 +13,15 @@ class BufferPoolManager;
  * @class Page
  * @brief Represents a single page in the buffer pool.
  *
- * A Page holds metadata plus a pointer to a PAGE_SIZE buffer managed by the
- * BufferPoolManager. The data buffer is allocated separately as one large
- * page-aligned slab — this avoids the sizeof(Page) inflation that occurs when
- * alignas(PAGE_SIZE) is embedded in the struct (which would pad each Page to
- * 8192 bytes instead of ~24 bytes, wasting ~256 KB for a 64-frame pool).
+ * A Page stores only frame metadata and a pointer to the frame's page bytes.
+ * BufferPoolManager owns the actual page memory as one PAGE_SIZE-aligned slab.
+ *
+ * Keeping the PAGE_SIZE buffer outside Page avoids making every Page object
+ * PAGE_SIZE-aligned. If Page embedded `alignas(PAGE_SIZE) char data_[PAGE_SIZE]`
+ * plus metadata, sizeof(Page) would be rounded up to the next PAGE_SIZE
+ * multiple: 4096 bytes of data plus metadata would occupy 8192 bytes. With a
+ * separate slab, each frame uses exactly one PAGE_SIZE data slice plus a small
+ * Page metadata object.
  *
  * The BufferPoolManager allocates a contiguous, PAGE_SIZE-aligned buffer of
  * pool_size * PAGE_SIZE bytes and assigns each frame's data_ pointer into it.

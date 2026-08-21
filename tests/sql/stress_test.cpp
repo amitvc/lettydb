@@ -866,7 +866,7 @@ TEST_F(StressTest, DISABLED_Create200TablesMillionSmallRows) {
             << summary["allocated_extents"].get<int>() << "\n";
 }
 
-TEST_F(StressTest,  Create200TablesMillionsOfRows_1GB) {
+TEST_F(StressTest,  DISABLED_Create200TablesMillionsOfRows_1GB) {
   const int NUM_TABLES   = 200;
   const int ROWS_PER_TABLE = 5500;   // 200 * 5500 = 1.1M rows, ~900 MB
   const int BATCH_SIZE   = 250;

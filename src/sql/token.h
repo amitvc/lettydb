@@ -37,7 +37,7 @@ namespace letty {
         AS,
 
         // Optional extensions
-        LIMIT, OFFSET,
+        LIMIT, OFFSET, COMPACT,
 
         // End
         EOF_TOKEN,

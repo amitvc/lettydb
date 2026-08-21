@@ -44,6 +44,9 @@ namespace letty {
                 return parse_drop_node();
             case TokenType::CREATE:
                 return parse_create_node();
+            case TokenType::COMPACT:
+                advance();
+                return parse_compact_node();
             default:
                 throw std::runtime_error("Unsupported statement type: " + peek().text);
         }
@@ -357,6 +360,12 @@ namespace letty {
         return rootNode;
     }
 
+    std::unique_ptr<ASTNode> Parser::parse_compact_node() {
+        ensure(TokenType::TABLE, "Expected 'TABLE' keyword after COMPACT");
+        std::string table_name = ensure(TokenType::IDENTIFIER, "Expected table name").text;
+        return std::make_unique<CompactStatementNode>(std::move(table_name));
+    }
+
     std::vector<std::unique_ptr<IdentifierNode>> Parser::parse_identifier_list() {
         std::vector<std::unique_ptr<IdentifierNode>> identifiers;
         do {
@@ -484,12 +493,25 @@ namespace letty {
     std::unique_ptr<ExpressionNode> Parser::parse_relational_expression() {
         auto left = parse_value_or_identifier();
 
-        while (peek().type == TokenType::EQ || peek().type == TokenType::NE ||
-               peek().type == TokenType::LT || peek().type == TokenType::LTE ||
-               peek().type == TokenType::GT || peek().type == TokenType::GTE) {
-            std::string op = advance().text;
-            auto right = parse_value_or_identifier();
-            left = std::make_unique<BinaryOperationNode>(std::move(left), op, std::move(right));
+        while (true) {
+            if (peek().type == TokenType::EQ || peek().type == TokenType::NE ||
+                peek().type == TokenType::LT || peek().type == TokenType::LTE ||
+                peek().type == TokenType::GT || peek().type == TokenType::GTE) {
+                std::string op = advance().text;
+                auto right = parse_value_or_identifier();
+                left = std::make_unique<BinaryOperationNode>(std::move(left), op, std::move(right));
+            } else if (match(TokenType::IS)) {
+                advance(); // consume IS
+                bool is_not = false;
+                if (match(TokenType::NOT)) {
+                    advance(); // consume NOT
+                    is_not = true;
+                }
+                ensure(TokenType::NULL_LITERAL, "Expected NULL after IS or IS NOT");
+                left = std::make_unique<IsNullExpressionNode>(std::move(left), is_not);
+            } else {
+                break;
+            }
         }
         return left;
     }

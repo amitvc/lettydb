@@ -1,6 +1,7 @@
 #include "table_manager.h"
 #include "slotted_page.h"
 #include "storage_def.h"
+#include "common/logger.h"
 #include "common/db_exception.h"
 
 namespace letty {
@@ -129,6 +130,61 @@ TableScanner TableManager::scan_table(const std::string& table_name) {
   }
 
   return {buffer_pool_, table_metadata->iam_page_id};
+}
+
+bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id) {
+  auto* meta = catalog_manager_.get_table(table_name);
+  if (!meta) {
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
+  }
+  return delete_row(*meta, page_id, slot_id);
+}
+
+bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id) {
+  Page* page = buffer_pool_.fetch_page(page_id);
+  if (!page) {
+    LOG_STORAGE_ERROR("Failed to fetch page {} for delete on table '{}'", page_id, meta.name);
+    return false;
+  }
+
+  SlottedPage sp(page->get_data());
+  bool ok = sp.delete_tuple(slot_id);
+  buffer_pool_.unpin_page(page_id, ok);
+  return ok;
+}
+
+void TableManager::compact_table(const std::string& table_name) {
+  auto* meta = catalog_manager_.get_table(table_name);
+  if (!meta) {
+    throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
+  }
+  compact_table(*meta);
+}
+
+void TableManager::compact_table(const TableMetadata& meta) {
+  page_id_t iam_page_id = meta.iam_page_id;
+
+  while (iam_page_id != INVALID_PAGE_ID) {
+    auto iam_page = load_page_value<IAMPage>(buffer_pool_, iam_page_id);
+    if (!iam_page) return;
+
+    iam_page_id = iam_page->next_page_id;
+
+    for (uint16_t idx = 0; idx < iam_page->extent_count; ++idx) {
+      uint32_t extent_id = iam_page->extent_ids[idx];
+      for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
+        page_id_t data_page_id = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
+        Page* page = buffer_pool_.fetch_page(data_page_id);
+        if (!page) continue;
+
+        SlottedPage sp(page->get_data());
+        if (sp.get_num_slots() > 0) {
+          sp.compact();
+        }
+        buffer_pool_.unpin_page(data_page_id, true);
+      }
+    }
+  }
 }
 
 }

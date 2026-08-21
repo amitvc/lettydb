@@ -41,6 +41,22 @@ class TableScanner {
    */
   uint32_t get_tuple_size() const;
 
+  /**
+   * @brief Returns the page ID of the current data page.
+   *
+   * Only valid after next() has returned true. Returns INVALID_PAGE_ID
+   * before the first call or after the scan is complete.
+   */
+  page_id_t current_page_id() const;
+
+  /**
+   * @brief Returns the slot index within the current data page.
+   *
+   * Only valid after next() has returned true. Used by callers that need to
+   * identify or mutate the current tuple (e.g., delete operations).
+   */
+  uint16_t current_slot_id() const;
+
  private:
   bool load_next_iam_page();
   bool move_to_next_page();
@@ -52,6 +68,7 @@ class TableScanner {
   uint16_t current_extent_index_ = 0;
   int current_page_offset_ = 0;
   uint16_t current_slot_ = 0;
+  uint16_t last_found_slot_ = 0;
   page_id_t current_page_id_ = INVALID_PAGE_ID;
   Page* current_page_ = nullptr;
   const char* current_tuple_data_ = nullptr;

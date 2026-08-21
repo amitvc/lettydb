@@ -73,6 +73,80 @@ TEST_F(SlottedPageTest, PageFull) {
   EXPECT_FALSE(id2.has_value());
 }
 
+TEST_F(SlottedPageTest, DeleteTuple) {
+  SlottedPage page = SlottedPage::init(buffer);
+
+  auto id1 = page.insert_tuple("Tuple 1", 8);
+  auto id2 = page.insert_tuple("Tuple 2", 8);
+  auto id3 = page.insert_tuple("Tuple 3", 8);
+
+  ASSERT_TRUE(id1.has_value());
+  ASSERT_TRUE(id2.has_value());
+  ASSERT_TRUE(id3.has_value());
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  EXPECT_TRUE(page.delete_tuple(*id2));
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  uint32_t size;
+  EXPECT_EQ(page.get_tuple(*id2, &size), nullptr);
+}
+
+TEST_F(SlottedPageTest, DeleteTrailingSlotShrinksCount) {
+  SlottedPage page = SlottedPage::init(buffer);
+
+  auto id0 = page.insert_tuple("A", 2);
+  auto id1 = page.insert_tuple("B", 2);
+  auto id2 = page.insert_tuple("C", 2);
+
+  ASSERT_TRUE(id0 && id1 && id2);
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  EXPECT_TRUE(page.delete_tuple(*id2));
+  EXPECT_EQ(page.get_num_slots(), 2);
+
+  EXPECT_TRUE(page.delete_tuple(*id1));
+  EXPECT_EQ(page.get_num_slots(), 1);
+
+  EXPECT_TRUE(page.delete_tuple(*id0));
+  EXPECT_EQ(page.get_num_slots(), 0);
+}
+
+TEST_F(SlottedPageTest, DeleteMiddleSlotPreservesCount) {
+  SlottedPage page = SlottedPage::init(buffer);
+
+  auto id0 = page.insert_tuple("A", 2);
+  auto id1 = page.insert_tuple("B", 2);
+  auto id2 = page.insert_tuple("C", 2);
+
+  ASSERT_TRUE(id0 && id1 && id2);
+
+  EXPECT_TRUE(page.delete_tuple(*id1));
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  uint32_t size;
+  EXPECT_NE(page.get_tuple(*id0, &size), nullptr);
+  EXPECT_NE(page.get_tuple(*id2, &size), nullptr);
+  EXPECT_EQ(page.get_tuple(*id1, &size), nullptr);
+}
+
+TEST_F(SlottedPageTest, DeleteNonExistentSlotFails) {
+  SlottedPage page = SlottedPage::init(buffer);
+  page.insert_tuple("A", 2);
+
+  EXPECT_FALSE(page.delete_tuple(5));
+}
+
+TEST_F(SlottedPageTest, DeleteAlreadyDeletedSlotFails) {
+  SlottedPage page = SlottedPage::init(buffer);
+
+  auto id = page.insert_tuple("A", 2);
+  ASSERT_TRUE(id.has_value());
+
+  EXPECT_TRUE(page.delete_tuple(*id));
+  EXPECT_FALSE(page.delete_tuple(*id));
+}
+
 TEST_F(SlottedPageTest, SlotReuse) {
   SlottedPage page = SlottedPage::init(buffer);
 
@@ -88,20 +162,13 @@ TEST_F(SlottedPageTest, SlotReuse) {
   EXPECT_EQ(*id3, 2);
   EXPECT_EQ(page.get_num_slots(), 3);
 
-  // Simulate deletion by zeroing slot 1's length directly
-  // (delete_tuple was removed — this tests the slot-reuse path)
-  Slot slot{};
-  constexpr size_t slot_1_offset = sizeof(SlottedPageHeader) + sizeof(Slot);
-  std::memcpy(&slot, buffer + slot_1_offset, sizeof(Slot));
-  slot.length = 0;
-  std::memcpy(buffer + slot_1_offset, &slot, sizeof(Slot));
+  page.delete_tuple(*id2);
 
-  // Insert should reuse slot 1
   auto id4 = page.insert_tuple("Tuple 4", 8);
   ASSERT_TRUE(id4.has_value());
   EXPECT_EQ(*id4, 1);
 
-  EXPECT_EQ(page.get_num_slots(), 3); // Should not increase
+  EXPECT_EQ(page.get_num_slots(), 3);
 
   uint32_t size;
   const char* data = page.get_tuple(*id4, &size);

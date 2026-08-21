@@ -104,19 +104,19 @@ void CatalogManager::bootstrap() {
     }
 }
 
-uint32_t CatalogManager::get_next_oid() {
-    Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!db_header_frame) {
-        throw DbException(DbErrorCode::IOError, "failed to fetch header page for OID allocation");
+uint32_t CatalogManager::get_next_table_id() {
+    Page* raw_header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
+    if (!raw_header_page) {
+        throw DbException(DbErrorCode::IOError, "failed to fetch header page for table_id allocation");
     }
-    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
+    auto db_header_page = load_page_layout<DatabaseHeader>(raw_header_page);
 
-    uint16_t oid = db_header_page.next_table_oid;
+    uint16_t table_oid = db_header_page.next_table_oid;
     db_header_page.next_table_oid++;
 
-    store_page_layout(db_header_frame, db_header_page);
+    store_page_layout(raw_header_page, db_header_page);
     buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
-    return oid;
+    return table_oid;
 }
 
 void CatalogManager::initialize_data_extent(page_id_t extent_start_page) {
@@ -203,7 +203,7 @@ bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
     char buf[PAGE_SIZE];
     uint32_t data_size;
 
-    Tuple table_tuple({static_cast<int32_t>(record.oid),
+    Tuple table_tuple({static_cast<int32_t>(record.table_id),
                        record.table_name,
                        static_cast<int32_t>(record.iam_page_id),
                        static_cast<int32_t>(record.column_count)});
@@ -253,7 +253,7 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
         throw DbException(DbErrorCode::Corruption, "sys_tables IAM page is not initialized");
     }
 
-    uint16_t next_oid = get_next_oid();
+    uint16_t next_oid = get_next_table_id();
 
     page_id_t new_iam = iam_manager_.create_iam_chain(name);
     if (new_iam == INVALID_PAGE_ID) {

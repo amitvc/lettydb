@@ -75,6 +75,51 @@ class TableManager {
    */
   TableScanner scan_table(const std::string& table_name);
 
+  /**
+   * @brief Deletes a row from a table by page and slot.
+   *
+   * Fetches the page, marks the slot as a tombstone, marks the page dirty,
+   * and unpins it.
+   *
+   * @param table_name The name of the table.
+   * @param page_id The page ID containing the tuple.
+   * @param slot_id The slot index of the tuple to delete.
+   * @return true if the tuple was live and is now deleted.
+   *         false if the slot was already deleted or the page failed to load.
+   * @throws DbException if the table is missing.
+   */
+  bool delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id);
+
+  /**
+   * @brief Deletes a row using pre-resolved metadata (avoids catalog lookup).
+   *
+   * @param meta The table's metadata (schema + IAM page).
+   * @param page_id The page ID containing the tuple.
+   * @param slot_id The slot index of the tuple to delete.
+   * @return true if the tuple was live and is now deleted.
+   *         false if the slot was already deleted or the page failed to load.
+   */
+  bool delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id);
+
+  /**
+   * @brief Reclaims space from deleted tuples in all pages of a table.
+   *
+   * Walks every page in the table's IAM chain and calls SlottedPage::compact()
+   * on each. Pages without tombstones are skipped. The caller should hold a
+   * reference to the table's metadata.
+   *
+   * @param table_name The name of the table.
+   * @throws DbException if the table is missing.
+   */
+  void compact_table(const std::string& table_name);
+
+  /**
+   * @brief Reclaims space using pre-resolved metadata (avoids catalog lookup).
+   *
+   * @param meta The table's metadata (schema + IAM page).
+   */
+  void compact_table(const TableMetadata& meta);
+
  private:
   BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
