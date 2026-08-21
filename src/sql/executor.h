@@ -102,6 +102,16 @@ class Executor {
   ExecutionResult execute_select(SelectStatementNode* node);
 
   /**
+   * @brief Executes a DELETE statement.
+   */
+  ExecutionResult execute_delete(DeleteStatementNode* node);
+
+  /**
+   * @brief Executes a COMPACT TABLE statement.
+   */
+  ExecutionResult execute_compact(CompactStatementNode* node);
+
+  /**
    * @brief Converts a TokenType (from parser) to a DataType (for storage).
    */
   DataType token_type_to_data_type(TokenType type);

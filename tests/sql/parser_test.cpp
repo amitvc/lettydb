@@ -1541,3 +1541,80 @@ TEST_F(ParserTest, InsertNullMixedWithOtherValues) {
     EXPECT_TRUE(std::holds_alternative<std::monostate>(insert->values[0][1]->value));
     EXPECT_EQ(std::get<std::string>(insert->values[0][2]->value), "hello");
 }
+
+TEST_F(ParserTest, WhereIsNotNull) {
+    std::string query = "SELECT * FROM users WHERE name IS NOT NULL;";
+    auto ast = parse_query(query);
+
+    auto* select = dynamic_cast<SelectStatementNode*>(ast.get());
+    ASSERT_NE(select, nullptr);
+    ASSERT_NE(select->where_clause, nullptr);
+
+    auto* is_null = dynamic_cast<IsNullExpressionNode*>(select->where_clause.get());
+    ASSERT_NE(is_null, nullptr);
+    EXPECT_TRUE(is_null->is_not);
+
+    auto* col = dynamic_cast<IdentifierNode*>(is_null->expression.get());
+    ASSERT_NE(col, nullptr);
+    EXPECT_EQ(col->name, "name");
+}
+
+TEST_F(ParserTest, WhereIsNull) {
+    std::string query = "SELECT * FROM users WHERE name IS NULL;";
+    auto ast = parse_query(query);
+
+    auto* select = dynamic_cast<SelectStatementNode*>(ast.get());
+    ASSERT_NE(select, nullptr);
+    ASSERT_NE(select->where_clause, nullptr);
+
+    auto* is_null = dynamic_cast<IsNullExpressionNode*>(select->where_clause.get());
+    ASSERT_NE(is_null, nullptr);
+    EXPECT_FALSE(is_null->is_not);
+
+    auto* col = dynamic_cast<IdentifierNode*>(is_null->expression.get());
+    ASSERT_NE(col, nullptr);
+    EXPECT_EQ(col->name, "name");
+}
+
+TEST_F(ParserTest, DeleteWhereIsNull) {
+    std::string query = "DELETE FROM users WHERE email IS NULL;";
+    auto ast = parse_query(query);
+
+    auto* del = dynamic_cast<DeleteStatementNode*>(ast.get());
+    ASSERT_NE(del, nullptr);
+    ASSERT_NE(del->where_clause, nullptr);
+
+    auto* is_null = dynamic_cast<IsNullExpressionNode*>(del->where_clause.get());
+    ASSERT_NE(is_null, nullptr);
+    EXPECT_FALSE(is_null->is_not);
+
+    auto* col = dynamic_cast<IdentifierNode*>(is_null->expression.get());
+    ASSERT_NE(col, nullptr);
+    EXPECT_EQ(col->name, "email");
+}
+
+TEST_F(ParserTest, DeleteWhereIsNotNull) {
+    std::string query = "DELETE FROM users WHERE email IS NOT NULL;";
+    auto ast = parse_query(query);
+
+    auto* del = dynamic_cast<DeleteStatementNode*>(ast.get());
+    ASSERT_NE(del, nullptr);
+    ASSERT_NE(del->where_clause, nullptr);
+
+    auto* is_null = dynamic_cast<IsNullExpressionNode*>(del->where_clause.get());
+    ASSERT_NE(is_null, nullptr);
+    EXPECT_TRUE(is_null->is_not);
+
+    auto* col = dynamic_cast<IdentifierNode*>(is_null->expression.get());
+    ASSERT_NE(col, nullptr);
+    EXPECT_EQ(col->name, "email");
+}
+
+TEST_F(ParserTest, CompactTableStatement) {
+    std::string query = "COMPACT TABLE users;";
+    auto ast = parse_query(query);
+
+    auto* compact = dynamic_cast<CompactStatementNode*>(ast.get());
+    ASSERT_NE(compact, nullptr);
+    EXPECT_EQ(compact->table_name, "users");
+}

@@ -394,4 +394,257 @@ TEST_F(ExecutorTest, SelectWhereUnknownColumnReturnsError) {
   EXPECT_NE(result.error_message.find("unknown column"), std::string::npos);
 }
 
+// ——— DELETE tests ———
+
+TEST_F(ExecutorTest, DeleteAllRows) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')");
+
+  auto del = execute_sql("DELETE FROM t");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 3u);
+
+  // Table should be empty
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  EXPECT_TRUE(sel.rows.empty());
+}
+
+TEST_F(ExecutorTest, DeleteSingleMatch) {
+  execute_sql("CREATE TABLE users (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO users VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')");
+
+  auto del = execute_sql("DELETE FROM users WHERE id = 2");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 1u);
+
+  auto sel = execute_sql("SELECT * FROM users");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 1);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[1].get_value(0)), 3);
+}
+
+TEST_F(ExecutorTest, DeleteWithAndOperator) {
+  execute_sql("CREATE TABLE t (id INT, category INT, active BOOL)");
+  execute_sql("INSERT INTO t VALUES "
+              "(1, 1, TRUE), (2, 1, FALSE), (3, 2, TRUE), "
+              "(4, 2, FALSE), (5, 1, TRUE)");
+
+  auto del = execute_sql("DELETE FROM t WHERE category = 1 AND active = TRUE");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 2u);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 3u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 2);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[1].get_value(0)), 3);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[2].get_value(0)), 4);
+}
+
+TEST_F(ExecutorTest, DeleteWithOrOperator) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(20))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol'), (4, 'dave')");
+
+  auto del = execute_sql("DELETE FROM t WHERE name = 'alice' OR name = 'dave'");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 2u);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+  EXPECT_EQ(std::get<std::string>(sel.rows[0].get_value(1)), "bob");
+  EXPECT_EQ(std::get<std::string>(sel.rows[1].get_value(1)), "carol");
+}
+
+TEST_F(ExecutorTest, DeleteNoMatches) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')");
+
+  auto del = execute_sql("DELETE FROM t WHERE id = 99");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 0u);
+
+  // Table should be unchanged
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  EXPECT_EQ(sel.rows.size(), 2u);
+}
+
+TEST_F(ExecutorTest, DeleteFromEmptyTable) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+
+  auto del = execute_sql("DELETE FROM t");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 0u);
+}
+
+TEST_F(ExecutorTest, DeleteFromNonExistentTable) {
+  auto del = execute_sql("DELETE FROM nonexistent");
+  EXPECT_FALSE(del.success);
+  EXPECT_NE(del.error_message.find("does not exist"), std::string::npos);
+}
+
+TEST_F(ExecutorTest, DeleteWithWhereOnMultipleColumns) {
+  execute_sql("CREATE TABLE employees (id INT, name VARCHAR(50), dept VARCHAR(20), salary FLOAT)");
+  execute_sql("INSERT INTO employees VALUES "
+              "(1, 'alice', 'eng', 90000.0), "
+              "(2, 'bob', 'eng', 80000.0), "
+              "(3, 'carol', 'sales', 85000.0), "
+              "(4, 'dave', 'sales', 75000.0), "
+              "(5, 'eve', 'eng', 95000.0)");
+
+  // Delete eng employees earning < 90k
+  auto del = execute_sql("DELETE FROM employees WHERE dept = 'eng' AND salary < 90000.0");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 1u);
+
+  auto sel = execute_sql("SELECT name FROM employees");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 4u);
+  // Verify bob is gone
+  for (const auto& row : sel.rows) {
+    EXPECT_NE(std::get<std::string>(row.get_value(0)), "bob");
+  }
+}
+
+TEST_F(ExecutorTest, DeleteAndInsertAfterDelete) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')");
+
+  // Delete one row
+  auto del = execute_sql("DELETE FROM t WHERE id = 1");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 1u);
+
+  // Insert a new row after delete
+  auto ins = execute_sql("INSERT INTO t VALUES (3, 'carol')");
+  ASSERT_TRUE(ins.success) << ins.error_message;
+
+  // Verify both remaining rows are intact
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+}
+
+TEST_F(ExecutorTest, DeleteWhereOnStringColumn) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'alice')");
+
+  auto del = execute_sql("DELETE FROM t WHERE name = 'alice'");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 2u);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 1u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 2);
+}
+
+TEST_F(ExecutorTest, SelectWhereIsNull) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, NULL), (3, 'bob'), (4, NULL)");
+
+  auto sel = execute_sql("SELECT * FROM t WHERE name IS NULL");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 2);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[1].get_value(0)), 4);
+}
+
+TEST_F(ExecutorTest, SelectWhereIsNotNull) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, NULL), (3, 'bob'), (4, NULL)");
+
+  auto sel = execute_sql("SELECT * FROM t WHERE name IS NOT NULL");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 1);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[1].get_value(0)), 3);
+}
+
+TEST_F(ExecutorTest, DeleteWhereIsNull) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, NULL), (3, 'bob'), (4, NULL)");
+
+  auto del = execute_sql("DELETE FROM t WHERE name IS NULL");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 2u);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+}
+
+TEST_F(ExecutorTest, DeleteWhereIsNotNull) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, NULL), (3, 'bob'), (4, NULL)");
+
+  auto del = execute_sql("DELETE FROM t WHERE name IS NOT NULL");
+  ASSERT_TRUE(del.success) << del.error_message;
+  EXPECT_EQ(del.affected_rows, 2u);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 2);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[1].get_value(0)), 4);
+}
+
+TEST_F(ExecutorTest, SelectWhereIsNotNullAndCondition) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50), active BOOL)");
+  execute_sql("INSERT INTO t VALUES (1, 'alice', true), (2, NULL, true), (3, 'bob', false), (4, NULL, false)");
+
+  auto sel = execute_sql("SELECT * FROM t WHERE name IS NOT NULL AND active = true");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 1u);
+  EXPECT_EQ(std::get<int32_t>(sel.rows[0].get_value(0)), 1);
+}
+
+TEST_F(ExecutorTest, CompactTableDefragsDeletedTuples) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')");
+
+  auto del = execute_sql("DELETE FROM t WHERE id = 2");
+  ASSERT_TRUE(del.success);
+  EXPECT_EQ(del.affected_rows, 1u);
+
+  auto compact = execute_sql("COMPACT TABLE t");
+  ASSERT_TRUE(compact.success);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+}
+
+TEST_F(ExecutorTest, CompactTableNoOp) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+  execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')");
+
+  auto compact = execute_sql("COMPACT TABLE t");
+  ASSERT_TRUE(compact.success);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 2u);
+}
+
+TEST_F(ExecutorTest, CompactEmptyTable) {
+  execute_sql("CREATE TABLE t (id INT, name VARCHAR(50))");
+
+  auto compact = execute_sql("COMPACT TABLE t");
+  ASSERT_TRUE(compact.success);
+
+  auto sel = execute_sql("SELECT * FROM t");
+  ASSERT_TRUE(sel.success);
+  ASSERT_EQ(sel.rows.size(), 0u);
+}
+
+TEST_F(ExecutorTest, CompactNonExistentTable) {
+  auto compact = execute_sql("COMPACT TABLE nonexistent");
+  ASSERT_FALSE(compact.success);
+  EXPECT_NE(compact.error_message.find("nonexistent"), std::string::npos);
+}
+
 }

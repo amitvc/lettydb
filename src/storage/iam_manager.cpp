@@ -10,7 +10,7 @@ IamManager::IamManager(BufferPoolManager &buffer_pool, ExtentManager &extent_man
     : buffer_pool_(buffer_pool), extent_manager_(extent_manager) {}
 
 page_id_t IamManager::create_iam_chain(const std::string &table_name) {
-  LOG_STORAGE_DEBUG("Creating new IAM chain");
+  LOG_STORAGE_DEBUG("Creating new IAM chain for table {}", table_name.c_str());
 
   page_id_t iam_page_id = extent_manager_.allocate_extent();
   if (iam_page_id == INVALID_PAGE_ID) {

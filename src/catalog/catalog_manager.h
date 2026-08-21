@@ -21,13 +21,21 @@ namespace letty {
  * it only describes how and where that data is stored.
  */
 struct TableMetadata {
-  uint32_t oid;
-  std::string name; // table name.
+  /** @brief Unique identifier assigned to the table by the catalog. */
+  uint32_t table_id;
+
+  /** @brief Table name used by catalog lookups. */
+  std::string name;
+
+  /** @brief Column definitions and serialized layout for the table's tuples. */
   Schema schema;
 
-  // Head of the IAM (Index Allocation Map) chain for this table.
-  // The storage layer follows this chain to find all extents (and their
-  // data pages) that belong to the table.
+  /**
+   * @brief Head page of the table's IAM chain.
+   *
+   * The storage layer follows this chain to find the extents and data pages
+   * belonging to the table.
+   */
   page_id_t iam_page_id;
 };
 
@@ -37,7 +45,7 @@ struct TableMetadata {
  * Used to insert records into sys_tables without passing individual columns.
  */
 struct SysTableRecord {
-  uint32_t oid;
+  uint32_t table_id;
   std::string table_name;
   page_id_t iam_page_id;
   int32_t column_count;
@@ -119,10 +127,10 @@ class CatalogManager {
   void load_all_tables();
 
   /**
-   * @brief Gets the next available OID and increments the counter in the database header.
-   * @return The next available OID for a new table.
+   * @brief Gets the next available table_id and increments the counter in the database header.
+   * @return The next available table_id for a new table.
    */
-  uint32_t get_next_oid();
+  uint32_t get_next_table_id();
 
   /**
    * @brief Formats every page in an allocated extent as an empty SlottedPage.

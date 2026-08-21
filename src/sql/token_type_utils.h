@@ -47,6 +47,7 @@ namespace letty {
 
             {"AS", TokenType::AS},
             {"LIMIT", TokenType::LIMIT},
-            {"OFFSET", TokenType::OFFSET}
+            {"OFFSET", TokenType::OFFSET},
+            {"COMPACT", TokenType::COMPACT}
     };
 }

@@ -72,10 +72,10 @@ struct DatabaseHeader {
   // The first GAM page is always the 1st page in extent 1. Extent 1 covers pages 8 to 15.
   page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
-  // Points to the IAM head page for the 'sys_tables' table
+  // Points to the head page of an IAM dedicated for the 'sys_tables' table
   page_id_t sys_tables_iam_page = INVALID_PAGE_ID;
 
-  // Points to the IAM head page for the 'sys_columns' table
+  // Points to the head page of an IAM dedicated for the 'sys_columns' table
   page_id_t sys_columns_iam_page = INVALID_PAGE_ID;
 
   // Next available OID for user tables. System tables use OIDs 1-99.

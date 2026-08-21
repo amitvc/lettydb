@@ -143,6 +143,7 @@ namespace letty {
              * @return DropTableStatementNode containing all parsed components
              */
             std::unique_ptr<ASTNode> parse_drop_node();
+            std::unique_ptr<ASTNode> parse_compact_node();
 
             /**
              * @brief Checks if current token matches the given type without consuming it

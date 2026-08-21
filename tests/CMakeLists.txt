@@ -19,7 +19,7 @@ file(GLOB_RECURSE DB_HEADERS "*.h")
 add_executable(lettydb_test ${DB_SOURCES} ${DB_HEADERS})
 
 target_link_libraries(lettydb_test PRIVATE lettydb
-        gtest_main
+        gtest
         gmock
         gmock_main
 )
