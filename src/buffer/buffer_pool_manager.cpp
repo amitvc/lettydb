@@ -206,6 +206,22 @@ std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
   return frame_id;
 }
 
+void BufferPoolManager::force_flush() {
+  std::lock_guard<std::mutex> lock(latch_);
+  for (size_t i = 0; i < pool_size_; ++i) {
+    Page& page = pages_[i];
+    if (page.get_page_id() != INVALID_PAGE_ID && page.is_dirty()) {
+      IOResult result = disk_manager_.write_page(page.get_page_id(), page.get_data());
+      if (result != IOResult::SUCCESS) {
+        LOG_BPM_ERROR("Failed to flush dirty page {}", page.get_page_id());
+        continue;
+      }
+      page.set_dirty(false);
+      ++flushes_;
+    }
+  }
+}
+
 bool BufferPoolManager::flush_page(page_id_t page_id) {
   std::lock_guard<std::mutex> lock(latch_);
 

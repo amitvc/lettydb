@@ -42,7 +42,7 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
 bool IamManager::page_has_space(page_id_t page_id, uint32_t required) {
   Page* data_frame = buffer_pool_.fetch_page(page_id);
   if (!data_frame) return false;
-  SlottedPage sp(data_frame->get_data());
+  SlottedPage sp = SlottedPage::from_page(data_frame);
   bool has_space = sp.get_free_space() >= required;
   buffer_pool_.unpin_page(page_id, false);
   return has_space;
@@ -215,6 +215,49 @@ page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_
 
   LOG_STORAGE_DEBUG("No page found with sufficient space");
   return INVALID_PAGE_ID;
+}
+
+bool IamManager::remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t extent_id) {
+  page_id_t current_iam_page = iam_head_page_id;
+  page_id_t prev_iam_page = INVALID_PAGE_ID;
+
+  while (current_iam_page != INVALID_PAGE_ID) {
+    Page* iam_frame = buffer_pool_.fetch_page(current_iam_page);
+    if (!iam_frame) return false;
+
+    auto iam_page = load_page_layout<IAMPage>(iam_frame);
+    page_id_t next_iam = iam_page.next_page_id;
+
+    if (!iam_page.remove_extent(extent_id)) {
+      buffer_pool_.unpin_page(current_iam_page, false);
+      prev_iam_page = current_iam_page;
+      current_iam_page = next_iam;
+      continue;
+    }
+
+    store_page_layout(iam_frame, iam_page);
+    buffer_pool_.unpin_page(current_iam_page, true);
+
+    // Deallocate the extent from the GAM so the system can reuse it.
+    page_id_t extent_start = first_page_of_extent(extent_id);
+    extent_manager_.deallocate_extent(extent_start);
+
+    if (iam_page.extent_count == 0 && current_iam_page != iam_head_page_id) {
+      Page* prev_frame = buffer_pool_.fetch_page(prev_iam_page);
+      if (!prev_frame) return false;
+
+      auto prev_iam = load_page_layout<IAMPage>(prev_frame);
+      prev_iam.next_page_id = next_iam;
+      store_page_layout(prev_frame, prev_iam);
+      buffer_pool_.unpin_page(prev_iam_page, true);
+    }
+
+    table_page_hints_.erase(iam_head_page_id);
+    LOG_STORAGE_INFO("Removed extent {} from IAM chain", extent_id);
+    return true;
+  }
+
+  return false;
 }
 
 }

@@ -451,6 +451,12 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 PrintResultTable(result.column_names, result.rows);
                 fmt::print("{} row(s) returned\n", result.rows.size());
             }
+        } else if (!quiet && result.compaction_stats.has_value()) {
+            auto& s = *result.compaction_stats;
+            fmt::print("Compaction complete:\n");
+            fmt::print("  Tuples migrated:  {}\n", s.tuples_migrated);
+            fmt::print("  Extents freed:    {}\n", s.extents_freed);
+            fmt::print("  Pages reclaimed:  {}\n", s.pages_freed);
         } else if (!quiet && result.affected_rows > 0) {
             fmt::print("OK, {} row(s) affected\n", result.affected_rows);
         } else if (!quiet) {

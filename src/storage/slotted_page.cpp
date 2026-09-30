@@ -1,4 +1,5 @@
 #include "storage/slotted_page.h"
+#include "storage/page.h"
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -8,6 +9,10 @@ namespace letty {
 static_assert(sizeof(SlottedPageHeader) == 16,
               "SlottedPageHeader must be exactly 16 bytes on disk");
 static_assert(sizeof(Slot) == 4, "Slot must be exactly 4 bytes on disk");
+
+SlottedPage SlottedPage::from_page(Page* page) {
+  return SlottedPage(page->get_data());
+}
 
 SlottedPage::SlottedPage(char* buffer)
     : data_(buffer),
@@ -37,8 +42,16 @@ uint16_t SlottedPage::get_num_slots() const {
   return header_->num_slots;
 }
 
+bool SlottedPage::is_empty() const {
+  auto* slot_dir = slotted_page_dir();
+  for (uint16_t i = 0; i < header_->num_slots; ++i) {
+    if (slot_dir[i].length > 0) return false;
+  }
+  return true;
+}
+
 bool SlottedPage::compact() {
-  auto* slot_dir = reinterpret_cast<Slot*>(data_ + sizeof(SlottedPageHeader));
+  auto* slot_dir = slotted_page_dir();
 
   bool has_tombstones = false;
   for (uint16_t i = 0; i < header_->num_slots; ++i) {
@@ -70,7 +83,7 @@ bool SlottedPage::compact() {
 }
 
 std::optional<uint16_t> SlottedPage::insert_tuple(const char* tuple_data, uint32_t tuple_size) {
-  auto* slot_dir = reinterpret_cast<Slot*>(data_ + sizeof(SlottedPageHeader));
+  auto* slot_dir = slotted_page_dir();
 
   // Prefer reusing a deleted slot so the slot directory does not grow if it
   // already has a tombstone entry.
@@ -113,7 +126,7 @@ const char* SlottedPage::get_tuple(uint16_t slot_id, uint32_t* size) const {
     return nullptr;
   }
 
-  const auto* slot_dir = reinterpret_cast<const Slot*>(data_ + sizeof(SlottedPageHeader));
+  const auto* slot_dir = slotted_page_dir();
   const Slot& slot = slot_dir[slot_id];
   if (slot.length == 0) {
     return nullptr;
@@ -130,7 +143,7 @@ bool SlottedPage::delete_tuple(uint16_t slot_id) {
     return false;
   }
 
-  auto* slot_dir = reinterpret_cast<Slot*>(data_ + sizeof(SlottedPageHeader));
+  auto* slot_dir = slotted_page_dir();
   if (slot_dir[slot_id].length == 0) {
     return false;
   }
@@ -160,7 +173,7 @@ void SlottedPage::store_header(const SlottedPageHeader& header) {
 
 Slot SlottedPage::load_slot(uint16_t slot_id) const {
   assert(slot_offset(slot_id) + sizeof(Slot) <= PAGE_SIZE);
-  const auto* slot_dir = reinterpret_cast<const Slot*>(data_ + sizeof(SlottedPageHeader));
+  const auto* slot_dir = slotted_page_dir();
   Slot slot{};
   std::memcpy(&slot, slot_dir + slot_id, sizeof(Slot));
   return slot;
@@ -168,12 +181,20 @@ Slot SlottedPage::load_slot(uint16_t slot_id) const {
 
 void SlottedPage::store_slot(uint16_t slot_id, const Slot& slot) {
   assert(slot_offset(slot_id) + sizeof(Slot) <= PAGE_SIZE);
-  auto* slot_dir = reinterpret_cast<Slot*>(data_ + sizeof(SlottedPageHeader));
+  auto* slot_dir = slotted_page_dir();
   std::memcpy(slot_dir + slot_id, &slot, sizeof(Slot));
 }
 
 size_t SlottedPage::slot_offset(uint16_t slot_id) {
   return sizeof(SlottedPageHeader) + (slot_id * sizeof(Slot));
+}
+
+Slot* SlottedPage::slotted_page_dir() {
+  return reinterpret_cast<Slot*>(data_ + sizeof(SlottedPageHeader));
+}
+
+const Slot* SlottedPage::slotted_page_dir() const {
+  return reinterpret_cast<const Slot*>(data_ + sizeof(SlottedPageHeader));
 }
 
 }

@@ -635,6 +635,9 @@ TEST_F(ExecutorTest, CompactEmptyTable) {
 
   auto compact = execute_sql("COMPACT TABLE t");
   ASSERT_TRUE(compact.success);
+  ASSERT_TRUE(compact.compaction_stats.has_value());
+  EXPECT_EQ(compact.compaction_stats->tuples_migrated, 0u);
+  EXPECT_EQ(compact.compaction_stats->extents_freed, 0u);
 
   auto sel = execute_sql("SELECT * FROM t");
   ASSERT_TRUE(sel.success);

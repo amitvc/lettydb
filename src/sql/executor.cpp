@@ -513,8 +513,12 @@ ExecutionResult Executor::execute_compact(CompactStatementNode* node) {
     return ExecutionResult::error("COMPACT: table '" + node->table_name + "' does not exist");
   }
 
-  table_manager_.compact_table(*table_meta);
-  return ExecutionResult::ok(0);
+  CompactionStats stats = table_manager_.compact_table(*table_meta);
+
+  ExecutionResult result;
+  result.success = true;
+  result.compaction_stats = stats;
+  return result;
 }
 
 } // namespace letty

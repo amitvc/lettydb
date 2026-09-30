@@ -216,6 +216,19 @@ struct IAMPage {
     extent_ids[extent_count++] = extent_id;
     return true;
   }
+
+  bool remove_extent(uint32_t extent_id) {
+    for (int i = 0; i < extent_count; ++i) {
+      if (extent_ids[i] == extent_id) {
+        for (int j = i; j < extent_count - 1; ++j) {
+          extent_ids[j] = extent_ids[j + 1];
+        }
+        extent_count--;
+        return true;
+      }
+    }
+    return false;
+  }
   
   /**
    * @brief Check if this page has room for another extent.

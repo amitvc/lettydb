@@ -61,6 +61,19 @@ class IamManager {
    */
   page_id_t find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space);
 
+  /**
+   * @brief Removes a data extent from a table's IAM chain.
+   *
+   * Walks the IAM chain to find the IAM page holding the extent, removes it,
+   * and deallocates the extent via ExtentManager. If an IAM page becomes empty
+   * (extent_count == 0), it is unlinked from the chain.
+   *
+   * @param iam_head_page_id The IAM head page for the table.
+   * @param extent_id The extent index to remove (derived from page_id / EXTENT_SIZE).
+   * @return true if the extent was found and removed.
+   */
+  bool remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t extent_id);
+
  private:
   BufferPoolManager& buffer_pool_;
   ExtentManager& extent_manager_;

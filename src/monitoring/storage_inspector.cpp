@@ -283,7 +283,7 @@ std::string StorageInspector::get_page_map() {
                      // Read data page
                      Page* p_data = buffer_pool_.fetch_page(pid);
                      if(p_data) {
-                         SlottedPage sp(p_data->get_data());
+                         SlottedPage sp = SlottedPage::from_page(p_data);
                          for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                              uint32_t tuple_size;
                              const char* tuple_ptr = sp.get_tuple(slot, &tuple_size);

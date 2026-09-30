@@ -30,6 +30,9 @@ struct ExecutionResult {
   
   // For INSERT/UPDATE/DELETE
   uint32_t affected_rows = 0;
+
+  // For COMPACT
+  std::optional<CompactionStats> compaction_stats;
   
   // Factory methods for common results
   static ExecutionResult ok() {

@@ -4,8 +4,8 @@
 #include "config.h"
 #include <optional>
 
-
 namespace letty {
+class Page;
 
 /**
  * @struct SlottedPageHeader
@@ -209,9 +209,27 @@ class SlottedPage {
   bool compact();
 
   /**
+   * @brief Returns true if the page contains no live tuples.
+   *
+   * A page is empty when num_slots is 0 or every slot is a tombstone.
+   */
+  bool is_empty() const;
+
+  /**
+   * @brief Returns a pointer to the slot directory.
+   */
+  Slot* slotted_page_dir();
+  const Slot* slotted_page_dir() const;
+
+  /**
    * @brief Returns the number of slot entries (active + deleted).
    */
   uint16_t get_num_slots() const;
+
+  /**
+   * @brief Convenience helper to create a SlottedPage view from a Page pointer.
+   */
+  static SlottedPage from_page(Page* page);
 
  private:
   SlottedPageHeader load_header() const;

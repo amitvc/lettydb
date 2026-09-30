@@ -29,7 +29,7 @@ bool TableScanner::next() {
       continue;
     }
 
-    SlottedPage slotted_page(current_page_->get_data());
+    SlottedPage slotted_page = SlottedPage::from_page(current_page_);
     while (current_slot_ < slotted_page.get_num_slots()) {
       const char* data = slotted_page.get_tuple(current_slot_, &current_tuple_size_);
       last_found_slot_ = current_slot_;

@@ -175,4 +175,110 @@ TEST_F(SlottedPageTest, SlotReuse) {
   EXPECT_STREQ(data, "Tuple 4");
 }
 
+// Compaction unit tests
+TEST_F(SlottedPageTest, CompactReclaimsSpaceAfterDelete) {
+  SlottedPage page = SlottedPage::init(buffer);
+  auto tpl1 = page.insert_tuple("tuple 1", 8);
+  auto tpl2 = page.insert_tuple("tuple 2", 8);
+  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  ASSERT_TRUE(tpl1.has_value());
+  ASSERT_TRUE(tpl2.has_value());
+  ASSERT_TRUE(tpl3.has_value());
+  size_t free_space = page.get_free_space();
+  page.delete_tuple(tpl2.value());
+  page.compact();
+  size_t free_space_after_compaction = page.get_free_space();
+  ASSERT_TRUE(free_space_after_compaction > free_space);
+
+  // After compact, slot IDs are reassigned. All live tuples survive.
+  EXPECT_EQ(page.get_num_slots(), 2);
+
+  uint32_t size;
+  const char* data = page.get_tuple(0, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 1");
+
+  data = page.get_tuple(1, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 3");
+}
+
+TEST_F(SlottedPageTest, CompactNoOpOnCleanPage) {
+  SlottedPage page = SlottedPage::init(buffer);
+  auto tpl1 = page.insert_tuple("tuple 1", 8);
+  auto tpl2 = page.insert_tuple("tuple 2", 8);
+  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  ASSERT_TRUE(tpl1.has_value());
+  ASSERT_TRUE(tpl2.has_value());
+  ASSERT_TRUE(tpl3.has_value());
+  size_t free_space = page.get_free_space();
+  auto tombstones_found = page.compact();
+  size_t free_space_after_compaction = page.get_free_space();
+  ASSERT_EQ(free_space_after_compaction, free_space);
+  ASSERT_FALSE(tombstones_found);
+  // After compact. All live tuples survive.
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  uint32_t size;
+  const char* data = page.get_tuple(0, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 1");
+
+  data = page.get_tuple(1, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 2");
+
+  data = page.get_tuple(2, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 3");
+}
+
+TEST_F(SlottedPageTest, CompactAfterAllDeleted) {
+  SlottedPage page = SlottedPage::init(buffer);
+  auto tpl1 = page.insert_tuple("tuple 1", 8);
+  auto tpl2 = page.insert_tuple("tuple 2", 8);
+  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  ASSERT_TRUE(tpl1.has_value());
+  ASSERT_TRUE(tpl2.has_value());
+  ASSERT_TRUE(tpl3.has_value());
+  page.delete_tuple(tpl1.value());
+  page.delete_tuple(tpl2.value());
+  page.delete_tuple(tpl3.value());
+  page.compact();
+  ASSERT_EQ(page.get_num_slots(), 0);
+  ASSERT_TRUE(page.is_empty());
+}
+
+TEST_F(SlottedPageTest, CompactPreservesOrder) {
+  SlottedPage page = SlottedPage::init(buffer);
+  auto tpl1 = page.insert_tuple("tuple 1", 8);
+  auto tpl2 = page.insert_tuple("tuple 2", 8);
+  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  ASSERT_TRUE(tpl1 && tpl2 && tpl3);
+
+  page.delete_tuple(tpl2.value());
+  page.compact();
+
+  // After compact: slot 0 = "tuple 1", slot 1 = "tuple 3" (inserted in scan order).
+  EXPECT_EQ(page.get_num_slots(), 2);
+
+  uint32_t size;
+  const char* data = page.get_tuple(0, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 1");
+
+  data = page.get_tuple(1, &size);
+  ASSERT_NE(data, nullptr);
+  EXPECT_STREQ(data, "tuple 3");
+
+  // Re-insert "tuple 2" — it gets slot 2 since num_slots is now 2.
+  auto tpl2_new = page.insert_tuple("tuple 2", 8);
+  ASSERT_TRUE(tpl2_new.has_value());
+  EXPECT_EQ(page.get_num_slots(), 3);
+
+  const char* data2 = page.get_tuple(2, &size);
+  ASSERT_NE(data2, nullptr);
+  EXPECT_STREQ(data2, "tuple 2");
+}
+
 }

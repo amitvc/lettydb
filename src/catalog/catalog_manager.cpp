@@ -149,7 +149,7 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
         throw DbException(DbErrorCode::IOError, "failed to fetch catalog data page");
     }
 
-    SlottedPage sp(page->get_data());
+    SlottedPage sp = SlottedPage::from_page(page);
     auto slot_id = sp.insert_tuple(data, size);
     if (!slot_id) {
         buffer_pool_.unpin_page(target_page_id, false);
@@ -180,7 +180,7 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
                 Page* data_pg = buffer_pool_.fetch_page(data_page_id);
                 if (!data_pg) continue;
 
-                SlottedPage sp(data_pg->get_data());
+                SlottedPage sp = SlottedPage::from_page(data_pg);
                 for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                     uint32_t sz;
                     const char* data = sp.get_tuple(slot, &sz);
