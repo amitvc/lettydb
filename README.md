@@ -6,7 +6,7 @@ LettyDB is a disk-based relational database written from scratch in C++17 to exp
 
 ## Terminal demo
 
-[![Watch LettyDB in action](https://asciinema.org/a/Tx3rZ8HmkLZCBHQ2.svg)](https://asciinema.org/a/Tx3rZ8HmkLZCBHQ2)
+[![Watch LettyDB in action](demo-preview.png)](https://asciinema.org/a/Tx3rZ8HmkLZCBHQ2)
 
 Watch the 35-second walkthrough: create a table, insert and filter rows, delete, compact, inspect storage, and reopen the database.
 
