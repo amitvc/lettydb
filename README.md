@@ -1,6 +1,6 @@
 # LettyDB
 
-LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, allocation maps, catalog, and query executor. External libraries support the CLI, logging, formatting, and tests; the database core is implemented in this repository.
+LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, allocation maps, catalog, and query executor. Only external dependencies are added to support the CLI, logging, formatting, and tests. The core functionality of this database is implemented without any external libraries
 
 **Current milestone: [`v0.5-compact-table`](https://github.com/amitvc/lettydb/tree/v0.5-compact-table).** You can create tables, insert and query rows, delete data, compact tables, and inspect the underlying storage from the CLI. Write-ahead logging (WAL) is the current development focus. Transactions and crash recovery are not available yet.
 
