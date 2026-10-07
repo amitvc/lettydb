@@ -4,6 +4,18 @@ LettyDB is a disk-based relational database written from scratch in C++17 to exp
 
 **Current milestone: [`v0.5-compact-table`](https://github.com/amitvc/lettydb/tree/v0.5-compact-table).** You can create tables, insert and query rows, delete data, compact tables, and inspect the underlying storage from the CLI. Write-ahead logging (WAL) is the current development focus. Transactions and crash recovery are not available yet.
 
+## Terminal demo
+
+[![Watch LettyDB in action](https://asciinema.org/a/Tx3rZ8HmkLZCBHQ2.svg)](https://asciinema.org/a/Tx3rZ8HmkLZCBHQ2)
+
+Watch the 35-second walkthrough: create a table, insert and filter rows, delete, compact, inspect storage, and reopen the database.
+
+You can also download the [recording](demo.cast) and play it locally:
+
+```sh
+asciinema play demo.cast
+```
+
 ## What has been built
 
 | Component | Current capabilities |
