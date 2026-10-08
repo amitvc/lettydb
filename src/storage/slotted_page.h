@@ -74,20 +74,21 @@ struct Slot {
  *
  * Layout (PAGE_SIZE bytes):
  *
+ * @verbatim
  *  +--------------------------------------------------------------+ 0
- *  | SlottedPageHeader (32 bytes)                                 |
- *  +--------------------------------------------------------------+ sizeof(Header)
- *  | Slot[0]  = {offset: 3800, length: 50}                        |
- *  | Slot[1]  = {offset: 2100, length:  0}  ← tombstone (deleted) |
- *  | Slot[2]  = {offset: 3850, length: 100}                       |
- *  | ...                                                          |
- *  +--------------------------------------------------------------+ ← end of slot directory
+ *  | SlottedPageHeader (16 bytes)                                 |
+ *  +--------------------------------------------------------------+ 16
+ *  | Slot[0]  = {offset: 4091, length:  5}  ← "Alice"             |
+ *  | Slot[1]  = {offset: 4088, length:  0}  ← tombstone (deleted) |
+ *  | Slot[2]  = {offset: 4084, length:  4}  ← "Zara"              |
+ *  +--------------------------------------------------------------+ ← end of slot directory (28)
  *  | Free space (contiguous gap)                                   |
- *  +--------------------------------------------------------------+ free_space_pointer
+ *  +--------------------------------------------------------------+ ← free_space_pointer (4084)
  *  | Tuple bytes, grow toward smaller offsets                      |
- *  |   ... bytes for Slot[2] (100 bytes) ...                       |
- *  |   ... bytes for Slot[0] (50 bytes)  ...                       |
- *  +--------------------------------------------------------------+ PAGE_SIZE
+ *  |   ... bytes for Slot[2] (4 bytes) ...                         |
+ *  |   ... bytes for Slot[0] (5 bytes) ...                         |
+ *  +--------------------------------------------------------------+ 4096
+ *  @endverbatim
  *
  * Growth rules:
  * - Slots are appended at the front of the free gap (grow forward).
@@ -96,13 +97,13 @@ struct Slot {
  *
  * Example (insert, insert, insert, delete):
  *
- *   insert "Alice" (5 bytes) → slot[0] = {3891, 5},    free_space_pointer = 3891
- *   insert "Bob"   (3 bytes) → slot[1] = {3888, 3},    free_space_pointer = 3888
- *   insert "Zara"  (4 bytes) → slot[2] = {3884, 4},    free_space_pointer = 3884
- *   delete slot 1             → slot[1] = {3888, 0},   num_slots still 3
+ *   insert "Alice" (5 bytes) → slot[0] = {4091, 5},    free_space_pointer = 4091
+ *   insert "Bob"   (3 bytes) → slot[1] = {4088, 3},    free_space_pointer = 4088
+ *   insert "Zara"  (4 bytes) → slot[2] = {4084, 4},    free_space_pointer = 4084
+ *   delete slot 1             → slot[1] = {4088, 0},   num_slots still 3
  *
  *   A subsequent insert reuses slot 1 before growing the directory:
- *   insert "Eve"   (3 bytes) → slot[1] = {3881, 3},    free_space_pointer = 3881
+ *   insert "Eve"   (3 bytes) → slot[1] = {4081, 3},    free_space_pointer = 4081
  *   (Slot 1 pointed at "Bob"'s orphaned bytes which are now overwritten.)
  *
  * Invariants:
