@@ -286,7 +286,7 @@ std::string StorageInspector::get_page_map() {
                          SlottedPage sp = SlottedPage::from_page(p_data);
                          for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                              uint32_t tuple_size;
-                             const char* tuple_ptr = sp.get_tuple(slot, &tuple_size);
+                             const Byte* tuple_ptr = sp.get_tuple(slot, &tuple_size);
                              if (!tuple_ptr) continue;
                              try {
                                  Tuple t = Tuple::deserialize(st_schema, tuple_ptr, tuple_size);
@@ -355,7 +355,7 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
         j["header"] = {
             {"num_slots", slotted_page_hdr.num_slots},
             {"free_space_ptr", slotted_page_hdr.free_space_pointer},
-            {"lsn", slotted_page_hdr.lsn}
+            {"lsn", slotted_page_hdr.page_lsn}
         };
         
         nlohmann::json slots = nlohmann::json::array();
@@ -396,7 +396,7 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
                      uint32_t offset = slot.offset;
                      if (offset < PAGE_SIZE && offset + slot.length <= PAGE_SIZE) {
                          try {
-                             Tuple t = Tuple::deserialize(schema, raw_page->get_data() + offset, slot.length);
+                             Tuple t = Tuple::deserialize(schema, reinterpret_cast<const Byte*>(raw_page->get_data()) + offset, slot.length);
                              
                              nlohmann::json val_arr = nlohmann::json::array();
                              for(size_t k=0; k<t.size(); ++k) {

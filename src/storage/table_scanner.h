@@ -34,7 +34,7 @@ class TableScanner {
    * The pointer remains valid until the next call to next() or until the
    * scanner is destroyed.
    */
-  const char* get_tuple_data() const;
+  const Byte* get_tuple_data() const;
 
   /**
    * @brief Returns the size of the current tuple in bytes.
@@ -71,7 +71,7 @@ class TableScanner {
   uint16_t last_found_slot_ = 0;
   page_id_t current_page_id_ = INVALID_PAGE_ID;
   Page* current_page_ = nullptr;
-  const char* current_tuple_data_ = nullptr;
+  const Byte* current_tuple_data_ = nullptr;
   uint32_t current_tuple_size_ = 0;
 };
 

@@ -148,7 +148,7 @@ class CatalogManager {
    * @return true if successful.
    * @throws DbException if the insert cannot complete.
    */
-  bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
+  bool insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size);
 
   /** @brief Helper to insert a record into sys_tables. */
   bool insert_sys_table_record(const SysTableRecord& record);

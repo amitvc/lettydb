@@ -120,6 +120,12 @@ public:
 #define LOG_STORAGE_WARN(...)     LOG_WARN("[STORAGE] " __VA_ARGS__)
 #define LOG_STORAGE_ERROR(...)    LOG_ERROR("[STORAGE] " __VA_ARGS__)
 
+#define LOG_WAL_DEBUG(...)    LOG_DEBUG("[WAL] " __VA_ARGS__)
+#define LOG_WAL_INFO(...)     LOG_INFO("[WAL] " __VA_ARGS__)
+#define LOG_WAL_WARN(...)     LOG_WARN("[WAL] " __VA_ARGS__)
+#define LOG_WAL_ERROR(...)    LOG_ERROR("[WAL] " __VA_ARGS__)
+
+
 #define LOG_BPM_DEBUG(...)    	  LOG_STORAGE_DEBUG("[BPM] " __VA_ARGS__)
 #define LOG_BPM_INFO(...)         LOG_STORAGE_INFO("[BPM] " __VA_ARGS__)
 #define LOG_BPM_WARN(...)         LOG_STORAGE_WARN("[BPM] " __VA_ARGS__)

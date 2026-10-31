@@ -40,19 +40,22 @@ namespace letty {
  *  |   - Page ID of the Global Allocation Map (GAM)               |
  *  |   - Always page 8                                            |
  *  +--------------------------------------------------------------+ 20
+ *  | page_lsn (lsn_t)                                             |
+ *  |   - Lsn of log record that update the page                   |
+ *  +--------------------------------------------------------------+ 28
  *  | sys_tables_iam_page (page_id_t)                              |
  *  |   - IAM head page for system catalog: sys_tables             |
  *  |   - Allocated from a dedicated extent during bootstrap       |
- *  +--------------------------------------------------------------+ 24
+ *  +--------------------------------------------------------------+ 32
  *  | sys_columns_iam_page (page_id_t)                             |
  *  |   - IAM head page for system catalog: sys_columns            |
  *  |   - Allocated from a dedicated extent during bootstrap       |
- *  +--------------------------------------------------------------+ 28
+ *  +--------------------------------------------------------------+ 36
  *  | next_table_oid (uint16)                                      |
  *  |   - Next available OID for user tables                       |
  *  |   - System tables use OIDs 1-99, users start at 100          |
- *  +--------------------------------------------------------------+ 30
- *  | padding[4066]                                                |
+ *  +--------------------------------------------------------------+ 38
+ *  | padding[4058]                                                |
  *  |   - Zero-filled; reserved for future metadata                |
  *  |   - Ensures the header occupies exactly one full page        |
  *  +--------------------------------------------------------------+ PAGE_SIZE
@@ -72,6 +75,8 @@ struct DatabaseHeader {
   // The first GAM page is always the 1st page in extent 1. Extent 1 covers pages 8 to 15.
   page_id_t gam_page_id = FIRST_GAM_PAGE_ID;
 
+  lsn_t page_lsn = 0;
+
   // Points to the head page of an IAM dedicated for the 'sys_tables' table
   page_id_t sys_tables_iam_page = INVALID_PAGE_ID;
 
@@ -82,8 +87,8 @@ struct DatabaseHeader {
   // User tables start at 100 and increment from there.
   uint16_t next_table_oid = 100;
 
-  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam_pg_id) + 4 (sys_tables_pg_id) + 4 (sys_cols_pg_id) + 2 (next_oid) = 30 bytes
-  uint8_t padding[PAGE_SIZE - 30]; // Padding to ensure the header completely fills the page.
+  // 8 (sig) + 4 (ver) + 4 (page size) + 4 (gam_pg_id) + 8 (page_lsn) + 4 (sys_tables_pg_id) + 4 (sys_cols_pg_id) + 2 (next_oid) = 38 bytes
+  uint8_t padding[PAGE_SIZE - 38]; // Padding to ensure the header completely fills the page.
 
   DatabaseHeader() {
 	  std::memset(signature, 0, sizeof(signature));  // zero pad the entire field
@@ -122,7 +127,7 @@ inline DatabaseHeader make_database_header() {
  * @brief Global Allocation Map — tracks which extents are allocated.
  *
  * Overlays a raw 4 KB page. Each bit represents one extent (8 pages).
- * A single GAM page tracks 32,720 extents (~1 GB). Additional GAM pages
+ * A single GAM page tracks 32,656 extents (~1 GB). Additional GAM pages
  * are chained via `next_page_id` when the database grows beyond that.
  *
  * @verbatim
@@ -130,30 +135,34 @@ inline DatabaseHeader make_database_header() {
  *  | next_page_id (page_id_t)                                     |
  *  |   - Links to the next GAM page (INVALID_PAGE_ID if last)     |
  *  +--------------------------------------------------------------+ 4
+ *  | page_lsn (int64_t)                                           |
+ *  |   -Lsn of log record that update the page                    |
+ *  +--------------------------------------------------------------+ 12
  *  | first_free_bit_hint (uint16_t)                               |
  *  |   - Starting bit index for the next free-extent search       |
  *  |   - Avoids O(n) linear scan from bit 0 every time            |
- *  +--------------------------------------------------------------+ 6
- *  | bitmap[4090]                                                 |
+ *  +--------------------------------------------------------------+ 14
+ *  | bitmap[4082]                                                 |
  *  |   - 1 bit per extent: 0 = free, 1 = allocated                |
- *  |   - 4090 bytes * 8 bits = 32,720 extents                     |
- *  |   - 32,720 extents * 8 pages = 261,760 pages (~1 GB)         |
+ *  |   - 4082 bytes * 8 bits = 32,656 extents                     |
+ *  |   - 32,656 extents * 8 pages = 261,248 pages (~1 GB)         |
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
 struct GAMPage {
   // Links GAM pages together when database grows beyond single page capacity
   page_id_t next_page_id = INVALID_PAGE_ID;
+  lsn_t page_lsn = 0;
 
   /* This is an optimization in order to avoid scanning all 4090 bits.
    * We start from this bit until the end of the bitmap to find an unused gam slot.
-   * If we dont find one we rewind and search from 0 until this slot to find an empty gam page slot.
+   * If we don't find one we rewind and search from 0 until this slot to find an empty gam page slot.
    * The reason for doing this is to make sure we dont miss out on gam pages that are freed up after table or page deletions
    **/
   uint16_t first_free_bit_hint = 0;
 
   // Bitmap tracking extent allocation (1 = allocated, 0 = free)
-  uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4090 = 4096 - (4 bytes PAGE_ID + 2 bytes hint)
+  uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4082 = 4096 - (4 bytes PAGE_ID + 8 bytes lsn + 2 bytes hint)
 };
 
 static_assert(sizeof(GAMPage) == PAGE_SIZE,
@@ -162,12 +171,13 @@ static_assert(std::is_trivially_copyable_v<GAMPage>,
               "GAMPage must be safe to copy to/from page bytes");
 static_assert(std::is_standard_layout_v<GAMPage>,
               "GAMPage must have stable field offsets");
-static_assert(offsetof(GAMPage, bitmap) == 6,
+static_assert(offsetof(GAMPage, bitmap) == 14,
               "GAMPage::bitmap offset changed");
 
 inline GAMPage make_gam_page() {
   GAMPage page{};
   page.next_page_id = INVALID_PAGE_ID;
+  page.page_lsn = 0;
   page.first_free_bit_hint = 0;
   return page;
 }
@@ -186,24 +196,28 @@ inline GAMPage make_gam_page() {
  *  |   - Next IAM page in this table's chain                      |
  *  |   - INVALID_PAGE_ID if this is the last page                 |
  *  +--------------------------------------------------------------+ 4
+ *  | page_lsn (int64_t)                                           |
+ *  |    -Lsn of log record that update the page                   |
+ *  +--------------------------------------------------------------+ 12
  *  | extent_count (uint16_t)                                      |
  *  |   - Number of valid entries in extent_ids[]                  |
- *  +--------------------------------------------------------------+ 6
+ *  +--------------------------------------------------------------+ 14
  *  | reserved (uint16_t)                                          |
  *  |   - Alignment padding; always 0                              |
- *  +--------------------------------------------------------------+ 8
- *  | extent_ids[1022]                                             |
+ *  +--------------------------------------------------------------+ 16
+ *  | extent_ids[1020]                                             |
  *  |   - 4-byte extent IDs owned by this table                    |
- *  |   - 1022 entries * 4 bytes = 4088 bytes                      |
- *  |   - 1022 extents * 8 pages * 4096 bytes = ~32 MB per page    |
+ *  |   - 1020 entries * 4 bytes = 4080 bytes                      |
+ *  |   - 1020 extents * 8 pages * 4096 bytes = ~32 MB per page    |
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
 struct IAMPage {
-  page_id_t next_page_id = INVALID_PAGE_ID;  // 4 bytes
+  page_id_t next_page_id = INVALID_PAGE_ID;   // 4 bytes
+  lsn_t page_lsn = 0;	     					  // 8 bytes
   uint16_t extent_count = 0;                  // 2 bytes
   uint16_t reserved = 0;                      // 2 bytes (alignment)
-  uint32_t extent_ids[IAM_MAX_EXTENTS];       // 4088 bytes = 1022 extent IDs
+  uint32_t extent_ids[IAM_MAX_EXTENTS];       // 4080 bytes = 1020 extent IDs
   
   /**
    * @brief Add an extent to the list.
@@ -256,12 +270,13 @@ static_assert(std::is_trivially_copyable_v<IAMPage>,
               "IAMPage must be safe to copy to/from page bytes");
 static_assert(std::is_standard_layout_v<IAMPage>,
               "IAMPage must have stable field offsets");
-static_assert(offsetof(IAMPage, extent_ids) == 8,
+static_assert(offsetof(IAMPage, extent_ids) == 16,
               "IAMPage::extent_ids offset changed");
 
 inline IAMPage make_iam_page() {
   IAMPage page{};
   page.next_page_id = INVALID_PAGE_ID;
+  page.page_lsn = 0;
   page.extent_count = 0;
   page.reserved = 0;
   return page;

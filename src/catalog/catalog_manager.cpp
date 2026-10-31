@@ -126,12 +126,12 @@ void CatalogManager::initialize_data_extent(page_id_t extent_start_page) {
         if (!page) {
             throw DbException(DbErrorCode::IOError, "failed to create catalog data page " + std::to_string(page_id));
         }
-        SlottedPage::init(page->get_data());
+        SlottedPage::init(reinterpret_cast<Byte*>(page->get_data()));
         buffer_pool_.unpin_page(page_id, true);
     }
 }
 
-bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size) {
+bool CatalogManager::insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size) {
     page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, size);
 
     // No existing page has room — grow the table
@@ -183,7 +183,7 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
                 SlottedPage sp = SlottedPage::from_page(data_pg);
                 for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                     uint32_t sz;
-                    const char* data = sp.get_tuple(slot, &sz);
+                    const Byte* data = sp.get_tuple(slot, &sz);
                     if (!data) continue;
                     results.push_back(Tuple::deserialize(schema, data, sz));
                 }
@@ -200,7 +200,7 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
 
 bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
     Schema st_schema = sys_tables_schema();
-    char buf[PAGE_SIZE];
+    Byte buf[PAGE_SIZE];
     uint32_t data_size;
 
     Tuple table_tuple({static_cast<int32_t>(record.table_id),
@@ -214,7 +214,7 @@ bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
 
 bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& col) {
     Schema sc_schema = sys_columns_schema();
-    char buf[PAGE_SIZE];
+    Byte buf[PAGE_SIZE];
     uint32_t data_size;
 
     Tuple col_tuple({static_cast<int32_t>(table_oid),

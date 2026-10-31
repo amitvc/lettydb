@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include "catalog/schema.h"
+#include "config.h"
 
 namespace letty {
 
@@ -100,13 +101,17 @@ class Tuple {
   /**
    * @brief Serializes the tuple into a caller-provided buffer.
    *
-   * @param schema The table schema defining column types and offsets.
-   * @param buf    Destination buffer (must be at least buf_size bytes).
+   * It uses 2 phase approach to help track null columns and also saves space by not writing placeholders for null columns
+   * It builds a null bitmap first for columns who have null values
+   * and then in 2nd phase it writes only columns who have non-null values for them.
+   *
+   * @param schema   The table schema defining column types and order.
+   * @param buf      Destination buffer (must be at least buf_size bytes).
    * @param buf_size Size of the destination buffer in bytes.
-   * @return The size of the serialized data in bytes.
-   * @throws DbException if the tuple cannot be serialized into the given buffer.
+   * @return Number of bytes written (bitmap_size + sum of column sizes).
+   * @throws DbException if value count mismatches schema or buffer is too small.
    */
-  uint32_t serialize(const Schema& schema, char* buf, uint32_t buf_size) const;
+  uint32_t serialize(const Schema& schema, Byte *buf, uint32_t buf_size) const;
 
   /**
    * @brief Deserializes a tuple from a raw byte buffer.
@@ -116,7 +121,7 @@ class Tuple {
    * @param size Size of the data.
    * @return A Tuple with the deserialized values.
    */
-  static Tuple deserialize(const Schema& schema, const char* data, uint32_t size);
+  static Tuple deserialize(const Schema& schema, const Byte* data, uint32_t size);
 
  private:
   std::vector<Value> values_;

@@ -12,12 +12,11 @@ class Page;
  * @brief Fixed-size metadata stored at byte 0 of every slotted data page.
  *
  * This struct is laid out directly on disk. Any change to field order, types,
- * or total size (currently 16 bytes) will corrupt existing database files.
+ * or total size (currently 20 bytes) will corrupt existing database files.
  * The static_assert in slotted_page.cpp enforces the size at compile time.
  *
- * Fields are naturally aligned without #pragma pack — the first three int32_t
- * fields sit on 4-byte boundaries and the two uint16_t fields fill the
- * remaining space exactly to 16 bytes.
+ * Explicit packing stores the 8-byte LSN, two 4-byte page IDs, and two
+ * 2-byte fields in exactly 20 bytes, without padding.
  *
  * The header tracks the two moving boundaries inside the page:
  * - the slot directory grows forward from the beginning of the page
@@ -25,9 +24,10 @@ class Page;
  *
  * The space between those two regions is available for future inserts.
  */
+#pragma pack(push, 1)
 struct SlottedPageHeader {
-  // Log Sequence Number. Reserved for WAL-based crash recovery.
-  lsn_t lsn = 0;
+  // Log Sequence Number
+  lsn_t page_lsn = 0;
   // Logical page linkage. Reserved for future full-table sequential scans that
   // bypass the IAM chain (e.g., when the IAM is known to be stale).
   page_id_t next_page_id = INVALID_PAGE_ID;
@@ -62,6 +62,7 @@ struct Slot {
   uint16_t offset;
   uint16_t length;
 };
+#pragma pack(pop)
 
 /**
  * @class SlottedPage
@@ -76,12 +77,12 @@ struct Slot {
  *
  * @verbatim
  *  +--------------------------------------------------------------+ 0
- *  | SlottedPageHeader (16 bytes)                                 |
- *  +--------------------------------------------------------------+ 16
+ *  | SlottedPageHeader (20 bytes)                                 |
+ *  +--------------------------------------------------------------+ 20
  *  | Slot[0]  = {offset: 4091, length:  5}  ← "Alice"             |
  *  | Slot[1]  = {offset: 4088, length:  0}  ← tombstone (deleted) |
  *  | Slot[2]  = {offset: 4084, length:  4}  ← "Zara"              |
- *  +--------------------------------------------------------------+ ← end of slot directory (28)
+ *  +--------------------------------------------------------------+ ← end of slot directory (32)
  *  | Free space (contiguous gap)                                   |
  *  +--------------------------------------------------------------+ ← free_space_pointer (4084)
  *  | Tuple bytes, grow toward smaller offsets                      |
@@ -118,9 +119,9 @@ struct Slot {
  * pinned while SlottedPage methods are called. Constructing SlottedPage does
  * not initialize the buffer; call init() to format a fresh page.
  *
- * Implementation note: header and slot entries are loaded and stored via
- * std::memcpy rather than by reinterpret-casting pointers into the buffer.
- * This avoids alignment issues on platforms that require strict alignment.
+ * Implementation note: all on-disk reads and writes go through little-endian
+ * helpers. The header is cached in memory and persisted explicitly after
+ * mutations. Slot access uses load/store functions rather than pointer casts.
  */
 class SlottedPage {
  public:
@@ -133,7 +134,7 @@ class SlottedPage {
    *
    * @param buffer Pointer to a PAGE_SIZE page buffer.
    */
-  explicit SlottedPage(char* buffer);
+  explicit SlottedPage(Byte* buffer);
 
   /**
    * @brief Format a buffer as an empty slotted page and return a view over it.
@@ -144,7 +145,7 @@ class SlottedPage {
    *
    * @param buffer Pointer to a PAGE_SIZE page buffer.
    */
-  static SlottedPage init(char* buffer);
+  static SlottedPage init(Byte* buffer);
 
   /**
    * @brief Insert serialized tuple bytes into this page.
@@ -158,7 +159,7 @@ class SlottedPage {
    * @param tuple_size Size of the tuple in bytes.
    * @return The slot ID where the tuple was placed, or std::nullopt if no space.
    */
-  std::optional<uint16_t> insert_tuple(const char* tuple_data, uint32_t tuple_size);
+  std::optional<uint16_t> insert_tuple(const Byte* tuple_data, uint32_t tuple_size);
 
   /**
    * @brief Marks a slot as deleted (tombstone) by setting its length to zero.
@@ -186,7 +187,7 @@ class SlottedPage {
    * @param[out] size Set to the tuple's byte length on success.
    * @return Pointer to the tuple data, or nullptr if slot is invalid/deleted.
    */
-  const char* get_tuple(uint16_t slot_id, uint32_t* size) const;
+  const Byte* get_tuple(uint16_t slot_id, uint32_t* size) const;
 
   /**
    * @brief Return currently available contiguous free space in bytes.
@@ -217,15 +218,21 @@ class SlottedPage {
   bool is_empty() const;
 
   /**
-   * @brief Returns a pointer to the slot directory.
-   */
-  Slot* slotted_page_dir();
-  const Slot* slotted_page_dir() const;
-
-  /**
    * @brief Returns the number of slot entries (active + deleted).
    */
   uint16_t get_num_slots() const;
+
+  /**
+   * @brief Reads a slot entry from the page buffer in host byte order.
+   * @return The slot entry, or nullopt if the slot_id is out of range.
+   */
+  std::optional<Slot> get_slot(uint16_t slot_id) const;
+
+  /**
+   * @brief Writes a slot entry to the page buffer in little-endian order.
+   * @return true if the slot was written, false if slot_id is out of range.
+   */
+  bool set_slot(uint16_t slot_id, const Slot& slot);
 
   /**
    * @brief Convenience helper to create a SlottedPage view from a Page pointer.
@@ -233,14 +240,11 @@ class SlottedPage {
   static SlottedPage from_page(Page* page);
 
  private:
-  SlottedPageHeader load_header() const;
-  void store_header(const SlottedPageHeader& header);
-  Slot load_slot(uint16_t slot_id) const;
-  void store_slot(uint16_t slot_id, const Slot& slot);
-  static size_t slot_offset(uint16_t slot_id);
+  void store_header();
+  static size_t slot_data_offset(uint16_t slot_id);
 
-  char* data_;
-  SlottedPageHeader* header_;
+  Byte* data_;
+  SlottedPageHeader header_;
 };
 
 }

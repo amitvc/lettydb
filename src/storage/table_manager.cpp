@@ -22,7 +22,7 @@ bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple)
 }
 
 bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
-  char buf[PAGE_SIZE];
+  Byte buf[PAGE_SIZE];
   uint32_t data_size = tuple.serialize(meta.schema, buf, PAGE_SIZE);
   if (data_size == 0) {
     return false;
@@ -34,7 +34,7 @@ bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   assert(page != nullptr);
 
   SlottedPage sp = SlottedPage::from_page(page);
-  bool ok = sp.insert_tuple(buf, data_size).has_value();
+  bool ok = sp.insert_tuple(reinterpret_cast<const Byte*>(buf), data_size).has_value();
   if (!ok) {
     throw DbException(DbErrorCode::Internal, "Failed to insert tuple after ensuring target page has space");
   }
@@ -54,7 +54,7 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
 
   for (const Tuple& tuple : tuples) {
     char buf[PAGE_SIZE];
-    uint32_t data_size = tuple.serialize(meta->schema, buf, PAGE_SIZE);
+    uint32_t data_size = tuple.serialize(meta->schema, reinterpret_cast<Byte*>(buf), PAGE_SIZE);
     if (data_size == 0) {
       LOG_STORAGE_WARN("Tuple of size 0 skipped for table '{}'", table_name);
       continue;
@@ -235,9 +235,8 @@ void TableManager::survey_pages(page_id_t iam_head, const std::string& table_nam
 
         SlottedPage sp = SlottedPage::from_page(data_page);
         uint16_t live = 0;
-        auto* slot_dir = sp.slotted_page_dir();
         for (uint16_t s = 0; s < sp.get_num_slots(); ++s) {
-          if (slot_dir[s].length > 0) ++live;
+          if (auto slot = sp.get_slot(s); slot && slot->length > 0) ++live;
         }
         buffer_pool_.unpin_page(data_page_id, false);
 
@@ -261,12 +260,12 @@ int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
     if (!src) continue;
 
     SlottedPage src_sp = SlottedPage::from_page(src);
-    auto* slot_dir = src_sp.slotted_page_dir();
 
     for (uint16_t s_id = 0; s_id < src_sp.get_num_slots(); ++s_id) {
-      if (slot_dir[s_id].length == 0) continue;
+      auto slot = src_sp.get_slot(s_id);
+      if (!slot || slot->length == 0) continue;
 
-      uint32_t tuple_size = slot_dir[s_id].length;
+      uint32_t tuple_size = slot->length;
 
       int dst_idx = -1;
       for (int i = static_cast<int>(pages.size()) - 1; i >= 0; --i) {
@@ -282,7 +281,7 @@ int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
 
       SlottedPage dst_sp = SlottedPage::from_page(dst);
       uint32_t read_size = 0;
-      const char* data = src_sp.get_tuple(s_id, &read_size);
+      const Byte* data = src_sp.get_tuple(s_id, &read_size);
       if (!data) {
         buffer_pool_.unpin_page(pages[dst_idx].id, false);
         continue;
@@ -364,7 +363,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
     page_id_t new_page_id = extent_start + offset;
     Page* page = buffer_pool_.new_or_fetch_page(new_page_id);
     assert(page != nullptr);
-    SlottedPage::init(page->get_data());
+    SlottedPage::init(reinterpret_cast<Byte*>(page->get_data()));
     buffer_pool_.unpin_page(new_page_id, true);
   }
 
@@ -373,7 +372,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
 
 bool TableManager::try_insert_into_page(Page* page, const char* buf, uint32_t data_size) {
   SlottedPage sp = SlottedPage::from_page(page);
-  return sp.insert_tuple(buf, data_size).has_value();
+  return sp.insert_tuple(reinterpret_cast<const Byte*>(buf), data_size).has_value();
 }
 
 }
