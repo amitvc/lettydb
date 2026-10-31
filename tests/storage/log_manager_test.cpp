@@ -5,6 +5,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
 
 #include "common/db_exception.h"
 #include "storage/config.h"
@@ -231,6 +232,93 @@ TEST_F(LogManagerTest, TruncateResetsSegmentsAndLsn) {
   EXPECT_TRUE(std::filesystem::exists(segment_path(0)));
   EXPECT_FALSE(std::filesystem::exists(segment_path(1)));
   EXPECT_TRUE(log_mgr.read_records().empty());
+}
+
+TEST_F(LogManagerTest, LazyTimerFlushesAfterInterval) {
+  const uint32_t FLUSH_INTERVAL = 1;
+  // Use a 1ms flush interval to keep the test fast.
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, FLUSH_INTERVAL);
+
+  LogRecord rec{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 1, rec));
+  lsn_t lsn = log_mgr.append_record(rec);
+  ASSERT_NE(lsn, INVALID_LSN);
+
+  // Before the timer fires, the record is in the buffer, not on disk.
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), WAL_SIGNATURE_SIZE);
+
+  // Sleep just past the flush interval so the next append triggers a flush.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+  // Append another record — the timer should trigger a flush of the first one.
+  LogRecord rec2{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 2, rec2));
+  log_mgr.append_record(rec2);
+
+  // The first record's LSN should now be on disk.
+  EXPECT_GT(log_mgr.get_flushed_lsn(), lsn);
+}
+
+TEST_F(LogManagerTest, FlushToLsnIsIdempotent) {
+  const uint32_t FLUSH_INTERVAL = 5000;
+
+  // long interval, no auto-flush
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, FLUSH_INTERVAL);
+
+  LogRecord rec{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 1, rec));
+  lsn_t lsn = log_mgr.append_record(rec);
+  ASSERT_NE(lsn, INVALID_LSN);
+
+  // Buffer not flushed yet (timer still running).
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), WAL_SIGNATURE_SIZE);
+
+  // Append a second record so the flush target is past the initial flushed_lsn_.
+  LogRecord rec2{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 2, rec2));
+  lsn_t lsn2 = log_mgr.append_record(rec2);
+  ASSERT_NE(lsn2, INVALID_LSN);
+
+  // Explicit flush persists the entire buffer.
+  EXPECT_TRUE(log_mgr.flush_to_lsn(lsn2));
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), log_mgr.get_next_lsn());
+
+  lsn_t last_flushed_lsn = log_mgr.get_flushed_lsn();
+
+  // Calling flush_to_lsn again with any already-flushed LSN should return true immediately.
+  EXPECT_TRUE(log_mgr.flush_to_lsn(lsn2));
+  EXPECT_TRUE(log_mgr.flush_to_lsn(lsn));
+  EXPECT_TRUE(log_mgr.flush_to_lsn(WAL_SIGNATURE_SIZE));
+  EXPECT_TRUE(log_mgr.flush_to_lsn(INVALID_LSN));
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), last_flushed_lsn);
+}
+
+TEST_F(LogManagerTest, MultipleRecordsBatchedIntoSingleFlush) {
+  // Long flush interval so records accumulate in the buffer.
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, 5000);
+
+  std::vector<lsn_t> lsns;
+  for (uint64_t i = 1; i <= 10; ++i) {
+    LogRecord rec{};
+    ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, i, rec));
+    lsn_t lsn = log_mgr.append_record(rec);
+    ASSERT_NE(lsn, INVALID_LSN);
+    lsns.push_back(lsn);
+  }
+
+  // None flushed yet — all in buffer.
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), WAL_SIGNATURE_SIZE);
+
+  // Single explicit flush should persist all 10 records.
+  EXPECT_TRUE(log_mgr.flush_to_lsn(lsns.back()));
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), log_mgr.get_next_lsn());
+
+  // All records readable from disk.
+  for (size_t i = 0; i < lsns.size(); ++i) {
+    auto rec = log_mgr.read_record_at(lsns[i]);
+    ASSERT_TRUE(rec.has_value());
+    EXPECT_EQ(rec->header.tran_id, i + 1);
+  }
 }
 
 }  // namespace letty

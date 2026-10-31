@@ -1,9 +1,7 @@
-//
-// Created by Amit Chavan on 10/2/26.
-//
-
 #pragma once
 
+#include <chrono>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -15,7 +13,11 @@ namespace letty {
 
 /**
  * @class LogManager
- * @brief Manages appending, flushing, and reading WAL records across segmented WAL files.
+ * @brief Manages appending, buffering, flushing, and reading WAL records across segmented WAL files.
+ *
+ * Locking strategy:
+ * - Single std::mutex (latch_) protects all public operations.
+ * - append_record() and flush_to_lsn() acquire the latch for the duration of their work.
  *
  * The WAL is split into fixed-capacity segment files named `<file_prefix>.<segment_id>`
  * (e.g., `letty.wal.0`, `letty.wal.1`). Every segment file begins with an 8-byte
@@ -29,8 +31,10 @@ namespace letty {
  * - `file_offset = lsn % segment_size_`
  * - `lsn = (segment_id * segment_size_) + file_offset`
  *
- * When a new LogRecord being added to a WAL file does not fit the within the wal segment boundary the LogManager
- * fsyncs the current open WAL segment and then opens a new WAL segment.
+ * `append_record()` serializes records into an in-memory `log_buffer_` and flushes
+ * the batch to disk (`pwrite` + `fsync`) when `flush_to_lsn()` is called, when
+ * `flush_interval_` (`5 ms` by default) has elapsed since the buffer started
+ * accumulating records, or before rolling over to a new WAL segment.
  */
 class LogManager {
  public:
@@ -40,9 +44,12 @@ class LogManager {
    * latest segment, verifies its signature, and sets next_lsn_ from its file size.
    * @param file_prefix Path prefix for WAL segment files (e.g., "letty.wal").
    * @param segment_size Maximum size in bytes a single WAL segment file can reach before rollover.
+   * @param flush_interval_ms Time window in milliseconds before buffered records are auto-flushed.
    * @throws DbException if the segment file cannot be opened or has an invalid signature.
    */
-  explicit LogManager(std::string file_prefix, uint32_t segment_size = DEFAULT_WAL_SEGMENT_SIZE);
+  explicit LogManager(std::string file_prefix,
+                      uint32_t segment_size = DEFAULT_WAL_SEGMENT_SIZE,
+                      uint32_t flush_interval_ms = DEFAULT_WAL_FLUSH_INTERVAL_MS);
 
   /** @brief Closes the WAL file. */
   ~LogManager();
@@ -116,11 +123,16 @@ class LogManager {
   std::vector<uint32_t> list_segment_ids() const;
   int create_segment_file(uint32_t segment_id);
   int open_segment_file(uint32_t segment_id);
+  bool flush_buffer_to_disk();
   bool rollover_to_next_segment();
   std::optional<LogRecord> read_record_from_fd(int fd, lsn_t expected_lsn, uint32_t offset) const;
+  std::optional<LogRecord> read_record_from_buffer(lsn_t expected_lsn) const;
 
   std::string file_prefix_;
   uint32_t segment_size_;
+  std::chrono::milliseconds flush_interval_;
+  std::chrono::steady_clock::time_point last_flush_time_{};
+  ByteBuffer log_buffer_;
   int fd_ = -1;
   // We use the file offset where the wal records is going to be written as the log sequence number.
   // This gives us unique and monotonically increasing number. Every wal file starts with wal signature. So the starting LSN for each new file will
@@ -128,6 +140,8 @@ class LogManager {
   lsn_t next_lsn_ = WAL_SIGNATURE_SIZE;
   lsn_t flushed_lsn_ = 0;
   uint32_t current_segment_id_ = 0;
+
+  mutable std::mutex latch_;
 };
 
 }  // namespace letty

@@ -20,10 +20,15 @@
 
 namespace letty {
 
-LogManager::LogManager(std::string file_prefix, uint32_t segment_size)
-    : file_prefix_(std::move(file_prefix)), segment_size_(segment_size) {
+LogManager::LogManager(std::string file_prefix, uint32_t segment_size, uint32_t flush_interval_ms)
+    : file_prefix_(std::move(file_prefix)),
+      segment_size_(segment_size),
+      flush_interval_(flush_interval_ms),
+      last_flush_time_(std::chrono::steady_clock::now()) {
   assert(!file_prefix_.empty() && "WAL file prefix cannot be empty");
   assert(segment_size_ > WAL_SIGNATURE_SIZE && "Segment size must be larger than WAL header size");
+
+  std::lock_guard<std::mutex> lock(latch_);
 
   auto latest = find_latest_segment();
   if (!latest.has_value()) {
@@ -40,6 +45,12 @@ LogManager::LogManager(std::string file_prefix, uint32_t segment_size)
 }
 
 LogManager::~LogManager() {
+  {
+    std::lock_guard<std::mutex> lock(latch_);
+    if (fd_ != -1) {
+      flush_buffer_to_disk();
+    }
+  }
   if (fd_ != -1) {
     close(fd_);
   }
@@ -135,14 +146,37 @@ int LogManager::open_segment_file(uint32_t segment_id) {
   return fd;
 }
 
+bool LogManager::flush_buffer_to_disk() {
+  if (log_buffer_.empty()) {
+    return true;
+  }
+  if (fd_ == -1) {
+    LOG_WAL_ERROR("Cannot flush WAL buffer: file descriptor is closed");
+    return false;
+  }
+
+  uint32_t file_offset = calculate_file_offset_from_lsn(flushed_lsn_);
+  ssize_t written = pwrite(fd_, log_buffer_.data(), log_buffer_.size(), static_cast<off_t>(file_offset));
+  if (written != static_cast<ssize_t>(log_buffer_.size())) {
+    LOG_WAL_ERROR("Failed to write WAL buffer at LSN {}: {}", flushed_lsn_, std::strerror(errno));
+    return false;
+  }
+
+  if (fsync(fd_) != 0) {
+    LOG_WAL_ERROR("Failed to fsync WAL segment {}: {}", current_segment_id_, std::strerror(errno));
+    return false;
+  }
+
+  log_buffer_.clear();
+  flushed_lsn_ = next_lsn_;
+  return true;
+}
+
 bool LogManager::rollover_to_next_segment() {
-  // Close the current wal file.
+  if (!flush_buffer_to_disk()) {
+    return false;
+  }
   if (fd_ != -1) {
-    if (fsync(fd_) != 0) {
-      LOG_WAL_ERROR("Failed to fsync segment {} before rollover: {}",
-                    current_segment_id_, std::strerror(errno));
-      return false;
-    }
     close(fd_);
     fd_ = -1;
   }
@@ -155,6 +189,8 @@ bool LogManager::rollover_to_next_segment() {
 }
 
 lsn_t LogManager::append_record(LogRecord& record) {
+  std::lock_guard<std::mutex> lock(latch_);
+
   size_t record_size = sizeof(LogRecordHeader) + record.payload.size();
   if (WAL_SIGNATURE_SIZE + record_size > segment_size_) {
     LOG_WAL_ERROR("Log record size {} exceeds max segment capacity {}",
@@ -174,32 +210,60 @@ lsn_t LogManager::append_record(LogRecord& record) {
     return INVALID_LSN;
   }
 
-  uint32_t file_offset = calculate_file_offset_from_lsn(next_lsn_);
-  ssize_t written = pwrite(fd_, bytes.data(), bytes.size(), static_cast<off_t>(file_offset));
-  if (written != static_cast<ssize_t>(bytes.size())) {
-    LOG_WAL_ERROR("Failed to write WAL record at LSN {}: {}", next_lsn_, std::strerror(errno));
-    return INVALID_LSN;
+  // Start the flush timer for this batch.
+  if (log_buffer_.empty()) {
+    last_flush_time_ = std::chrono::steady_clock::now();
   }
+  log_buffer_.insert(log_buffer_.end(), bytes.begin(), bytes.end());
 
+  // This is the LSN we assigned to the WAL record. We need to return it to the caller.
   lsn_t assigned_lsn = next_lsn_;
   next_lsn_ += bytes.size();
+
+  auto elapsed = std::chrono::steady_clock::now() - last_flush_time_;
+  if (elapsed >= flush_interval_) {
+    if (!flush_buffer_to_disk()) {
+      return INVALID_LSN;
+    }
+  }
+
   return assigned_lsn;
 }
 
 bool LogManager::flush_to_lsn(lsn_t target_lsn) {
+  std::lock_guard<std::mutex> lock(latch_);
+
   if (target_lsn == INVALID_LSN || target_lsn <= flushed_lsn_) {
+	LOG_WAL_INFO("Last flushed lsn {} is greater than target lsn {}", flushed_lsn_, target_lsn);
     return true;
   }
-  if (fd_ == -1) {
-    LOG_WAL_ERROR("Cannot flush WAL: file descriptor is closed");
-    return false;
+  return flush_buffer_to_disk();
+}
+
+std::optional<LogRecord> LogManager::read_record_from_buffer(lsn_t expected_lsn) const {
+  if (expected_lsn < flushed_lsn_ || expected_lsn >= next_lsn_) {
+    return std::nullopt;
   }
-  if (fsync(fd_) != 0) {
-    LOG_WAL_ERROR("Failed to fsync WAL segment {}: {}", current_segment_id_, std::strerror(errno));
-    return false;
+
+  size_t buf_offset = static_cast<size_t>(expected_lsn - flushed_lsn_);
+  if (buf_offset + sizeof(LogRecordHeader) > log_buffer_.size()) {
+    return std::nullopt;
   }
-  flushed_lsn_ = next_lsn_;
-  return true;
+
+  LogRecordHeader hdr{};
+  std::memcpy(&hdr, log_buffer_.data() + buf_offset, sizeof(LogRecordHeader));
+  size_t total_size = sizeof(LogRecordHeader) + hdr.payload_size;
+  if (buf_offset + total_size > log_buffer_.size()) {
+    return std::nullopt;
+  }
+
+  ByteBuffer slice(log_buffer_.begin() + static_cast<std::ptrdiff_t>(buf_offset),
+                   log_buffer_.begin() + static_cast<std::ptrdiff_t>(buf_offset + total_size));
+  LogRecord record{};
+  if (!deserialize_log_record(slice, record) || record.header.lsn != expected_lsn) {
+    return std::nullopt;
+  }
+  return record;
 }
 
 std::optional<LogRecord> LogManager::read_record_from_fd(int fd, lsn_t expected_lsn, uint32_t offset) const {
@@ -236,8 +300,13 @@ std::optional<LogRecord> LogManager::read_record_from_fd(int fd, lsn_t expected_
 }
 
 std::optional<LogRecord> LogManager::read_record_at(lsn_t lsn) {
+  std::lock_guard<std::mutex> lock(latch_);
+
   if (lsn < WAL_SIGNATURE_SIZE || lsn >= next_lsn_) {
     return std::nullopt;
+  }
+  if (lsn >= flushed_lsn_) {
+    return read_record_from_buffer(lsn);
   }
 
   uint32_t seg_id = segment_id_from_lsn(lsn);
@@ -258,6 +327,9 @@ std::optional<LogRecord> LogManager::read_record_at(lsn_t lsn) {
 }
 
 bool LogManager::truncate() {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  log_buffer_.clear();
   if (fd_ != -1) {
     close(fd_);
     fd_ = -1;
@@ -275,6 +347,8 @@ bool LogManager::truncate() {
 }
 
 std::vector<LogRecord> LogManager::read_records() {
+  std::lock_guard<std::mutex> lock(latch_);
+
   std::vector<LogRecord> records;
   for (uint32_t seg_id : list_segment_ids()) {
     int seg_fd = (seg_id == current_segment_id_) ? fd_ : open_segment_file(seg_id);
@@ -285,7 +359,9 @@ std::vector<LogRecord> LogManager::read_records() {
       if (expected_lsn >= next_lsn_) {
         break;
       }
-      auto record = read_record_from_fd(seg_fd, expected_lsn, offset);
+      auto record = (expected_lsn >= flushed_lsn_)
+                        ? read_record_from_buffer(expected_lsn)
+                        : read_record_from_fd(seg_fd, expected_lsn, offset);
       if (!record.has_value()) {
         break;
       }
