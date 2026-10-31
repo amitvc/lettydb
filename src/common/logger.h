@@ -140,3 +140,8 @@ public:
 #define LOG_CATALOG_INFO(...)     LOG_INFO("[CATALOG] " __VA_ARGS__)
 #define LOG_CATALOG_WARN(...)     LOG_WARN("[CATALOG] " __VA_ARGS__)
 #define LOG_CATALOG_ERROR(...)    LOG_ERROR("[CATALOG] " __VA_ARGS__)
+
+#define LOG_TXN_DEBUG(...)        LOG_DEBUG("[TXN] " __VA_ARGS__)
+#define LOG_TXN_INFO(...)         LOG_INFO("[TXN] " __VA_ARGS__)
+#define LOG_TXN_WARN(...)         LOG_WARN("[TXN] " __VA_ARGS__)
+#define LOG_TXN_ERROR(...)        LOG_ERROR("[TXN] " __VA_ARGS__)

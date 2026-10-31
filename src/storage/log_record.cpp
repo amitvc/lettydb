@@ -187,7 +187,7 @@ namespace letty {
 
   bool serialize_log_record(const LogRecord &record, ByteBuffer &out) {
 	if (record.header.payload_size != record.payload.size()) {
-	  LOG_WAL_ERROR("Size of record payload does not match the payload size in logrecordheader");
+	  LOG_WAL_ERROR("Size of record payload does not match the payload size in LogRecordHeader");
 	  return false;
 	}
 
