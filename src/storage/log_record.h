@@ -12,14 +12,18 @@ namespace letty {
  * Identifies record type for the WAL record.
  * */
 enum class LogRecordType : uint16_t {
-  BEGIN = 0,
-  PAGE_UPDATE = 1,
-  COMMIT = 2,
-  ABORT = 3,
-  COMPENSATION = 4,
-  END = 5,
-  BEGIN_CHECKPOINT = 6,
-  END_CHECKPOINT = 7
+  BEGIN,
+  PAGE_UPDATE,
+  ALLOCATE_EXTENT,
+  DEALLOCATE_EXTENT,
+  IAM_ADD_EXTENT,
+  IAM_REMOVE_EXTENT,
+  COMMIT,
+  ABORT,
+  COMPENSATION,
+  END,
+  BEGIN_CHECKPOINT,
+  END_CHECKPOINT,
 };
 
 #pragma pack(push, 1)
@@ -47,13 +51,14 @@ static_assert(sizeof(LogRecordHeader) == 34,
  * @struct LogRecord
  * @brief In-memory representation of a WAL record: header plus payload bytes.
  *
- * Not an on-disk struct — payload is a std::vector, so it must be serialized
- * field-by-field, never memcpy'd as a whole. BEGIN/COMMIT/ABORT/END/checkpoint
+ * Not an on-disk struct. BEGIN/COMMIT/ABORT/END/checkpoint
  * records are a LogRecord with an empty payload; no separate wrapper type is
  * needed for them.
  */
 struct LogRecord {
   LogRecordHeader header;
+  // payload is a stream of bytes which are serialized field by field for each of log record structures.
+  // See serialize/deserialize methods for specialized struct types supporting different actions on the database pages.
   std::vector<Byte> payload;
 };
 
@@ -61,7 +66,7 @@ struct LogRecord {
  * @struct PagePatch
  * @brief Builder input for a PAGE_UPDATE record. One patch, before and after bytes.
  *
- * Covers things like inserting a tuple or updating a GAM/IAM page.
+ * Covers things like inserting/updating or deleting a tuple.
  * before_payload is for undo, after_payload is for redo.
  * Not an on-disk struct, so serialize field by field, don't memcpy.
  * One struct = one patch. More patches or more pages means more records.
@@ -112,4 +117,22 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 bool build_compensation_patch_record(txn_id tran_id, const CompensationPatch &patch, LogRecord &out);
 bool build_transaction_record(LogRecordType type, txn_id tran_id, LogRecord &out);
 
+/** @brief Builder input for ALLOCATE_EXTENT / DEALLOCATE_EXTENT records. */
+struct ExtentPatch {
+  page_id_t gam_page_id;
+  uint16_t bit_index;
+};
+static constexpr auto EXTENT_PATCH_SIZE = 10; // page_id_t + uint16_t
+
+/** @brief Builder input for IAM_ADD_EXTENT / IAM_REMOVE_EXTENT records. */
+struct IamPatch {
+  page_id_t iam_page_id;
+  uint32_t extent_id;
+};
+static constexpr auto IAM_PATCH_SIZE = 12; // page_id_t + uint32_t
+
+bool build_allocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out);
+bool build_deallocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out);
+bool build_iam_add_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out);
+bool build_iam_remove_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out);
 }

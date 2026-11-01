@@ -103,7 +103,6 @@ page_id_t ExtentManager::allocate_extent() {
       page_id_t next_gam_id = gam_page.next_page_id;
       buffer_pool_.unpin_page(current_gam_page_id_, false);
 
-	  //
       if (next_gam_id == INVALID_PAGE_ID) break;
       advance_gam_cursor(next_gam_id);
   }

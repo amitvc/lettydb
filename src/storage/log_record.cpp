@@ -9,6 +9,26 @@
 
 namespace letty {
 
+
+  bool is_valid_log_record_type(uint16_t raw_type) {
+	switch (static_cast<LogRecordType>(raw_type)) {
+	  case LogRecordType::BEGIN:
+	  case LogRecordType::PAGE_UPDATE:
+	  case LogRecordType::ALLOCATE_EXTENT:
+	  case LogRecordType::DEALLOCATE_EXTENT:
+	  case LogRecordType::IAM_ADD_EXTENT:
+	  case LogRecordType::IAM_REMOVE_EXTENT:
+	  case LogRecordType::COMMIT:
+	  case LogRecordType::ABORT:
+	  case LogRecordType::COMPENSATION:
+	  case LogRecordType::END:
+	  case LogRecordType::BEGIN_CHECKPOINT:
+	  case LogRecordType::END_CHECKPOINT:
+		return true;
+	}
+	return false;
+  }
+
   bool serialize_page_patch(const PagePatch &payload, ByteBuffer &out) {
 	if (payload.page_id == INVALID_PAGE_ID) {
 	  LOG_WAL_ERROR("Page id cannot be invalid");
@@ -235,7 +255,7 @@ namespace letty {
 	uint32_t payload_size = read_le32(bytes.data() + cursor);
 	cursor += sizeof(uint32_t);
 
-	if (raw_type > static_cast<uint16_t>(LogRecordType::END_CHECKPOINT)) {
+	if (!is_valid_log_record_type(raw_type)) {
 	  LOG_WAL_ERROR("Decoded LogRecordType is invalid: {}", raw_type);
 	  return false;
 	}
@@ -264,7 +284,9 @@ namespace letty {
   }
 
   bool build_transaction_record(LogRecordType type, txn_id tran_id, LogRecord &out) {
-	if (type == LogRecordType::PAGE_UPDATE || type == LogRecordType::COMPENSATION) {
+	if (type == LogRecordType::PAGE_UPDATE || type == LogRecordType::COMPENSATION ||
+		type == LogRecordType::ALLOCATE_EXTENT || type == LogRecordType::DEALLOCATE_EXTENT ||
+		type == LogRecordType::IAM_ADD_EXTENT || type == LogRecordType::IAM_REMOVE_EXTENT) {
 	  LOG_WAL_ERROR("{} is not a transaction record. Aborting writing wal record for it",
 					static_cast<uint16_t>(type));
 	  return false;
@@ -276,6 +298,98 @@ namespace letty {
 	out.header.payload_size = 0;
 	out.header.checksum = 0;
 	out.payload.clear();
+	return true;
+  }
+
+  bool build_allocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out) {
+	if (patch.gam_page_id == INVALID_PAGE_ID) {
+	  LOG_WAL_ERROR("GAM page id cannot be invalid for ALLOCATE_EXTENT");
+	  return false;
+	}
+
+	ByteBuffer payload(EXTENT_PATCH_SIZE);
+	auto cursor = 0;
+	write_le32(payload.data() + cursor, static_cast<uint32_t>(patch.gam_page_id));
+	cursor += sizeof(uint32_t);
+	write_le16(payload.data() + cursor, patch.bit_index);
+	cursor += sizeof(uint16_t);
+
+	out.header.type = LogRecordType::ALLOCATE_EXTENT;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
+	return true;
+  }
+
+  bool build_deallocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out) {
+	if (patch.gam_page_id == INVALID_PAGE_ID) {
+	  LOG_WAL_ERROR("GAM page id cannot be invalid for DEALLOCATE_EXTENT");
+	  return false;
+	}
+
+	ByteBuffer payload(EXTENT_PATCH_SIZE);
+	auto cursor = 0;
+	write_le32(payload.data() + cursor, static_cast<uint32_t>(patch.gam_page_id));
+	cursor += sizeof(uint32_t);
+	write_le16(payload.data() + cursor, patch.bit_index);
+	cursor += sizeof(uint16_t);
+
+	out.header.type = LogRecordType::DEALLOCATE_EXTENT;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
+	return true;
+  }
+
+  bool build_iam_add_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out) {
+	if (patch.iam_page_id == INVALID_PAGE_ID) {
+	  LOG_WAL_ERROR("IAM page id cannot be invalid for IAM_ADD_EXTENT");
+	  return false;
+	}
+
+	ByteBuffer payload(IAM_PATCH_SIZE);
+	auto cursor = 0;
+	write_le32(payload.data() + cursor, static_cast<uint32_t>(patch.iam_page_id));
+	cursor += sizeof(uint32_t);
+	write_le32(payload.data() + cursor, patch.extent_id);
+	cursor += sizeof(uint32_t);
+
+	out.header.type = LogRecordType::IAM_ADD_EXTENT;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
+	return true;
+  }
+
+  bool build_iam_remove_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out) {
+	if (patch.iam_page_id == INVALID_PAGE_ID) {
+	  LOG_WAL_ERROR("IAM page id cannot be invalid for IAM_REMOVE_EXTENT");
+	  return false;
+	}
+
+	ByteBuffer payload(IAM_PATCH_SIZE);
+	auto cursor = 0;
+	write_le32(payload.data() + cursor, static_cast<uint32_t>(patch.iam_page_id));
+	cursor += sizeof(uint32_t);
+	write_le32(payload.data() + cursor, patch.extent_id);
+	cursor += sizeof(uint32_t);
+
+	out.header.type = LogRecordType::IAM_REMOVE_EXTENT;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
 	return true;
   }
 
