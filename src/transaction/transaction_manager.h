@@ -69,6 +69,14 @@ class TransactionManager {
   /** @brief Returns the transaction status, or std::nullopt if not found. */
   std::optional<TransactionStatus> get_status(uint64_t txn_id) const;
 
+  /**
+   * @brief
+   * Returns the last lsn for the transaction or invalid lsn if not found
+   * @param txn_id
+   * @return last recorded lsn for wal record for this transaction.
+   */
+  lsn_t get_last_lsn(uint64_t txn_id) const;
+
   /** @brief Returns the next LSN that will be assigned (for testing/debugging). */
   lsn_t get_next_lsn() const;
 

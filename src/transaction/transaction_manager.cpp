@@ -133,6 +133,16 @@ std::optional<TransactionStatus> TransactionManager::get_status(uint64_t txn_id)
   return it->second.status;
 }
 
+lsn_t TransactionManager::get_last_lsn(uint64_t txn_id) const {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = transactions_.find(txn_id);
+  if (it == transactions_.end()) {
+    return INVALID_LSN;
+  }
+  return it->second.last_lsn;
+}
+
 lsn_t TransactionManager::get_next_lsn() const {
   return log_manager_.get_next_lsn();
 }

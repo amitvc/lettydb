@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "storage/iam_manager.h"
 #include "storage/disk_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
@@ -25,6 +27,8 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     BufferPoolManager bpm(disk_manager, 64, std::make_unique<LRUPageReplacer>());
     ExtentManager extent_manager(bpm);
     bpm.flush_all_pages();
+    LogManager log_manager(test_db_file.string() + ".wal");
+    TransactionManager txn_manager(log_manager);
     IamManager iam_manager(bpm, extent_manager);
     CatalogManager catalog(bpm, iam_manager);
     catalog.init();
@@ -34,22 +38,24 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     });
 
     catalog.create_table("test", schema);
-    auto* meta = catalog.get_table("test");
-    ASSERT_NE(meta, nullptr);
+    auto meta = catalog.get_table("test");
+    ASSERT_TRUE(meta.has_value());
 
-    TableManager table_manager(bpm, iam_manager, catalog);
+    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
 
     // Insert 500 rows across multiple extents.
     const int kRowCount = 500;
+    uint64_t txn_id = txn_manager.begin();
     for (int i = 0; i < kRowCount; ++i) {
       std::vector<Value> values;
       values.push_back(static_cast<int32_t>(i));
       Tuple t(std::move(values));
-      table_manager.insert_row(meta->name, t);
+      table_manager.insert_row(meta->get().name, t, txn_id);
     }
+    txn_manager.commit(txn_id);
 
     // Count extents before
-    page_id_t iam_head = meta->iam_page_id;
+    page_id_t iam_head = meta->get().iam_page_id;
     int extent_count_before = 0;
     page_id_t cur = iam_head;
     while (cur != INVALID_PAGE_ID) {
@@ -62,17 +68,19 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     LOG_STORAGE_INFO("Table has {} extents before compaction", extent_count_before);
 
     // Delete ALL rows via scanner
-    TableScanner scanner(bpm, meta->iam_page_id);
+    uint64_t delete_txn_id = txn_manager.begin();
+    TableScanner scanner(bpm, meta->get().iam_page_id);
     int deleted = 0;
     while (scanner.next()) {
-      table_manager.delete_row(*meta, scanner.current_page_id(), scanner.current_slot_id());
+      table_manager.delete_row(meta->get(), scanner.current_page_id(), scanner.current_slot_id(), delete_txn_id);
       deleted++;
     }
+    txn_manager.commit(delete_txn_id);
     EXPECT_EQ(deleted, kRowCount);
     LOG_STORAGE_INFO("Deleted {} rows", deleted);
 
     // Run compaction
-    table_manager.compact_extents(*meta);
+    table_manager.compact_extents(meta->get());
 
     // Count extents after — should be 0 or 1 (IAM chain may still have the head page)
     int extent_count_after = 0;
@@ -91,7 +99,7 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
         << "Expected 0 extents after deleting all rows and compacting";
 
     // Verify table is empty
-    TableScanner scanner2(bpm, meta->iam_page_id);
+    TableScanner scanner2(bpm, meta->get().iam_page_id);
     int surviving = 0;
     while (scanner2.next()) surviving++;
     EXPECT_EQ(surviving, 0);
@@ -116,14 +124,16 @@ TEST(CompactionTest, CompactNonExistentTableDoesNotCrash) {
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
     ExtentManager extent_manager(bpm);
     bpm.flush_all_pages();
+    LogManager log_manager(test_db_file.string() + ".wal");
+    TransactionManager txn_manager(log_manager);
     IamManager iam_manager(bpm, extent_manager);
     CatalogManager catalog(bpm, iam_manager);
     catalog.init();
 
-    TableManager table_manager(bpm, iam_manager, catalog);
+    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
 
-    auto* meta = catalog.get_table("does_not_exist");
-    ASSERT_EQ(meta, nullptr);
+    auto meta = catalog.get_table("does_not_exist");
+    EXPECT_FALSE(meta.has_value());
 
     LOG_STORAGE_INFO("Compact non-existent table test passed");
 
@@ -147,6 +157,8 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
     ExtentManager extent_manager(bpm);
     bpm.flush_all_pages();
+    LogManager log_manager(test_db_file.string() + ".wal");
+    TransactionManager txn_manager(log_manager);
     IamManager iam_manager(bpm, extent_manager);
     CatalogManager catalog(bpm, iam_manager);
     catalog.init();
@@ -155,17 +167,20 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
       Column("id", DataType::INTEGER, sizeof(int32_t), 0, false),
     });
     catalog.create_table("t", schema);
-    auto* meta = catalog.get_table("t");
-    TableManager table_manager(bpm, iam_manager, catalog);
+    auto meta = catalog.get_table("t");
+    ASSERT_TRUE(meta.has_value());
+    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
 
+    uint64_t txn_id = txn_manager.begin();
     for (int i = 0; i < 100; ++i) {
       std::vector<Value> values;
       values.push_back(static_cast<int32_t>(i));
       Tuple t(std::move(values));
-      table_manager.insert_row(meta->name, t);
+      table_manager.insert_row(meta->get().name, t, txn_id);
     }
+    txn_manager.commit(txn_id);
 
-    page_id_t iam_head = meta->iam_page_id;
+    page_id_t iam_head = meta->get().iam_page_id;
     int extent_count_before = 0;
     page_id_t cur = iam_head;
     while (cur != INVALID_PAGE_ID) {
@@ -175,7 +190,7 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
       cur = iam_page->next_page_id;
     }
 
-    table_manager.compact_extents(*meta);
+    table_manager.compact_extents(meta->get());
 
     int extent_count_after = 0;
     cur = iam_head;
@@ -189,7 +204,7 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     EXPECT_EQ(extent_count_after, extent_count_before);
 
     int count = 0;
-    TableScanner scanner(bpm, meta->iam_page_id);
+    TableScanner scanner(bpm, meta->get().iam_page_id);
     while (scanner.next()) count++;
     EXPECT_EQ(count, 100);
 

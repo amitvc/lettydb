@@ -13,6 +13,8 @@
 #include "sql/lexer.h"
 #include "sql/token.h"
 #include "storage/disk_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
@@ -32,12 +34,14 @@ class StressTest : public ::testing::Test {
     disk_manager_ = std::make_unique<DiskManager>(db_path_);
     bpm_ = std::make_unique<BufferPoolManager>(
         *disk_manager_, 256, std::make_unique<LRUPageReplacer>());
+    log_manager_ = std::make_unique<LogManager>(db_path_ + ".wal");
+    txn_manager_ = std::make_unique<TransactionManager>(*log_manager_);
     extent_manager_ = std::make_unique<ExtentManager>(*bpm_);
     iam_manager_ = std::make_unique<IamManager>(*bpm_, *extent_manager_);
     catalog_manager_ = std::make_unique<CatalogManager>(*bpm_, *iam_manager_);
     catalog_manager_->init();
-    table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_);
-    executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_);
+    table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_, *log_manager_, *txn_manager_);
+    executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_, *txn_manager_);
     inspector_ = std::make_unique<StorageInspector>(*bpm_, *extent_manager_, *iam_manager_, *catalog_manager_);
   }
 
@@ -48,9 +52,13 @@ class StressTest : public ::testing::Test {
     catalog_manager_.reset();
     iam_manager_.reset();
     extent_manager_.reset();
+    txn_manager_.reset();
+    log_manager_.reset();
     bpm_.reset();
     disk_manager_.reset();
     std::remove(db_path_.c_str());
+    std::remove((db_path_ + ".wal").c_str());
+    std::remove((db_path_ + ".wal.0").c_str());
   }
 
   ExecutionResult execute_sql(const std::string& sql) {
@@ -87,6 +95,8 @@ class StressTest : public ::testing::Test {
   const std::string db_path_ = "stress_test.db";
   std::unique_ptr<DiskManager> disk_manager_;
   std::unique_ptr<BufferPoolManager> bpm_;
+  std::unique_ptr<LogManager> log_manager_;
+  std::unique_ptr<TransactionManager> txn_manager_;
   std::unique_ptr<ExtentManager> extent_manager_;
   std::unique_ptr<IamManager> iam_manager_;
   std::unique_ptr<CatalogManager> catalog_manager_;
@@ -1030,12 +1040,14 @@ TEST_F(StressTest, SmallPoolForcesEvictions) {
   std::remove("stress_pool.db");
   auto disk = std::make_unique<DiskManager>("stress_pool.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
+  auto log_mgr = std::make_unique<LogManager>("stress_pool.db.wal");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
   auto ext_mgr = std::make_unique<ExtentManager>(*bpm);
   auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr);
   auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog);
-  Executor exec(*catalog, *table_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
     Lexer lexer(sql);
@@ -1086,12 +1098,14 @@ TEST_F(StressTest, DirtyPagesSurviveEviction) {
   std::remove("stress_dirty.db");
   auto disk = std::make_unique<DiskManager>("stress_dirty.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
+  auto log_mgr = std::make_unique<LogManager>("stress_dirty.db.wal");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
   auto ext_mgr = std::make_unique<ExtentManager>(*bpm);
   auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr);
   auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog);
-  Executor exec(*catalog, *table_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
     Lexer lexer(sql);
@@ -1299,18 +1313,22 @@ TEST_F(StressTest, CreateTableThenRestartDatabase) {
   catalog_manager_.reset();
   iam_manager_.reset();
   extent_manager_.reset();
+  txn_manager_.reset();
+  log_manager_.reset();
   bpm_.reset();
   disk_manager_.reset();
 
   // Reopen the database
   disk_manager_ = std::make_unique<DiskManager>(db_path_);
   bpm_ = std::make_unique<BufferPoolManager>(*disk_manager_, 256, std::make_unique<LRUPageReplacer>());
+  log_manager_ = std::make_unique<LogManager>(db_path_ + ".wal");
+  txn_manager_ = std::make_unique<TransactionManager>(*log_manager_);
   extent_manager_ = std::make_unique<ExtentManager>(*bpm_);
   iam_manager_ = std::make_unique<IamManager>(*bpm_, *extent_manager_);
   catalog_manager_ = std::make_unique<CatalogManager>(*bpm_, *iam_manager_);
   catalog_manager_->init();
-  table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_);
-  executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_);
+  table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_, *log_manager_, *txn_manager_);
+  executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_, *txn_manager_);
   inspector_ = std::make_unique<StorageInspector>(*bpm_, *extent_manager_, *iam_manager_, *catalog_manager_);
 
   // Verify the table exists and data is intact

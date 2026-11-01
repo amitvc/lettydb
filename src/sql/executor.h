@@ -10,6 +10,7 @@
 #include "storage/tuple.h"
 #include "storage/table_manager.h"
 #include "catalog/catalog_manager.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
 
@@ -76,7 +77,7 @@ struct ExecutionResult {
  */
 class Executor {
  public:
-  Executor(CatalogManager& catalog_manager, TableManager& table_manager);
+  Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager);
 
   /**
    * @brief Executes any AST node by dispatching to the appropriate handler.
@@ -88,6 +89,7 @@ class Executor {
  private:
   CatalogManager& catalog_manager_;
   TableManager& table_manager_;
+  TransactionManager& txn_manager_;
 
   /**
    * @brief Executes a CREATE TABLE statement.

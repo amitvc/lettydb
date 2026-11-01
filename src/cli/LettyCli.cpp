@@ -442,12 +442,6 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
 
         if (!result.rows.empty() || !result.column_names.empty()) {
             if (!quiet) {
-                std::string table_name;
-                if (auto* select = dynamic_cast<SelectStatementNode*>(ast.get())) {
-                    if (select->from_clause && select->from_clause->name)
-                        table_name = select->from_clause->name->name;
-                }
-                auto table_meta = table_name.empty() ? nullptr : db_engine_->get_catalog().get_table(table_name);
                 PrintResultTable(result.column_names, result.rows);
                 fmt::print("{} row(s) returned\n", result.rows.size());
             }

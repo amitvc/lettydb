@@ -235,6 +235,12 @@ class SlottedPage {
   bool set_slot(uint16_t slot_id, const Slot& slot);
 
   /**
+   * @brief Sets the page LSN and persists the header to the page buffer.
+   * @param lsn The new LSN value.
+   */
+  void set_page_lsn(lsn_t lsn);
+
+  /**
    * @brief Convenience helper to create a SlottedPage view from a Page pointer.
    */
   static SlottedPage from_page(Page* page);

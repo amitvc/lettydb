@@ -3,29 +3,33 @@
 #include "storage_def.h"
 #include "common/logger.h"
 #include "common/db_exception.h"
+#include "log_record.h"
 #include <optional>
 #include <cassert>
 
 namespace letty {
 
-TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager)
+TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager,
+                           LogManager& log_manager, TransactionManager& txn_manager)
   : buffer_pool_(buffer_pool),
     iam_manager_(iam_manager),
-    catalog_manager_(catalog_manager) {}
+    catalog_manager_(catalog_manager),
+    log_manager_(log_manager),
+    txn_manager_(txn_manager) {}
 
-bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
-  auto* meta = catalog_manager_.get_table(table_name);
+std::optional<uint16_t> TableManager::insert_row(const std::string& table_name, const Tuple& tuple, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return insert_row(*meta, tuple);
+  return insert_row(meta.value(), tuple, txn_id);
 }
 
-bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
-  Byte buf[PAGE_SIZE];
-  uint32_t data_size = tuple.serialize(meta.schema, buf, PAGE_SIZE);
+std::optional<uint16_t> TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple, uint64_t txn_id) {
+  Byte serialized_tuple[PAGE_SIZE];
+  uint32_t data_size = tuple.serialize(meta.schema, serialized_tuple, PAGE_SIZE);
   if (data_size == 0) {
-    return false;
+    return std::nullopt;
   }
 
   page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size);
@@ -34,86 +38,69 @@ bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
   assert(page != nullptr);
 
   SlottedPage sp = SlottedPage::from_page(page);
-  bool ok = sp.insert_tuple(reinterpret_cast<const Byte*>(buf), data_size).has_value();
-  if (!ok) {
+  auto slot_id = sp.insert_tuple(reinterpret_cast<const Byte*>(serialized_tuple), data_size);
+  if (!slot_id.has_value()) {
+    buffer_pool_.unpin_page(target_page_id, false);
     throw DbException(DbErrorCode::Internal, "Failed to insert tuple after ensuring target page has space");
   }
-  buffer_pool_.unpin_page(target_page_id, ok);
-  return ok;
+
+  PagePatch patch;
+  patch.page_id = target_page_id;
+  patch.offset = slot_id.value();
+  patch.after_payload = ByteBuffer(serialized_tuple, serialized_tuple + data_size);
+
+  LogRecord wal_record{};
+  if (!build_page_patch_record(txn_id, patch, wal_record)) {
+    buffer_pool_.unpin_page(target_page_id, false);
+    throw DbException(DbErrorCode::Internal, "Failed to build WAL record for insert");
+  }
+  wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+
+  lsn_t lsn = log_manager_.append_record(wal_record);
+  if (lsn == INVALID_LSN) {
+    buffer_pool_.unpin_page(target_page_id, false);
+    throw DbException(DbErrorCode::Internal, "Failed to append WAL record for insert");
+  }
+
+  txn_manager_.record_lsn(txn_id, lsn);
+  sp.set_page_lsn(lsn);
+
+  buffer_pool_.unpin_page(target_page_id, true);
+  return slot_id;
 }
 
-uint32_t TableManager::insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples) {
-  auto* meta = catalog_manager_.get_table(table_name);
+uint32_t TableManager::insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
-  Page* page = nullptr;
-  page_id_t target_page_id = INVALID_PAGE_ID;
-  uint32_t inserted = 0;
-
+  uint32_t inserted_cnt = 0;
   for (const Tuple& tuple : tuples) {
-    char buf[PAGE_SIZE];
-    uint32_t data_size = tuple.serialize(meta->schema, reinterpret_cast<Byte*>(buf), PAGE_SIZE);
-    if (data_size == 0) {
-      LOG_STORAGE_WARN("Tuple of size 0 skipped for table '{}'", table_name);
-      continue;
-    }
-
-    if (page && try_insert_into_page(page, buf, data_size)) {
-      ++inserted;
-      continue;
-    }
-
-    // Release old page and acquire new
-    if (page) {
-      buffer_pool_.unpin_page(target_page_id, inserted > 0);
-      page = nullptr;
-      target_page_id = INVALID_PAGE_ID;
-    }
-
-    page_id_t new_page = acquire_page_for_insert(meta->iam_page_id, data_size);
-    Page* new_frame = buffer_pool_.fetch_page(new_page);
-    if (!new_frame) {
-      LOG_STORAGE_ERROR("Failed to acquire page for table '{}'", table_name);
-      break;
-    }
-
-    if (try_insert_into_page(new_frame, buf, data_size)) {
-      page = new_frame;
-      target_page_id = new_page;
-      ++inserted;
-    } else {
-      // Page had no room even after allocation
-      buffer_pool_.unpin_page(new_page, false);
-      break;
+    if (insert_row(meta->get().name, tuple, txn_id).has_value()) {
+      ++inserted_cnt;
     }
   }
-
-  if (page) {
-    buffer_pool_.unpin_page(target_page_id, true);
-  }
-
-  return inserted;
+  return inserted_cnt;
 }
 
 TableScanner TableManager::scan_table(const std::string& table_name) {
-  auto* meta = catalog_manager_.get_table(table_name);
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return TableScanner(buffer_pool_, meta->iam_page_id);
+  return TableScanner(buffer_pool_, meta->get().iam_page_id);
 }
 
-bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id) {
-  auto* meta = catalog_manager_.get_table(table_name);
-  if (!meta) {
+bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
+  if (!meta.has_value()) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return delete_row(*meta, page_id, slot_id);
+  return delete_row(meta->get(), page_id, slot_id, txn_id);
 }
 
-bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id) {
+bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id, uint64_t txn_id) {
   Page* page = buffer_pool_.fetch_page(page_id);
   if (!page) {
     LOG_STORAGE_ERROR("Failed to fetch page {} for delete on table '{}'", page_id, meta.name);
@@ -121,7 +108,33 @@ bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint
   }
 
   SlottedPage sp = SlottedPage::from_page(page);
+  uint32_t tuple_size = 0;
+  const Byte* tuple_data = sp.get_tuple(slot_id, &tuple_size);
+  if (!tuple_data) {
+    buffer_pool_.unpin_page(page_id, false);
+    return false;
+  }
+
+  ByteBuffer before_image(tuple_data, tuple_data + tuple_size);
+
   bool ok = sp.delete_tuple(slot_id);
+  if (ok) {
+    PagePatch patch;
+    patch.page_id = page_id;
+    patch.offset = slot_id;
+    patch.before_payload = std::move(before_image);
+
+    LogRecord wal_record{};
+    if (build_page_patch_record(txn_id, patch, wal_record)) {
+      wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+      lsn_t lsn = log_manager_.append_record(wal_record);
+      if (lsn != INVALID_LSN) {
+        txn_manager_.record_lsn(txn_id, lsn);
+        sp.set_page_lsn(lsn);
+      }
+    }
+  }
+
   buffer_pool_.unpin_page(page_id, ok);
   return ok;
 }
@@ -368,11 +381,6 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
   }
 
   return extent_start;
-}
-
-bool TableManager::try_insert_into_page(Page* page, const char* buf, uint32_t data_size) {
-  SlottedPage sp = SlottedPage::from_page(page);
-  return sp.insert_tuple(reinterpret_cast<const Byte*>(buf), data_size).has_value();
 }
 
 }

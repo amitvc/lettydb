@@ -373,9 +373,9 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
                 schema = CatalogManager::sys_columns_schema();
                 has_schema = true;
             } else {
-                const TableMetadata* table_meta = catalog_manager_.get_table(owner);
-                if (table_meta) {
-                    schema = table_meta->schema;
+                auto table_meta = catalog_manager_.get_table(owner);
+                if (table_meta.has_value()) {
+                    schema = table_meta->get().schema;
                     has_schema = true;
                 }
             }
@@ -437,16 +437,16 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
 }
 
 std::string StorageInspector::get_iam_chain(const std::string& table_name) {
-    const TableMetadata* meta = catalog_manager_.get_table(table_name);
-    if (!meta) return "{}";
-    
+    auto meta = catalog_manager_.get_table(table_name);
+    if (!meta.has_value()) return "{}";
+
     nlohmann::json chain = nlohmann::json::array();
-    
-    page_id_t curr = meta->iam_page_id;
+
+    page_id_t curr = meta->get().iam_page_id;
     while(curr != INVALID_PAGE_ID) {
         Page* p = buffer_pool_.fetch_page(curr);
         if(!p) break;
-        
+
         auto iam = load_page_layout<IAMPage>(p);
         nlohmann::json node;
         node["page_id"] = curr;

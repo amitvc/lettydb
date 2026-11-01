@@ -48,12 +48,12 @@ TEST_F(CreateTableTest, CreateAndGetTable) {
 
   // Get table metadata
   auto table_meta = catalog_manager->get_table("users");
-  ASSERT_NE(table_meta, nullptr);
-  EXPECT_EQ(table_meta->name, "users");
-  EXPECT_GT(table_meta->table_id, 0); // Should be valid table_id
-  
+  ASSERT_TRUE(table_meta.has_value());
+  EXPECT_EQ(table_meta->get().name, "users");
+  EXPECT_GT(table_meta->get().table_id, 0); // Should be valid table_id
+
   // Verify columns loaded correctly
-  auto& loaded_cols = table_meta->schema.get_columns();
+  auto& loaded_cols = table_meta->get().schema.get_columns();
   ASSERT_EQ(loaded_cols.size(), 2);
   
   EXPECT_EQ(loaded_cols[0].get_name(), "id");

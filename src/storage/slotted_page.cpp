@@ -186,4 +186,9 @@ bool SlottedPage::delete_tuple(uint16_t slot_id) {
   return true;
 }
 
+void SlottedPage::set_page_lsn(lsn_t lsn) {
+  header_.page_lsn = lsn;
+  store_header();
+}
+
 }

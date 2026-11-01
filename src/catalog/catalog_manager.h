@@ -84,7 +84,7 @@ class CatalogManager {
    * @param name The name of the table.
    * @return Pointer to TableMetadata if found, nullptr otherwise.
    */
-  const TableMetadata* get_table(const std::string& name);
+  const  std::optional<std::reference_wrapper<TableMetadata>> get_table(const std::string& name);
 
   /**
    * @brief Checks if a table with the given name exists.

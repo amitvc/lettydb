@@ -231,12 +231,12 @@ bool CatalogManager::table_exists(const std::string& name) {
     return table_cache_.find(name) != table_cache_.end();
 }
 
-const TableMetadata* CatalogManager::get_table(const std::string& name) {
+const std::optional<std::reference_wrapper<TableMetadata>> CatalogManager::get_table(const std::string& name) {
     auto it = table_cache_.find(name);
     if (it != table_cache_.end()) {
-        return &it->second;
+        return std::ref(it->second);
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 bool CatalogManager::create_table(const std::string& name, const Schema& schema) {

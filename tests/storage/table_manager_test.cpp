@@ -2,6 +2,8 @@
 #include <cstdio>
 #include "storage/table_manager.h"
 #include "storage/disk_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
@@ -18,11 +20,13 @@ class TableManagerTest : public ::testing::Test {
     disk_manager = std::make_unique<DiskManager>("test_table_manager.db");
     bpm = std::make_unique<BufferPoolManager>(
         *disk_manager, 64, std::make_unique<LRUPageReplacer>());
+    log_manager = std::make_unique<LogManager>("test_table_manager.db.wal");
+    txn_manager = std::make_unique<TransactionManager>(*log_manager);
     extent_manager = std::make_unique<ExtentManager>(*bpm);
     iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
     catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager);
     catalog_manager->init();
-    table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager);
+    table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager, *log_manager, *txn_manager);
   }
 
   void TearDown() override {
@@ -30,13 +34,19 @@ class TableManagerTest : public ::testing::Test {
     catalog_manager.reset();
     iam_manager.reset();
     extent_manager.reset();
+    txn_manager.reset();
+    log_manager.reset();
     bpm.reset();
     disk_manager.reset();
     std::remove("test_table_manager.db");
+    std::remove("test_table_manager.db.wal");
+    std::remove("test_table_manager.db.wal.0");
   }
 
   std::unique_ptr<DiskManager> disk_manager;
   std::unique_ptr<BufferPoolManager> bpm;
+  std::unique_ptr<LogManager> log_manager;
+  std::unique_ptr<TransactionManager> txn_manager;
   std::unique_ptr<ExtentManager> extent_manager;
   std::unique_ptr<IamManager> iam_manager;
   std::unique_ptr<CatalogManager> catalog_manager;
@@ -51,10 +61,12 @@ TEST_F(TableManagerTest, InsertAndScanMixedTable) {
 
   ASSERT_TRUE(catalog_manager->create_table("users", schema));
 
+  uint64_t txn_id = txn_manager->begin();
   Tuple row1(std::vector<Value>{int32_t{1}, std::string{"Alice"}});
   Tuple row2(std::vector<Value>{int32_t{2}, std::string{"Bob"}});
-  ASSERT_TRUE(table_manager->insert_row("users", row1));
-  ASSERT_TRUE(table_manager->insert_row("users", row2));
+  ASSERT_TRUE(table_manager->insert_row("users", row1, txn_id));
+  ASSERT_TRUE(table_manager->insert_row("users", row2, txn_id));
+  txn_manager->commit(txn_id);
 
   std::vector<Tuple> results;
   TableScanner scanner = table_manager->scan_table("users");
@@ -76,21 +88,23 @@ TEST_F(TableManagerTest, InsertAndScanWithTuple) {
   columns.emplace_back("score", DataType::DOUBLE, 8, 4);
   columns.emplace_back("active", DataType::BOOLEAN, 1, 12);
   Schema schema(columns);
-  
+
   ASSERT_TRUE(catalog_manager->create_table("scores", schema));
-  
+
   // Insert using Tuple
+  uint64_t txn_id = txn_manager->begin();
   Tuple tuple1;
   tuple1.add_value(int32_t(100));
   tuple1.add_value(double(95.5));
   tuple1.add_value(true);
-  ASSERT_TRUE(table_manager->insert_row("scores", tuple1));
-  
+  ASSERT_TRUE(table_manager->insert_row("scores", tuple1, txn_id));
+
   Tuple tuple2;
   tuple2.add_value(int32_t(200));
   tuple2.add_value(double(87.3));
   tuple2.add_value(false);
-  ASSERT_TRUE(table_manager->insert_row("scores", tuple2));
+  ASSERT_TRUE(table_manager->insert_row("scores", tuple2, txn_id));
+  txn_manager->commit(txn_id);
   
   // Scan and verify
   std::vector<Tuple> results;
@@ -122,9 +136,9 @@ TEST_F(TableManagerTest, ScanNonExistentTable) {
 TEST_F(TableManagerTest, InsertIntoNonExistentTable) {
   Tuple tuple;
   tuple.add_value(int32_t(1));
-  
+
   EXPECT_THROW({
-    table_manager->insert_row("nonexistent", tuple);
+    table_manager->insert_row("nonexistent", tuple, 1);
   }, DbException);
 }
 
@@ -133,15 +147,17 @@ TEST_F(TableManagerTest, MultipleInsertsFillPage) {
   std::vector<Column> columns;
   columns.emplace_back("id", DataType::INTEGER, 4, 0);
   Schema schema(columns);
-  
+
   ASSERT_TRUE(catalog_manager->create_table("numbers", schema));
-  
+
+  uint64_t txn_id = txn_manager->begin();
   // Insert 100 rows
   for (int i = 0; i < 100; ++i) {
     Tuple tuple;
     tuple.add_value(int32_t(i));
-    ASSERT_TRUE(table_manager->insert_row("numbers", tuple));
+    ASSERT_TRUE(table_manager->insert_row("numbers", tuple, txn_id));
   }
+  txn_manager->commit(txn_id);
   
   // Scan and verify count
   TableScanner scanner = table_manager->scan_table("numbers");

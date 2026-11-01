@@ -38,19 +38,19 @@ TEST_F(CatalogBootstrapTest, CheckSystemTablesExist) {
   
   // Verify sys_tables exists
   auto table_meta = catalog_manager->get_table("sys_tables");
-  ASSERT_NE(table_meta, nullptr);
-  EXPECT_EQ(table_meta->table_id, SYS_TABLES_TABLE_OID);
-  EXPECT_EQ(table_meta->name, "sys_tables");
-  
+  ASSERT_TRUE(table_meta.has_value());
+  EXPECT_EQ(table_meta->get().table_id, SYS_TABLES_TABLE_OID);
+  EXPECT_EQ(table_meta->get().name, "sys_tables");
+
   // Verify sys_columns exists
   auto col_meta = catalog_manager->get_table("sys_columns");
-  ASSERT_NE(col_meta, nullptr);
-  EXPECT_EQ(col_meta->table_id, SYS_COLUMNS_TABLE_OID);
-  EXPECT_EQ(col_meta->name, "sys_columns");
-  
-  // Verify we can find a non-existent table (should be null)
+  ASSERT_TRUE(col_meta.has_value());
+  EXPECT_EQ(col_meta->get().table_id, SYS_COLUMNS_TABLE_OID);
+  EXPECT_EQ(col_meta->get().name, "sys_columns");
+
+  // Verify we can find a non-existent table (should be nullopt)
   auto no_table = catalog_manager->get_table("ghost_table");
-  EXPECT_EQ(no_table, nullptr);
+  EXPECT_FALSE(no_table.has_value());
 }
 
 }
