@@ -47,35 +47,33 @@ void CatalogManager::load_all_tables() {
     for (const auto& row : scan_system_table(sys_tables_iam_, st_schema)) {
         uint32_t oid = static_cast<uint32_t>(std::get<int32_t>(row.get_value(0)));
         std::string name = std::get<std::string>(row.get_value(1));
-        page_id_t iam = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
+        page_id_t iam_page_id = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
 
         auto it = columns_by_oid.find(oid);
         std::vector<Column> cols = (it != columns_by_oid.end()) ? std::move(it->second) : std::vector<Column>{};
 
-        table_cache_.emplace(name, TableMetadata{oid, name, Schema(std::move(cols)), iam});
+        table_cache_.emplace(name, TableMetadata{oid, name, Schema(std::move(cols)), iam_page_id});
     }
 }
 
 void CatalogManager::bootstrap() {
-    Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!db_header_frame) {
+    PageGuard db_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    if (!db_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page during catalog bootstrap");
     }
-    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
+    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_guard);
 
     page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME);
     page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME);
 
     if (sys_tables_iam == INVALID_PAGE_ID || sys_columns_iam == INVALID_PAGE_ID) {
-        buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
         throw DbException(DbErrorCode::NoSpace, "failed to create system catalog IAM chains");
     }
 
     // Update header in-place and cache
     db_header_page.sys_tables_iam_page = sys_tables_iam;
     db_header_page.sys_columns_iam_page = sys_columns_iam;
-    store_page_layout(db_header_frame, db_header_page);
-    buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
+    store_page_layout(db_header_guard, db_header_page);
 
     sys_tables_iam_ = sys_tables_iam;
     sys_columns_iam_ = sys_columns_iam;
@@ -105,29 +103,28 @@ void CatalogManager::bootstrap() {
 }
 
 uint32_t CatalogManager::get_next_table_id() {
-    Page* raw_header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!raw_header_page) {
+    PageGuard raw_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    if (!raw_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page for table_id allocation");
     }
-    auto db_header_page = load_page_layout<DatabaseHeader>(raw_header_page);
+    auto db_header_page = load_page_layout<DatabaseHeader>(raw_header_guard);
 
     uint16_t table_oid = db_header_page.next_table_oid;
     db_header_page.next_table_oid++;
 
-    store_page_layout(raw_header_page, db_header_page);
-    buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
+    store_page_layout(raw_header_guard, db_header_page);
     return table_oid;
 }
 
 void CatalogManager::initialize_data_extent(page_id_t extent_start_page) {
     for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t page_id = extent_start_page + offset;
-        Page* page = buffer_pool_.new_or_fetch_page(page_id);
-        if (!page) {
+        PageGuard guard = buffer_pool_.allocate_page_guard(page_id);
+        if (!guard) {
             throw DbException(DbErrorCode::IOError, "failed to create catalog data page " + std::to_string(page_id));
         }
-        SlottedPage::init(reinterpret_cast<Byte*>(page->get_data()));
-        buffer_pool_.unpin_page(page_id, true);
+        SlottedPage::init(reinterpret_cast<Byte*>(guard.get_data()));
+        guard.mark_dirty();
     }
 }
 
@@ -144,19 +141,18 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const Byte* data, 
         initialize_data_extent(target_page_id);
     }
 
-    Page* page = buffer_pool_.fetch_page(target_page_id);
-    if (!page) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(target_page_id);
+    if (!guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch catalog data page");
     }
 
-    SlottedPage sp = SlottedPage::from_page(page);
+    SlottedPage sp = SlottedPage::from_page(guard);
     auto slot_id = sp.insert_tuple(data, size);
     if (!slot_id) {
-        buffer_pool_.unpin_page(target_page_id, false);
         throw DbException(DbErrorCode::NoSpace, "failed to insert catalog tuple into page " + std::to_string(target_page_id));
     }
 
-    buffer_pool_.unpin_page(target_page_id, true);
+    guard.mark_dirty();
     return true;
 }
 
@@ -177,17 +173,16 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
             for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
                 page_id_t data_page_id = extent_start + offset;
 
-                Page* data_pg = buffer_pool_.fetch_page(data_page_id);
-                if (!data_pg) continue;
+                PageGuard data_guard = buffer_pool_.fetch_page_guard(data_page_id);
+                if (!data_guard) continue;
 
-                SlottedPage sp = SlottedPage::from_page(data_pg);
+                SlottedPage sp = SlottedPage::from_page(data_guard);
                 for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                     uint32_t sz;
                     const Byte* data = sp.get_tuple(slot, &sz);
                     if (!data) continue;
                     results.push_back(Tuple::deserialize(schema, data, sz));
                 }
-                buffer_pool_.unpin_page(data_page_id, false);
             }
         }
 

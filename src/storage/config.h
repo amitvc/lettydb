@@ -43,12 +43,12 @@ namespace letty {
   static constexpr int HEADER_PAGE_ID = 0;
   static constexpr page_id_t FIRST_GAM_PAGE_ID = 8; // First gam page is allocated in extent 1 which covers page 8-15
 
-  // GAMPage layout: next_page_id (4 bytes) + first_free_hint (2 bytes) + bitmap
-  static constexpr size_t GAM_BITMAP_ARRAY_SIZE = PAGE_SIZE - 14; // 4 bytes PAGE_ID + 8 bytes lsn + 2 bytes hint
-  static constexpr size_t GAM_MAX_BITS = GAM_BITMAP_ARRAY_SIZE * 8;  // 32,720 bits
+  // GAMPage layout: next_page_id (4) + page_lsn (8) + first_free_bit_hint (2) + bitmap (4082)
+  static constexpr size_t GAM_BITMAP_ARRAY_SIZE = PAGE_SIZE - 14; // 4082 bytes
+  static constexpr size_t GAM_MAX_BITS = GAM_BITMAP_ARRAY_SIZE * 8;  // 32,656 bits (extents per GAM page)
   
-  // IAMPage layout: next_page_id (4) + extent_count (2) + reserved (2) + extent_ids[]
-  // Header = 8 bytes, remaining = 4088 bytes, each extent_id = 4 bytes
+  // IAMPage layout: next_page_id (4) + page_lsn (8) + extent_count (2) + reserved (2) + extent_ids[] (4080)
+  // Header = 16 bytes, remaining = 4080 bytes, each extent_id = 4 bytes
   static constexpr size_t IAM_PAGE_HEADER_SIZE = 16;
   static constexpr size_t IAM_MAX_EXTENTS = (PAGE_SIZE - IAM_PAGE_HEADER_SIZE) / sizeof(uint32_t); // 1020 extents
   

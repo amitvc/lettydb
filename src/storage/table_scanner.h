@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "buffer/buffer_pool_manager.h"
+#include "buffer/page_guard.h"
 #include "storage_def.h"
 
 namespace letty {
@@ -70,7 +71,7 @@ class TableScanner {
   uint16_t current_slot_ = 0;
   uint16_t last_found_slot_ = 0;
   page_id_t current_page_id_ = INVALID_PAGE_ID;
-  Page* current_page_ = nullptr;
+  PageGuard current_page_guard_;
   const Byte* current_tuple_data_ = nullptr;
   uint32_t current_tuple_size_ = 0;
 };

@@ -511,3 +511,67 @@ TEST_F(BufferPoolManagerTest, FlushAllCountsEachDirtyPage) {
   auto stats = bpm->get_cache_stats();
   EXPECT_EQ(stats.flushes, 3);
 }
+
+// ─── PageGuard RAII Tests ──────────────────────────────────────────
+
+TEST_F(BufferPoolManagerTest, PageGuardUnpinsOnDestruction) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(10, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  {
+    PageGuard guard = bpm->fetch_page_guard(10);
+    ASSERT_TRUE(guard.is_valid());
+    EXPECT_EQ(guard.get_page_id(), 10);
+    EXPECT_EQ(guard.get_page()->get_pin_count(), 1);
+  }
+
+  // After guard scope exits, page should be unpinned (pin count 0)
+  Page* page = bpm->fetch_page(10);
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page->get_pin_count(), 1);
+  bpm->unpin_page(10, false);
+}
+
+TEST_F(BufferPoolManagerTest, PageGuardMarksDirtyExplicitly) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(12, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+  EXPECT_CALL(mock_disk_, write_page(12, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  {
+    PageGuard guard = bpm->fetch_page_guard(12);
+    char* data = guard.get_data();
+    EXPECT_FALSE(guard.is_dirty());
+    std::memcpy(data, "GUARD", 5);
+    guard.mark_dirty();
+    EXPECT_TRUE(guard.is_dirty());
+  }
+
+  EXPECT_TRUE(bpm->flush_page(12));
+}
+
+TEST_F(BufferPoolManagerTest, PageGuardMoveSemantics) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(15, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  PageGuard guard2;
+  {
+    PageGuard guard1 = bpm->fetch_page_guard(15);
+    EXPECT_TRUE(guard1.is_valid());
+    guard2 = std::move(guard1);
+    EXPECT_FALSE(guard1.is_valid());
+    EXPECT_TRUE(guard2.is_valid());
+    EXPECT_EQ(guard2.get_page_id(), 15);
+  }
+
+  EXPECT_TRUE(guard2.is_valid());
+  EXPECT_EQ(guard2.get_page()->get_pin_count(), 1);
+  guard2.drop();
+  EXPECT_FALSE(guard2.is_valid());
+}

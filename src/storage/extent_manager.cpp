@@ -35,20 +35,17 @@ void ExtentManager::initialize_new_db() {
   LOG_STORAGE_INFO("Initializing new database file");
 
   // Since we are starting with empty db file we first initialize the DB header page and write it back to file.
-  Page* header_frame = buffer_pool_.new_page(HEADER_PAGE_ID);
-  if (!header_frame) {
-	throw DbException(DbErrorCode::IOError, "Failed to create header page during initialization");
+  PageGuard header_guard = buffer_pool_.allocate_page_guard(HEADER_PAGE_ID);
+  if (!header_guard) {
+    throw DbException(DbErrorCode::IOError, "Failed to create header page during initialization");
   }
   auto header = make_database_header();
-  store_page_layout(header_frame, header);
-   // sys_tables_iam_page and sys_columns_iam_page remain INVALID_PAGE_ID
-  // They will be set during CatalogManager::bootstrap()
-  buffer_pool_.unpin_page(HEADER_PAGE_ID, true); // BPM will write any pages we mark dirty to disk
+  store_page_layout(header_guard, header, 0); // offset 0 because database header is written at beginning of the db file.
 
   // Prepare the first GAM Page (Page 8 — first page of extent 1)
-  Page* gam_frame = buffer_pool_.new_page(FIRST_GAM_PAGE_ID);
-  if (!gam_frame) {
-	throw DbException(DbErrorCode::IOError, "Failed to create GAM page during initialization");
+  PageGuard gam_guard = buffer_pool_.allocate_page_guard(FIRST_GAM_PAGE_ID);
+  if (!gam_guard) {
+    throw DbException(DbErrorCode::IOError, "Failed to create GAM page during initialization");
   }
   auto gam_page = make_gam_page();
 
@@ -56,53 +53,46 @@ void ExtentManager::initialize_new_db() {
   Bitmap gam_bitmap(gam_page.bitmap, GAM_MAX_BITS);
   gam_bitmap.set(0);  // Extent 0 (pages 0-7)   - database header
   gam_bitmap.set(1);  // Extent 1 (pages 8-15)  - GAM pages
-  store_page_layout(gam_frame, gam_page);
-  buffer_pool_.unpin_page(FIRST_GAM_PAGE_ID, true);
+  store_page_layout(gam_guard, gam_page);
 
   // Writing the last page of each reserved extent forces the OS to extend the file
   // to cover all pages in that extent, so subsequent reads won't return garbage.
   constexpr page_id_t EXTENT_0_LAST_PAGE = EXTENT_SIZE - 1;        // page 7
   constexpr page_id_t EXTENT_1_LAST_PAGE = 2 * EXTENT_SIZE - 1;    // page 15
 
-  Page* extent0_end_frame = buffer_pool_.new_page(EXTENT_0_LAST_PAGE);
-  if (!extent0_end_frame) {
-	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 0 during initialization");
+  PageGuard extent0_guard = buffer_pool_.allocate_page_guard(EXTENT_0_LAST_PAGE);
+  if (!extent0_guard) {
+    throw DbException(DbErrorCode::IOError, "Failed to reserve extent 0 during initialization");
   }
   buffer_pool_.flush_page(EXTENT_0_LAST_PAGE);
-  buffer_pool_.unpin_page(EXTENT_0_LAST_PAGE, false);
 
-  // new_page marks the frame dirty, so flush_page writes the zeroed page and
-  Page* extent1_end_frame = buffer_pool_.new_page(EXTENT_1_LAST_PAGE);
-  if (!extent1_end_frame) {
-	throw DbException(DbErrorCode::IOError, "Failed to reserve extent 1 (GAM extent) during initialization");
+  PageGuard extent1_guard = buffer_pool_.allocate_page_guard(EXTENT_1_LAST_PAGE);
+  if (!extent1_guard) {
+    throw DbException(DbErrorCode::IOError, "Failed to reserve extent 1 (GAM extent) during initialization");
   }
   buffer_pool_.flush_page(EXTENT_1_LAST_PAGE);
-  buffer_pool_.unpin_page(EXTENT_1_LAST_PAGE, false);
 }
 
 page_id_t ExtentManager::allocate_extent() {
   std::lock_guard<std::mutex> guard(lock_);
 
   while (true) {
-      Page* gam_frame = buffer_pool_.fetch_page(current_gam_page_id_);
-      if (!gam_frame) {
+      PageGuard gam_guard = buffer_pool_.fetch_page_guard(current_gam_page_id_);
+      if (!gam_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(current_gam_page_id_) +
                                                 " during extent allocation");
       }
 
-      auto gam_page = load_page_layout<GAMPage>(gam_frame);
+      auto gam_page = load_page_layout<GAMPage>(gam_guard);
 
       page_id_t allocated_page_id = allocate_extent_in_gam_page(&gam_page);
 
       if (allocated_page_id != INVALID_PAGE_ID) {
-          store_page_layout(gam_frame, gam_page);
-          buffer_pool_.unpin_page(current_gam_page_id_, true);
+          store_page_layout(gam_guard, gam_page);
           return allocated_page_id;
       }
 
       page_id_t next_gam_id = gam_page.next_page_id;
-      buffer_pool_.unpin_page(current_gam_page_id_, false);
-
       if (next_gam_id == INVALID_PAGE_ID) break;
       advance_gam_cursor(next_gam_id);
   }
@@ -111,18 +101,17 @@ page_id_t ExtentManager::allocate_extent() {
   create_and_link_new_gam();
 
   // Try one last time from the newly created GAM page (guaranteed to have space)
-  Page* gam_frame = buffer_pool_.fetch_page(current_gam_page_id_);
-  if (!gam_frame) {
+  PageGuard gam_guard = buffer_pool_.fetch_page_guard(current_gam_page_id_);
+  if (!gam_guard) {
     throw DbException(DbErrorCode::IOError, "failed to fetch newly created GAM page " +
                                             std::to_string(current_gam_page_id_));
   }
 
-  auto gam_page = load_page_layout<GAMPage>(gam_frame);
+  auto gam_page = load_page_layout<GAMPage>(gam_guard);
   page_id_t result = allocate_extent_in_gam_page(&gam_page);
   if (result != INVALID_PAGE_ID) {
-    store_page_layout(gam_frame, gam_page);
+    store_page_layout(gam_guard, gam_page);
   }
-  buffer_pool_.unpin_page(current_gam_page_id_, result != INVALID_PAGE_ID);
   return result;
 }
 
@@ -144,15 +133,8 @@ bool ExtentManager::create_and_link_new_gam() {
   page_id_t new_gam_page_id = fits_in_current_extent ? candidate : buffer_pool_.get_file_size_in_pages();
 
   // Initialize the new GAM page in the buffer pool
-  Page* new_gam_frame = buffer_pool_.new_page(new_gam_page_id);
-  if (!new_gam_frame) {
-    new_gam_frame = buffer_pool_.fetch_page(new_gam_page_id);
-    if (new_gam_frame && (new_gam_frame->get_pin_count() != 1 || new_gam_frame->is_dirty())) {
-      buffer_pool_.unpin_page(new_gam_page_id, false);
-      new_gam_frame = nullptr;
-    }
-  }
-  if (!new_gam_frame) {
+  PageGuard new_gam_guard = buffer_pool_.allocate_page_guard(new_gam_page_id);
+  if (!new_gam_guard) {
     throw DbException(DbErrorCode::IOError, "failed to create new GAM page " + std::to_string(new_gam_page_id));
   }
   auto new_gam_page = make_gam_page();
@@ -164,19 +146,17 @@ bool ExtentManager::create_and_link_new_gam() {
     Bitmap new_gam_bitmap(new_gam_page.bitmap, GAM_MAX_BITS);
     new_gam_bitmap.set(0);
   }
-  store_page_layout(new_gam_frame, new_gam_page);
-  buffer_pool_.unpin_page(new_gam_page_id, true);
+  store_page_layout(new_gam_guard, new_gam_page);
 
   // Link the old GAM page to the new one
-  Page* old_gam_frame = buffer_pool_.fetch_page(current_gam_page_id);
-  if (!old_gam_frame) {
+  PageGuard old_gam_guard = buffer_pool_.fetch_page_guard(current_gam_page_id);
+  if (!old_gam_guard) {
       throw DbException(DbErrorCode::IOError, "failed to load current GAM page " +
                                               std::to_string(current_gam_page_id) + " to link new GAM");
   }
-  auto old_gam_page = load_page_layout<GAMPage>(old_gam_frame);
+  auto old_gam_page = load_page_layout<GAMPage>(old_gam_guard);
   old_gam_page.next_page_id = new_gam_page_id;
-  store_page_layout(old_gam_frame, old_gam_page);
-  buffer_pool_.unpin_page(current_gam_page_id, true);
+  store_page_layout(old_gam_guard, old_gam_page);
 
   // Advance cursor to the new page
   advance_gam_cursor(new_gam_page_id);
@@ -218,13 +198,13 @@ page_id_t ExtentManager::find_gam_page_at_index(size_t gam_page_index) {
 }
 
 bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index) {
-    Page* gam_frame = buffer_pool_.fetch_page(gam_page_id);
-    if (!gam_frame) {
+    PageGuard gam_guard = buffer_pool_.fetch_page_guard(gam_page_id);
+    if (!gam_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(gam_page_id) +
                                                 " for bit clearing");
     }
 
-    auto gam_page = load_page_layout<GAMPage>(gam_frame);
+    auto gam_page = load_page_layout<GAMPage>(gam_guard);
     Bitmap bitmap(gam_page.bitmap, GAM_MAX_BITS);
     bitmap.clear(bit_in_gam);
 
@@ -232,8 +212,7 @@ bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam,
         gam_page.first_free_bit_hint = bit_in_gam;
         LOG_STORAGE_DEBUG("Rewound first_free_hint to {} in GAM page {}", bit_in_gam, gam_page_id);
     }
-    store_page_layout(gam_frame, gam_page);
-    buffer_pool_.unpin_page(gam_page_id, true);
+    store_page_layout(gam_guard, gam_page);
 
     // Rewind cursor so future allocations can reuse this freed extent
     if (gam_page_index < current_gam_chain_index_) {

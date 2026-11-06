@@ -31,7 +31,7 @@ struct TableMetadata {
   Schema schema;
 
   /**
-   * @brief Head page of the table's IAM chain.
+   * @brief Table's first IAM page id.
    *
    * The storage layer follows this chain to find the extents and data pages
    * belonging to the table.

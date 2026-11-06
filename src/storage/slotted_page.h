@@ -2,6 +2,7 @@
 
 #include "storage_def.h"
 #include "config.h"
+#include "buffer/page_guard.h"
 #include <optional>
 
 namespace letty {
@@ -244,6 +245,13 @@ class SlottedPage {
    * @brief Convenience helper to create a SlottedPage view from a Page pointer.
    */
   static SlottedPage from_page(Page* page);
+
+  /**
+   * @brief Convenience helper to create a SlottedPage view from a PageGuard.
+   */
+  static SlottedPage from_page(PageGuard& guard) {
+    return SlottedPage(reinterpret_cast<Byte*>(guard.get_data()));
+  }
 
  private:
   void store_header();

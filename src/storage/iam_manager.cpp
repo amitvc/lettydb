@@ -17,22 +17,14 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
     throw DbException(DbErrorCode::NoSpace, "failed to allocate extent for IAM chain of table '" + table_name + "'");
   }
 
-  Page* iam_frame = buffer_pool_.new_page(iam_page_id);
-  if (!iam_frame) {
-    iam_frame = buffer_pool_.fetch_page(iam_page_id);
-    if (iam_frame && (iam_frame->get_pin_count() != 1 || iam_frame->is_dirty())) {
-      buffer_pool_.unpin_page(iam_page_id, false);
-      iam_frame = nullptr;
-    }
-  }
-  if (!iam_frame) {
+  PageGuard guard = buffer_pool_.allocate_page_guard(iam_page_id);
+  if (!guard) {
     throw DbException(DbErrorCode::IOError, "failed to create IAM page " + std::to_string(iam_page_id) +
                                             " for table '" + table_name + "'");
   }
 
   auto iam_page = make_iam_page();
-  store_page_layout(iam_frame, iam_page);
-  buffer_pool_.unpin_page(iam_page_id, true);
+  store_page_layout(guard, iam_page);
 
   LOG_STORAGE_INFO("Created new IAM chain for table {} at page {}", table_name, iam_page_id);
   return iam_page_id;
@@ -40,12 +32,10 @@ page_id_t IamManager::create_iam_chain(const std::string &table_name) {
 
 
 bool IamManager::page_has_space(page_id_t page_id, uint32_t required) {
-  Page* data_frame = buffer_pool_.fetch_page(page_id);
-  if (!data_frame) return false;
-  SlottedPage sp = SlottedPage::from_page(data_frame);
-  bool has_space = sp.get_free_space() >= required;
-  buffer_pool_.unpin_page(page_id, false);
-  return has_space;
+  PageGuard guard = buffer_pool_.fetch_page_guard(page_id);
+  if (!guard) return false;
+  SlottedPage sp = SlottedPage::from_page(guard);
+  return sp.get_free_space() >= required;
 }
 
 page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id) {
@@ -61,33 +51,24 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
     throw DbException(DbErrorCode::NoSpace, "failed to allocate new IAM page");
   }
 
-  Page* new_iam_frame = buffer_pool_.new_page(new_iam_page_id);
-  if (!new_iam_frame) {
-    new_iam_frame = buffer_pool_.fetch_page(new_iam_page_id);
-    if (new_iam_frame && (new_iam_frame->get_pin_count() != 1 || new_iam_frame->is_dirty())) {
-      buffer_pool_.unpin_page(new_iam_page_id, false);
-      new_iam_frame = nullptr;
-    }
-  }
-  if (!new_iam_frame) {
+  PageGuard new_iam_guard = buffer_pool_.allocate_page_guard(new_iam_page_id);
+  if (!new_iam_guard) {
     throw DbException(DbErrorCode::IOError, "failed to create new IAM page " + std::to_string(new_iam_page_id));
   }
   auto iam_page = make_iam_page();
   iam_page.add_extent(extent_id);
-  store_page_layout(new_iam_frame, iam_page);
-  buffer_pool_.unpin_page(new_iam_page_id, true);
+  store_page_layout(new_iam_guard, iam_page);
 
   if (prev_iam_page == INVALID_PAGE_ID) return new_iam_page_id;
 
-  Page* prev_iam_frame = buffer_pool_.fetch_page(prev_iam_page);
-  if (!prev_iam_frame) {
+  PageGuard prev_iam_guard = buffer_pool_.fetch_page_guard(prev_iam_page);
+  if (!prev_iam_guard) {
     throw DbException(DbErrorCode::IOError, "failed to fetch previous IAM page " + std::to_string(prev_iam_page) +
                                             " while linking IAM chain");
   }
-  auto prev_iam = load_page_layout<IAMPage>(prev_iam_frame);
+  auto prev_iam = load_page_layout<IAMPage>(prev_iam_guard);
   prev_iam.next_page_id = new_iam_page_id;
-  store_page_layout(prev_iam_frame, prev_iam);
-  buffer_pool_.unpin_page(prev_iam_page, true);
+  store_page_layout(prev_iam_guard, prev_iam);
 
   LOG_STORAGE_INFO("Created new IAM page {} and added extent {}", new_iam_page_id, extent_id);
   return new_iam_page_id;
@@ -112,25 +93,22 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id) {
   page_id_t prev_iam_page = INVALID_PAGE_ID;
 
   while (current_iam_page != INVALID_PAGE_ID) {
-    Page* iam_frame = buffer_pool_.fetch_page(current_iam_page);
-    if (!iam_frame) {
+    PageGuard iam_guard = buffer_pool_.fetch_page_guard(current_iam_page);
+    if (!iam_guard) {
       throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(current_iam_page));
     }
 
-    auto iam_page = load_page_layout<IAMPage>(iam_frame);
+    auto iam_page = load_page_layout<IAMPage>(iam_guard);
     if (iam_page.has_space()) {
       iam_page.add_extent(extent_id);
-      store_page_layout(iam_frame, iam_page);
-      buffer_pool_.unpin_page(current_iam_page, true);
+      store_page_layout(iam_guard, iam_page);
       LOG_STORAGE_DEBUG("Added extent {} to IAM page {}", extent_id, current_iam_page);
       table_page_hints_[iam_head_page_id] = extent_start_page;
       return extent_start_page;
     }
 
     prev_iam_page = current_iam_page;
-    page_id_t next_iam = iam_page.next_page_id;
-    buffer_pool_.unpin_page(current_iam_page, false);
-    current_iam_page = next_iam;
+    current_iam_page = iam_page.next_page_id;
   }
 
   // No IAM page has space — allocate a new one and link it
@@ -222,34 +200,31 @@ bool IamManager::remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t ext
   page_id_t prev_iam_page = INVALID_PAGE_ID;
 
   while (current_iam_page != INVALID_PAGE_ID) {
-    Page* iam_frame = buffer_pool_.fetch_page(current_iam_page);
-    if (!iam_frame) return false;
+    PageGuard iam_guard = buffer_pool_.fetch_page_guard(current_iam_page);
+    if (!iam_guard) return false;
 
-    auto iam_page = load_page_layout<IAMPage>(iam_frame);
+    auto iam_page = load_page_layout<IAMPage>(iam_guard);
     page_id_t next_iam = iam_page.next_page_id;
 
     if (!iam_page.remove_extent(extent_id)) {
-      buffer_pool_.unpin_page(current_iam_page, false);
       prev_iam_page = current_iam_page;
       current_iam_page = next_iam;
       continue;
     }
 
-    store_page_layout(iam_frame, iam_page);
-    buffer_pool_.unpin_page(current_iam_page, true);
+    store_page_layout(iam_guard, iam_page);
 
     // Deallocate the extent from the GAM so the system can reuse it.
     page_id_t extent_start = first_page_of_extent(extent_id);
     extent_manager_.deallocate_extent(extent_start);
 
     if (iam_page.extent_count == 0 && current_iam_page != iam_head_page_id) {
-      Page* prev_frame = buffer_pool_.fetch_page(prev_iam_page);
-      if (!prev_frame) return false;
+      PageGuard prev_guard = buffer_pool_.fetch_page_guard(prev_iam_page);
+      if (!prev_guard) return false;
 
-      auto prev_iam = load_page_layout<IAMPage>(prev_frame);
+      auto prev_iam = load_page_layout<IAMPage>(prev_guard);
       prev_iam.next_page_id = next_iam;
-      store_page_layout(prev_frame, prev_iam);
-      buffer_pool_.unpin_page(prev_iam_page, true);
+      store_page_layout(prev_guard, prev_iam);
     }
 
     table_page_hints_.erase(iam_head_page_id);

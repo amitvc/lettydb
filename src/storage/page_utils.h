@@ -2,6 +2,7 @@
 #pragma once
 
 #include "buffer/buffer_pool_manager.h"
+#include "buffer/page_guard.h"
 #include "config.h"
 #include "slotted_page.h"
 #include "storage_def.h"
@@ -270,6 +271,36 @@ template <> inline void store_page_layout<Slot>(Page* page, const Slot& value, s
   store_slot_to_bytes(reinterpret_cast<Byte*>(page->get_data()) + offset, value);
 }
 
+/**
+ * @brief Reads an on-disk struct from a PageGuard buffer at the given offset.
+ *
+ * @tparam T The on-disk struct type to read.
+ * @param guard The PageGuard wrapping the page.
+ * @param offset Byte offset within the page (default 0).
+ * @return A value-initialized T filled with the page's bytes.
+ */
+template <typename T>
+T load_page_layout(const PageGuard& guard, size_t offset = 0) {
+  assert(guard.is_valid());
+  return load_page_layout<T>(const_cast<Page*>(guard.get_page()), offset);
+}
+
+/**
+ * @brief Writes an on-disk struct into a PageGuard buffer at the given offset.
+ *
+ * Automatically marks the PageGuard dirty.
+ *
+ * @tparam T The on-disk struct type to write.
+ * @param guard The PageGuard wrapping the page.
+ * @param value The struct whose bytes will be copied into the page.
+ * @param offset Byte offset within the page (default 0).
+ */
+template <typename T>
+void store_page_layout(PageGuard& guard, const T& value, size_t offset = 0) {
+  assert(guard.is_valid());
+  store_page_layout<T>(guard.get_page(), value, offset);
+  guard.mark_dirty();
+}
 
 /**
  * @brief Fetches a page, reads a trivially copyable struct from it, and unpins.
@@ -286,14 +317,12 @@ template <> inline void store_page_layout<Slot>(Page* page, const Slot& value, s
  */
 template <typename T>
 std::optional<T> load_page_value(BufferPoolManager& buffer_pool, page_id_t page_id) {
-  Page* frame = buffer_pool.fetch_page(page_id);
-  if (!frame) {
+  PageGuard guard = buffer_pool.fetch_page_guard(page_id);
+  if (!guard) {
     return std::nullopt;
   }
 
-  T value = load_page_layout<T>(frame);
-  buffer_pool.unpin_page(page_id, false);
-  return value;
+  return load_page_layout<T>(guard);
 }
 
 }

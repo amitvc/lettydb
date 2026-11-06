@@ -1,5 +1,67 @@
 #pragma once
 
+/**
+ * @file storage_def.h
+ * @brief On-disk metadata page structures and directory hierarchy for LettyDB.
+ *
+ * LettyDB writes all data to a single database file .db extension. The data is divided into fixed size
+ * blocks called Page. Currently, the page size is fixed at 4 KB. We also group a sequence of Pages together.
+ * This is called an Extent. Currently size of extent is 32 KB with 8 pages.
+ *
+ * Three metadata page types form a two-level directory hierarchy:
+ *
+ * 1. DatabaseHeader (Page 0):
+ *    The fixed entry point of the database file. Stores the file signature,
+ *    format version, the root GAM page ID (always Page 8), and the IAM head
+ *    page IDs for the system catalog tables (`sys_tables` and `sys_columns`).
+ *    This page allows the storage engine to bootstrap and understand what tables are defined and their schema.
+ *
+ * 2. GAMPage (Global Allocation Map — Database-Wide Extent Directory):
+ *    Tracks which 8-page extents across the entire database file are free (0)
+ *    or allocated (1) using a bitmap. Page 8 is the first GAM page; additional
+ *    GAM pages are chained via `next_page_id` when the database grows beyond
+ *    32,656 extents (~1.045 GB).
+ *
+ * 3. IAMPage (Index Allocation Map — Per-Table Extent Directory):
+ *    Each table (system or user) has its own linked list of IAM pages. An
+ *    IAMPage stores a compact array of up to 1,020 `extent_ids` owned by that
+ *    specific table (~32.6 MB of table data per IAM page).
+ *
+ *  Reference - You can read more about this here -
+ *  https://learn.microsoft.com/en-us/sql/relational-databases/pages-and-extents-architecture-guide?view=sql-server-ver17
+ *
+ * @verbatim
+ * High-Level Directory Hierarchy
+ *
+ *  +-------------------------------------------------------------------+
+ *  | Page 0: DatabaseHeader (Superblock)                               |
+ *  |   gam_page_id          = 8  ----------------------------------+   |
+ *  |   sys_tables_iam_page  = 16 -----------------+                |   |
+ *  |   sys_columns_iam_page = 24                  |                |   |
+ *  +----------------------------------------------|----------------|---+
+ *                                                 |                |
+ *        +----------------------------------------+                |
+ *        v                                                         v
+ *  +---------------------------------------+    +---------------------------------------+
+ *  | Page 16: IAMPage ("sys_tables" Dir)   |    | Page 8: GAMPage (Global Extent Dir)   |
+ *  |   extent_ids = [ 4 ]                  |    |   bit 0 = 1 (Extent 0: Header)        |
+ *  |   next_page_id = INVALID_PAGE_ID      |    |   bit 1 = 1 (Extent 1: GAM)           |
+ *  +-------------------+-------------------+    |   bit 2 = 1 (Extent 2: sys_tables IAM)|
+ *                      |                        |   bit 3 = 1 (Extent 3: sys_cols IAM)  |
+ *                      v                        |   bit 4 = 1 (Extent 4: sys_tables data|
+ *  +---------------------------------------+    |   bit 5 = 1 (Extent 5: "users" IAM)   |
+ *  | Extent 4 (Pages 32..39): sys_tables   |    |   bit 6 = 1 (Extent 6: "users" data)  |
+ *  |   Row: {oid=100, name="users", iam=40}|    |   bit 7 = 0 (FREE)                    |
+ *  +-------------------+-------------------+    +---------------------------------------+
+ *                      |
+ *                      v
+ *  +---------------------------------------+
+ *  | Page 40: IAMPage ("users" Table Dir)  |
+ *  |   extent_ids = [ 6, ... ]             | ---> Extent 6 (Pages 48..55): SlottedPages
+ *  +---------------------------------------+
+ * @endverbatim
+ */
+
 #include "config.h"
 #include "sql/utils.h"
 #include <cstddef>
@@ -9,7 +71,6 @@
 
 namespace letty {
 
-
 // Disable compiler-inserted alignment padding so struct layouts match
 // their on-disk byte offsets exactly.
 // See: https://learn.microsoft.com/en-us/cpp/preprocessor/pack
@@ -17,54 +78,49 @@ namespace letty {
 
 /**
  * @struct DatabaseHeader
- * @brief Page 0 — the entry point for all database metadata.
+ * @brief Page 0 — the superblock and entry point for all database metadata.
  *
  * Always the first page in the database file. Has a fixed layout and
- * occupies exactly one page (PAGE_SIZE bytes). All other pages are reachable by
- * following pointers stored in this page.
+ * occupies exactly one page (PAGE_SIZE = 4096 bytes). All other pages are
+ * reachable by following page IDs stored in this header.
  *
  * @verbatim
  * Byte Offsets (PAGE_SIZE = 4096)
  *
  *  +--------------------------------------------------------------+ 0
  *  | signature[8]   ("LETTYDB\0")                                 |
- *  |   - Identifies this file as a Letty database                 |
+ *  |   - Identifies this file as a LettyDB database               |
  *  +--------------------------------------------------------------+ 8
- *  | version (uint32)                                             |
+ *  | version (uint32_t)                                           |
  *  |   - Database file format version (currently 1)               |
  *  +--------------------------------------------------------------+ 12
- *  | page_size (uint32)                                           |
- *  |   - Size of each page in bytes (e.g., 4096)                  |
+ *  | page_size (uint32_t)                                         |
+ *  |   - Size of each page in bytes (4096)                        |
  *  +--------------------------------------------------------------+ 16
  *  | gam_page_id (page_id_t)                                      |
- *  |   - Page ID of the Global Allocation Map (GAM)               |
- *  |   - Always page 8                                            |
+ *  |   - Head page ID of the Global Allocation Map (always 8)     |
  *  +--------------------------------------------------------------+ 20
  *  | page_lsn (lsn_t)                                             |
- *  |   - Lsn of log record that update the page                   |
+ *  |   - LSN of the last WAL record that modified Page 0          |
  *  +--------------------------------------------------------------+ 28
  *  | sys_tables_iam_page (page_id_t)                              |
- *  |   - IAM head page for system catalog: sys_tables             |
- *  |   - Allocated from a dedicated extent during bootstrap       |
+ *  |   - IAM head page for system catalog table: sys_tables       |
  *  +--------------------------------------------------------------+ 32
  *  | sys_columns_iam_page (page_id_t)                             |
- *  |   - IAM head page for system catalog: sys_columns            |
- *  |   - Allocated from a dedicated extent during bootstrap       |
+ *  |   - IAM head page for system catalog table: sys_columns      |
  *  +--------------------------------------------------------------+ 36
- *  | next_table_oid (uint16)                                      |
- *  |   - Next available OID for user tables                       |
- *  |   - System tables use OIDs 1-99, users start at 100          |
+ *  | next_table_oid (uint16_t)                                    |
+ *  |   - Next available OID for user tables (starts at 100)       |
  *  +--------------------------------------------------------------+ 38
  *  | padding[4058]                                                |
  *  |   - Zero-filled; reserved for future metadata                |
- *  |   - Ensures the header occupies exactly one full page        |
- *  +--------------------------------------------------------------+ PAGE_SIZE
+ *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  *
  * @par Invariants
- *  - database header page is always 0
- *  - Layout is fixed and backward-compatible via `version`
- *  - All other pages are bootstrapped through this page
+ *  - DatabaseHeader is always stored at HEADER_PAGE_ID (Page 0)
+ *  - Layout is fixed and versioned via `version`
+ *  - All system and user tables are bootstrapped from this page
  */
 struct DatabaseHeader {
   char signature[8];
@@ -124,45 +180,45 @@ inline DatabaseHeader make_database_header() {
 
 /**
  * @struct GAMPage
- * @brief Global Allocation Map — tracks which extents are allocated.
+ * @brief Global Allocation Map — the database-wide extent allocation directory.
  *
- * Overlays a raw 4 KB page. Each bit represents one extent (8 pages).
- * A single GAM page tracks 32,656 extents (~1 GB). Additional GAM pages
- * are chained via `next_page_id` when the database grows beyond that.
+ * Overlays a 4 KB page. Each bit in `bitmap` represents one 8-page (32 KB) extent
+ * in the database file: 0 = free, 1 = allocated.
+ * A single GAM page tracks 32,656 extents (261,248 pages, ~1.045 GB). Additional
+ * GAM pages are chained via `next_page_id` when the database grows beyond that.
  *
  * @verbatim
+ * Byte Offsets (PAGE_SIZE = 4096)
+ *
  *  +--------------------------------------------------------------+ 0
- *  | next_page_id (page_id_t)                                     |
- *  |   - Links to the next GAM page (INVALID_PAGE_ID if last)     |
+ *  | next_page_id (page_id_t, 4 bytes)                            |
+ *  |   - Next GAM page in the chain (INVALID_PAGE_ID if last)     |
  *  +--------------------------------------------------------------+ 4
- *  | page_lsn (int64_t)                                           |
- *  |   -Lsn of log record that update the page                    |
+ *  | page_lsn (lsn_t, 8 bytes)                                    |
+ *  |   - LSN of the last WAL record that modified this GAM page   |
  *  +--------------------------------------------------------------+ 12
- *  | first_free_bit_hint (uint16_t)                               |
- *  |   - Starting bit index for the next free-extent search       |
- *  |   - Avoids O(n) linear scan from bit 0 every time            |
+ *  | first_free_bit_hint (uint16_t, 2 bytes)                      |
+ *  |   - Bit index in [0, 32656) to start the next free search    |
+ *  |   - Avoids scanning from bit 0 on every extent allocation    |
  *  +--------------------------------------------------------------+ 14
- *  | bitmap[4082]                                                 |
+ *  | bitmap[4082] (4082 bytes = 32,656 bits)                      |
  *  |   - 1 bit per extent: 0 = free, 1 = allocated                |
- *  |   - 4082 bytes * 8 bits = 32,656 extents                     |
- *  |   - 32,656 extents * 8 pages = 261,248 pages (~1 GB)         |
+ *  |   - 32,656 extents * 8 pages * 4096 bytes = ~1.045 GB        |
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
 struct GAMPage {
-  // Links GAM pages together when database grows beyond single page capacity
   page_id_t next_page_id = INVALID_PAGE_ID;
   lsn_t page_lsn = 0;
 
-  /* This is an optimization in order to avoid scanning all 4090 bits.
-   * We start from this bit until the end of the bitmap to find an unused gam slot.
-   * If we don't find one we rewind and search from 0 until this slot to find an empty gam page slot.
-   * The reason for doing this is to make sure we dont miss out on gam pages that are freed up after table or page deletions
-   **/
+  // Starting bit index (0..GAM_MAX_BITS-1) for the next free-extent search.
+  // ExtentManager scans from this hint to GAM_MAX_BITS, then wraps around to
+  // [0, hint) to reclaim extents freed by table drops or compaction.
   uint16_t first_free_bit_hint = 0;
 
-  // Bitmap tracking extent allocation (1 = allocated, 0 = free)
-  uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE]; // 4082 = 4096 - (4 bytes PAGE_ID + 8 bytes lsn + 2 bytes hint)
+  // Extent allocation bitmap (1 = allocated, 0 = free).
+  // 4082 bytes = 4096 - (4 bytes next_page_id + 8 bytes page_lsn + 2 bytes hint).
+  uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE];
 };
 
 static_assert(sizeof(GAMPage) == PAGE_SIZE,
@@ -184,31 +240,33 @@ inline GAMPage make_gam_page() {
 
 /**
  * @struct IAMPage
- * @brief Index Allocation Map — tracks which extents belong to one table.
+ * @brief Index Allocation Map — the per-table extent directory.
  *
- * Stores extent IDs as a compact list rather than a sparse bitmap.
- * Each table has its own IAM chain; pages are chained via `next_page_id`
- * when a single page's 1022-entry list is exhausted (~32 MB per IAM page).
+ * Each table owns its own linked list of IAM pages. Rather than a sparse
+ * bitmap covering the entire database, an IAMPage stores a compact array of
+ * the `extent_ids` (0..extent_count-1) allocated to that specific table.
+ * When a single IAM page's 1,020-entry array is full (~32.6 MB of table data),
+ * another IAM page is chained via `next_page_id`.
  *
  * @verbatim
+ * Byte Offsets (PAGE_SIZE = 4096)
+ *
  *  +--------------------------------------------------------------+ 0
- *  | next_page_id (page_id_t)                                     |
- *  |   - Next IAM page in this table's chain                      |
- *  |   - INVALID_PAGE_ID if this is the last page                 |
+ *  | next_page_id (page_id_t, 4 bytes)                            |
+ *  |   - Next IAM page in this table's chain (or INVALID_PAGE_ID) |
  *  +--------------------------------------------------------------+ 4
- *  | page_lsn (int64_t)                                           |
- *  |    -Lsn of log record that update the page                   |
+ *  | page_lsn (lsn_t, 8 bytes)                                    |
+ *  |   - LSN of the last WAL record that modified this IAM page   |
  *  +--------------------------------------------------------------+ 12
- *  | extent_count (uint16_t)                                      |
- *  |   - Number of valid entries in extent_ids[]                  |
+ *  | extent_count (uint16_t, 2 bytes)                             |
+ *  |   - Number of valid entries in extent_ids[0..extent_count-1] |
  *  +--------------------------------------------------------------+ 14
- *  | reserved (uint16_t)                                          |
- *  |   - Alignment padding; always 0                              |
+ *  | reserved (uint16_t, 2 bytes)                                 |
+ *  |   - Reserved padding to align extent_ids[] at byte 16        |
  *  +--------------------------------------------------------------+ 16
- *  | extent_ids[1020]                                             |
+ *  | extent_ids[1020] (1020 * 4 bytes = 4080 bytes)               |
  *  |   - 4-byte extent IDs owned by this table                    |
- *  |   - 1020 entries * 4 bytes = 4080 bytes                      |
- *  |   - 1020 extents * 8 pages * 4096 bytes = ~32 MB per page    |
+ *  |   - 1020 extents * 8 pages * 4096 bytes = ~32.6 MB per page  |
  *  +--------------------------------------------------------------+ 4096
  * @endverbatim
  */
@@ -285,11 +343,10 @@ inline IAMPage make_iam_page() {
 
 /**
  * @class Bitmap
- * @brief A helper class to manipulate raw bits stored in the bitmap array inside the GAMPage class.
+ * @brief Non-owning bit-array view over `GAMPage::bitmap`.
  *
- * This class provides an abstraction over raw byte arrays to allow for easy setting, clearing,
- * and checking of individual bits. This is primarily used for managing Allocation Maps (GAM/IAM),
- * where each bit represents the status (allocated/free) of an extent (for GAM) or page (for IAM).
+ * Provides bit-level set, clear, and query operations where bit `i` represents
+ * whether extent `i` within a `GAMPage` is allocated (1) or free (0).
  */
 class Bitmap {
  public:
