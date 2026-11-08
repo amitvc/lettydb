@@ -94,6 +94,7 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
     lsn_t lsn = log_manager_.append_record(wal_record);
     if (lsn != INVALID_LSN) {
       txn_manager_.record_lsn(txn_id, lsn);
+	  buffer_pool_.track_dirtied_page(prev_iam_page, lsn);
       prev_iam.page_lsn = lsn;
     }
   }
@@ -276,6 +277,7 @@ bool IamManager::remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t ext
         lsn_t lsn = log_manager_.append_record(wal_record);
         if (lsn != INVALID_LSN) {
           txn_manager_.record_lsn(txn_id, lsn);
+		  buffer_pool_.track_dirtied_page(prev_iam_page, lsn);
           prev_iam.page_lsn = lsn;
         }
       }
@@ -309,6 +311,7 @@ lsn_t IamManager::log_iam_extent_change(LogRecordType type, uint64_t txn_id, pag
   }
 
   txn_manager_.record_lsn(txn_id, lsn);
+  buffer_pool_.track_dirtied_page(iam_page_id, lsn);
   return lsn;
 }
 

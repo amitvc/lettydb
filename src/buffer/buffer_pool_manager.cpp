@@ -215,6 +215,7 @@ bool BufferPoolManager::flush_page_internal(Page& page) {
     return false;
   }
   page.set_dirty(false);
+  dirty_page_table_.erase(page.get_page_id());
   ++flushes_;
   return true;
 }
@@ -295,6 +296,7 @@ bool BufferPoolManager::delete_page(page_id_t page_id) {
   // Clean up
   page.reset();
   page_table_.erase(it);
+  dirty_page_table_.erase(page_id);
   free_list_.push_back(frame_id);
 
   return true;
@@ -308,6 +310,17 @@ CacheStats BufferPoolManager::get_cache_stats() const {
     dirty_evictions_.load(),
     flushes_.load()
   };
+}
+
+void BufferPoolManager::track_dirtied_page(page_id_t page_id, lsn_t lsn) {
+  std::lock_guard<std::mutex> lock(latch_);
+  // Emplace : If the key already exists the operation is noops.
+  dirty_page_table_.emplace(page_id, lsn);
+}
+
+std::unordered_map<page_id_t, lsn_t> BufferPoolManager::get_dirty_page_table() const {
+  std::lock_guard<std::mutex> lock(latch_);
+  return dirty_page_table_;
 }
 
 void BufferPoolManager::reset_cache_stats() {

@@ -220,6 +220,30 @@ class BufferPoolManager {
   /** @brief Resets cache stat counters to zero. */
   void reset_cache_stats();
 
+  /**
+   * @brief Records that page_id was dirtied by a WAL record at lsn, for recovery's
+   *        dirty page table.
+   *
+   * Only the first LSN to dirty a page since its last flush is kept (recLSN) —
+   * later calls for the same still-dirty page are no-ops. Callers invoke this
+   * right after appending their WAL record, at the same call sites that already
+   * stamp page_lsn and call TransactionManager::record_lsn.
+   *
+   * @param page_id The page that was just dirtied.
+   * @param lsn The LSN of the WAL record responsible for the mutation.
+   */
+  void track_dirtied_page(page_id_t page_id, lsn_t lsn);
+
+  /**
+   * @brief Returns a snapshot of the dirty page table for checkpoint persistence.
+   *
+   * The map is {page_id → recLSN}. This snapshot is taken under the BPM's latch
+   * so it is consistent with the current state of the buffer pool at that instant.
+   *
+   * @return Copy of dirty_page_table_.
+   */
+  std::unordered_map<page_id_t, lsn_t> get_dirty_page_table() const;
+
  private:
   IDiskManager& disk_manager_;
   size_t pool_size_;
@@ -234,9 +258,16 @@ class BufferPoolManager {
   // holds a given page. A page can land in any frame — there is no fixed formula.
   // On eviction the entry is removed; on fetch/new_page it is inserted.
   std::unordered_map<page_id_t, frame_id_t> page_table_;
+
+  // DirtyPageTable structure tracks what dirty(mutated) pages are in the in-memory buffer pool.
+  // This structure is useful during recovery process of the database.
+  // It tracks for every dirty page the lsn of the wal record that was written when the page was first mutated when it was last
+  // read from disk.
+  std::unordered_map<page_id_t, lsn_t> dirty_page_table_;
+
   std::list<frame_id_t> free_list_;
   std::unique_ptr<PageReplacer> replacer_;
-  std::mutex latch_;
+  mutable std::mutex latch_;
 
   /**
    * @brief Acquires a free frame, either from the free list or by evicting.
