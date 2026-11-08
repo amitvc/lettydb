@@ -51,7 +51,6 @@ class LogManager {
                       uint32_t segment_size = DEFAULT_WAL_SEGMENT_SIZE,
                       uint32_t flush_interval_ms = DEFAULT_WAL_FLUSH_INTERVAL_MS);
 
-  /** @brief Closes the WAL file. */
   ~LogManager();
 
   LogManager(const LogManager&) = delete;
@@ -67,6 +66,9 @@ class LogManager {
 
   /**
    * @brief Ensures all WAL records up to target_lsn are synced to stable storage.
+   * Blocks until the WAL is durable through target_lsn. Since LettyDB uses steal/no-force policy
+   * this makes it safe to write dirty pages for uncommitted transactions to disk. BPM should call this method
+   * prior to writing a dirty page to the disk.
    * @param target_lsn The LSN that must be durable on disk before returning.
    * @return true on success, false if fsync failed.
    */
@@ -135,8 +137,8 @@ class LogManager {
   ByteBuffer log_buffer_;
   int fd_ = -1;
   // We use the file offset where the wal records is going to be written as the log sequence number.
-  // This gives us unique and monotonically increasing number. Every wal file starts with wal signature. So the starting LSN for each new file will
-  // always be  WAL_SIGNATURE_SIZE
+  // This gives us unique and monotonically increasing number. Every wal file starts with wal signature.
+  // So the starting LSN for each new file will always be WAL_SIGNATURE_SIZE
   lsn_t next_lsn_ = WAL_SIGNATURE_SIZE;
   lsn_t flushed_lsn_ = 0;
   uint32_t current_segment_id_ = 0;

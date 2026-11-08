@@ -9,7 +9,7 @@
 namespace letty {
 
 /** @brief
- * Identifies record type for the WAL record.
+ * Identifies record type for the WAL log record.
  * */
 enum class LogRecordType : uint16_t {
   BEGIN,
@@ -107,8 +107,35 @@ struct CompensationPatch {
 
 static constexpr auto COMPENSATION_PATCH_HEADER_SIZE = 16; // page_id + offset + undo_next_lsn + payload_size
 
+
+/**
+ * @brief
+ * LogRecord to capture changes done to an GAM page
+ */
+struct GamPatch {
+  page_id_t gam_page_id;
+  uint16_t bit_index;
+};
+static constexpr auto EXTENT_PATCH_SIZE = 6; // page_id_t + uint16_t
+
+/**
+ * @brief
+ * LogRecord to capture changes done to an IAM page
+ */
+struct IamPatch {
+  page_id_t iam_page_id;
+  uint32_t extent_id;
+};
+static constexpr auto IAM_PATCH_SIZE = 8; // page_id_t + uint32_t
+
+
 bool serialize_page_patch(const PagePatch &payload, ByteBuffer &out);
 bool deserialize_page_patch(const ByteBuffer &bytes, PagePatch &out);
+bool serialize_extent_patch(const GamPatch &payload, ByteBuffer &out);
+bool deserialize_extent_patch(const ByteBuffer &bytes, GamPatch &out);
+bool serialize_iam_patch(const IamPatch &payload, ByteBuffer &out);
+bool deserialize_iam_patch(const ByteBuffer &bytes, IamPatch &out);
+
 bool serialize_compensation_patch(const CompensationPatch &compensation_patch, ByteBuffer &out);
 bool deserialize_compensation_patch(const ByteBuffer &bytes, CompensationPatch& compensation_patch);
 bool serialize_log_record(const LogRecord &record, ByteBuffer &out);
@@ -117,22 +144,6 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 bool build_compensation_patch_record(txn_id tran_id, const CompensationPatch &patch, LogRecord &out);
 bool build_transaction_record(LogRecordType type, txn_id tran_id, LogRecord &out);
 
-/** @brief Builder input for ALLOCATE_EXTENT / DEALLOCATE_EXTENT records. */
-struct ExtentPatch {
-  page_id_t gam_page_id;
-  uint16_t bit_index;
-};
-static constexpr auto EXTENT_PATCH_SIZE = 10; // page_id_t + uint16_t
-
-/** @brief Builder input for IAM_ADD_EXTENT / IAM_REMOVE_EXTENT records. */
-struct IamPatch {
-  page_id_t iam_page_id;
-  uint32_t extent_id;
-};
-static constexpr auto IAM_PATCH_SIZE = 12; // page_id_t + uint32_t
-
-bool build_allocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out);
-bool build_deallocate_extent_record(txn_id tran_id, const ExtentPatch &patch, LogRecord &out);
-bool build_iam_add_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out);
-bool build_iam_remove_extent_record(txn_id tran_id, const IamPatch &patch, LogRecord &out);
+bool build_extent_record(LogRecordType type, txn_id tran_id, const GamPatch &patch, LogRecord &out);
+bool build_iam_extent_record(LogRecordType type, txn_id tran_id, const IamPatch &patch, LogRecord &out);
 }

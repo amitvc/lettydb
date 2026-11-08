@@ -24,9 +24,9 @@ class ExecutorTest : public ::testing::Test {
         *disk_manager, 64, std::make_unique<LRUPageReplacer>());
     log_manager = std::make_unique<LogManager>("test_executor.db.wal");
     txn_manager = std::make_unique<TransactionManager>(*log_manager);
-    extent_manager = std::make_unique<ExtentManager>(*bpm);
-    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager);
+    extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
+    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
     catalog_manager->init();
     table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager, *log_manager, *txn_manager);
     executor = std::make_unique<Executor>(*catalog_manager, *table_manager, *txn_manager);

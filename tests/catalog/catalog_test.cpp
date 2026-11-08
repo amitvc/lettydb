@@ -5,6 +5,8 @@
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
 #include "storage/iam_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include <cstdio>
 
 namespace letty {
@@ -16,17 +18,23 @@ class CatalogBootstrapTest : public ::testing::Test {
     disk_manager = std::make_unique<DiskManager>("test_catalog.db");
     bpm = std::make_unique<BufferPoolManager>(
         *disk_manager, 64, std::make_unique<LRUPageReplacer>());
-    extent_manager = std::make_unique<ExtentManager>(*bpm);
-    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager);
+    log_manager = std::make_unique<LogManager>("test_catalog.db.wal");
+    txn_manager = std::make_unique<TransactionManager>(*log_manager);
+
+    extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
+    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
   }
 
   void TearDown() override {
     std::remove("test_catalog.db");
+    std::remove("test_catalog.db.wal.0");
   }
 
   std::unique_ptr<DiskManager> disk_manager;
   std::unique_ptr<BufferPoolManager> bpm;
+  std::unique_ptr<LogManager> log_manager;
+  std::unique_ptr<TransactionManager> txn_manager;
   std::unique_ptr<ExtentManager> extent_manager;
   std::unique_ptr<IamManager> iam_manager;
   std::unique_ptr<CatalogManager> catalog_manager;

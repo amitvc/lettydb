@@ -25,12 +25,12 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
   try {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 64, std::make_unique<LRUPageReplacer>());
-    ExtentManager extent_manager(bpm);
-    bpm.flush_all_pages();
     LogManager log_manager(test_db_file.string() + ".wal");
     TransactionManager txn_manager(log_manager);
-    IamManager iam_manager(bpm, extent_manager);
-    CatalogManager catalog(bpm, iam_manager);
+    ExtentManager extent_manager(bpm, log_manager, txn_manager);
+    bpm.flush_all_pages();
+    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
+    CatalogManager catalog(bpm, iam_manager, txn_manager);
     catalog.init();
 
     Schema schema({
@@ -108,12 +108,14 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     if (std::filesystem::exists(test_db_file)) {
       std::filesystem::remove(test_db_file);
     }
+    std::filesystem::remove(test_db_file.string() + ".wal.0");
     throw;
   }
 
   if (std::filesystem::exists(test_db_file)) {
     std::filesystem::remove(test_db_file);
   }
+  std::filesystem::remove(test_db_file.string() + ".wal.0");
 }
 
 TEST(CompactionTest, CompactNonExistentTableDoesNotCrash) {
@@ -122,12 +124,12 @@ TEST(CompactionTest, CompactNonExistentTableDoesNotCrash) {
   try {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
-    ExtentManager extent_manager(bpm);
-    bpm.flush_all_pages();
     LogManager log_manager(test_db_file.string() + ".wal");
     TransactionManager txn_manager(log_manager);
-    IamManager iam_manager(bpm, extent_manager);
-    CatalogManager catalog(bpm, iam_manager);
+    ExtentManager extent_manager(bpm, log_manager, txn_manager);
+    bpm.flush_all_pages();
+    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
+    CatalogManager catalog(bpm, iam_manager, txn_manager);
     catalog.init();
 
     TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
@@ -141,12 +143,14 @@ TEST(CompactionTest, CompactNonExistentTableDoesNotCrash) {
     if (std::filesystem::exists(test_db_file)) {
       std::filesystem::remove(test_db_file);
     }
+    std::filesystem::remove(test_db_file.string() + ".wal.0");
     throw;
   }
 
   if (std::filesystem::exists(test_db_file)) {
     std::filesystem::remove(test_db_file);
   }
+  std::filesystem::remove(test_db_file.string() + ".wal.0");
 }
 
 TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
@@ -155,12 +159,12 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
   try {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
-    ExtentManager extent_manager(bpm);
-    bpm.flush_all_pages();
     LogManager log_manager(test_db_file.string() + ".wal");
     TransactionManager txn_manager(log_manager);
-    IamManager iam_manager(bpm, extent_manager);
-    CatalogManager catalog(bpm, iam_manager);
+    ExtentManager extent_manager(bpm, log_manager, txn_manager);
+    bpm.flush_all_pages();
+    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
+    CatalogManager catalog(bpm, iam_manager, txn_manager);
     catalog.init();
 
     Schema schema({
@@ -214,12 +218,14 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     if (std::filesystem::exists(test_db_file)) {
       std::filesystem::remove(test_db_file);
     }
+    std::filesystem::remove(test_db_file.string() + ".wal.0");
     throw;
   }
 
   if (std::filesystem::exists(test_db_file)) {
     std::filesystem::remove(test_db_file);
   }
+  std::filesystem::remove(test_db_file.string() + ".wal.0");
 }
 
 } // namespace letty

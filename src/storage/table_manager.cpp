@@ -32,7 +32,7 @@ std::optional<uint16_t> TableManager::insert_row(const TableMetadata& meta, cons
     return std::nullopt;
   }
 
-  page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size);
+  page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size, txn_id);
   LOG_STORAGE_DEBUG("TableManager inserting to page: {}", target_page_id);
   PageGuard guard = buffer_pool_.fetch_page_guard(target_page_id);
   assert(guard.is_valid());
@@ -195,7 +195,11 @@ CompactionStats TableManager::compact_extents(const TableMetadata& meta) {
     }
   }
 
-  stats.extents_freed = free_empty_extents(meta.iam_page_id);
+  uint64_t txn_id = txn_manager_.begin();
+  stats.extents_freed = free_empty_extents(meta.iam_page_id, txn_id);
+  if (!txn_manager_.commit(txn_id)) {
+    throw DbException(DbErrorCode::Internal, "failed to commit compaction transaction for table '" + meta.name + "'");
+  }
 
   // Count remaining empty pages after deallocation
   int empty_pages_after = 0;
@@ -305,7 +309,7 @@ int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
   return migrated;
 }
 
-int TableManager::free_empty_extents(page_id_t iam_head) {
+int TableManager::free_empty_extents(page_id_t iam_head, uint64_t txn_id) {
   int extents_freed = 0;
   page_id_t dealloc_iam_page = iam_head;
 
@@ -332,7 +336,7 @@ int TableManager::free_empty_extents(page_id_t iam_head) {
       }
 
       if (all_empty) {
-        bool removed = iam_manager_.remove_extent_from_iam(iam_head, extent_id);
+        bool removed = iam_manager_.remove_extent_from_iam(iam_head, extent_id, txn_id);
         if (removed) {
           extents_freed++;
           --idx;  // compensate for the shift-left in extent_ids array
@@ -344,7 +348,7 @@ int TableManager::free_empty_extents(page_id_t iam_head) {
   return extents_freed;
 }
 
-page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space) {
+page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space, uint64_t txn_id) {
   page_id_t target_page = iam_manager_.find_page_with_space(iam_head, needed_space);
 
   if (target_page != INVALID_PAGE_ID) {
@@ -355,7 +359,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
     return target_page;
   }
 
-  page_id_t extent_start = iam_manager_.allocate_extent_for_table(iam_head);
+  page_id_t extent_start = iam_manager_.allocate_extent_for_table(iam_head, txn_id);
   if (extent_start == INVALID_PAGE_ID) {
     throw DbException(DbErrorCode::Internal, "Failed to allocate extent for table");
   }

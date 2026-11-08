@@ -3,13 +3,19 @@
 #include "extent_manager.h"
 #include "common/logger.h"
 #include "common/db_exception.h"
+#include "log_record.h"
 #include "page_utils.h"
 #include <limits>
 #include <string>
 
 namespace letty {
 
-ExtentManager::ExtentManager(BufferPoolManager& buffer_pool) : buffer_pool_(buffer_pool) {
+ExtentManager::ExtentManager(BufferPoolManager &buffer_pool,
+							 LogManager &log_manager,
+							 TransactionManager &txn_manager)
+	: buffer_pool_(buffer_pool),
+	  log_manager_(log_manager),
+	  txn_manager_(txn_manager) {
   LOG_STORAGE_DEBUG("Initializing ExtentManager");
 
   // Detect empty database by checking file size.
@@ -73,7 +79,7 @@ void ExtentManager::initialize_new_db() {
   buffer_pool_.flush_page(EXTENT_1_LAST_PAGE);
 }
 
-page_id_t ExtentManager::allocate_extent() {
+page_id_t ExtentManager::allocate_extent(uint64_t txn_id) {
   std::lock_guard<std::mutex> guard(lock_);
 
   while (true) {
@@ -85,9 +91,9 @@ page_id_t ExtentManager::allocate_extent() {
 
       auto gam_page = load_page_layout<GAMPage>(gam_guard);
 
-      page_id_t allocated_page_id = allocate_extent_in_gam_page(&gam_page);
-
+      auto [gam_page_id, allocated_page_id, bit_index] = allocate_extent_in_gam_page(&gam_page);
       if (allocated_page_id != INVALID_PAGE_ID) {
+          gam_page.page_lsn = log_extent_change(LogRecordType::ALLOCATE_EXTENT, txn_id, gam_page_id, bit_index);
           store_page_layout(gam_guard, gam_page);
           return allocated_page_id;
       }
@@ -108,11 +114,33 @@ page_id_t ExtentManager::allocate_extent() {
   }
 
   auto gam_page = load_page_layout<GAMPage>(gam_guard);
-  page_id_t result = allocate_extent_in_gam_page(&gam_page);
+  auto [gam_page_id, result, bit_index] = allocate_extent_in_gam_page(&gam_page);
   if (result != INVALID_PAGE_ID) {
+    gam_page.page_lsn = log_extent_change(LogRecordType::ALLOCATE_EXTENT, txn_id, gam_page_id, bit_index);
     store_page_layout(gam_guard, gam_page);
   }
   return result;
+}
+
+lsn_t ExtentManager::log_extent_change(LogRecordType type, uint64_t txn_id, page_id_t gam_page_id,
+                                        uint16_t bit_index) {
+  GamPatch patch;
+  patch.gam_page_id = gam_page_id;
+  patch.bit_index = bit_index;
+
+  LogRecord wal_record{};
+  if (!build_extent_record(type, txn_id, patch, wal_record)) {
+    throw DbException(DbErrorCode::Internal, "Failed to build WAL record for extent change");
+  }
+  wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+
+  lsn_t lsn = log_manager_.append_record(wal_record);
+  if (lsn == INVALID_LSN) {
+    throw DbException(DbErrorCode::Internal, "Failed to append WAL record for extent change");
+  }
+
+  txn_manager_.record_lsn(txn_id, lsn);
+  return lsn;
 }
 
 void ExtentManager::advance_gam_cursor(page_id_t next_gam_id) {
@@ -197,7 +225,8 @@ page_id_t ExtentManager::find_gam_page_at_index(size_t gam_page_index) {
     return current;
 }
 
-bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index) {
+bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index,
+                                      uint64_t txn_id) {
     PageGuard gam_guard = buffer_pool_.fetch_page_guard(gam_page_id);
     if (!gam_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch GAM page " + std::to_string(gam_page_id) +
@@ -212,6 +241,7 @@ bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam,
         gam_page.first_free_bit_hint = bit_in_gam;
         LOG_STORAGE_DEBUG("Rewound first_free_hint to {} in GAM page {}", bit_in_gam, gam_page_id);
     }
+    gam_page.page_lsn = log_extent_change(LogRecordType::DEALLOCATE_EXTENT, txn_id, gam_page_id, bit_in_gam);
     store_page_layout(gam_guard, gam_page);
 
     // Rewind cursor so future allocations can reuse this freed extent
@@ -222,7 +252,7 @@ bool ExtentManager::clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam,
     return true;
 }
 
-bool ExtentManager::deallocate_extent(page_id_t start_page_id) {
+bool ExtentManager::deallocate_extent(page_id_t start_page_id, uint64_t txn_id) {
     LOG_STORAGE_DEBUG("Deallocating extent at page {}", start_page_id);
 
     if (!is_valid_extent_for_deallocation(start_page_id)) return false;
@@ -239,7 +269,7 @@ bool ExtentManager::deallocate_extent(page_id_t start_page_id) {
                                                     std::to_string(extent_index));
     }
 
-    return clear_extent_bit(target_gam_page_id, bit_in_gam, gam_page_index);
+    return clear_extent_bit(target_gam_page_id, bit_in_gam, gam_page_index, txn_id);
 }
 
 page_id_t ExtentManager::claim_extent_at_bit(GAMPage* gam_page,
@@ -266,7 +296,7 @@ page_id_t ExtentManager::claim_extent_at_bit(GAMPage* gam_page,
   return static_cast<page_id_t>(result);
 }
 
-page_id_t ExtentManager::allocate_extent_in_gam_page(GAMPage* gam_page) {
+std::tuple<page_id_t, page_id_t, uint16_t> ExtentManager::allocate_extent_in_gam_page(GAMPage* gam_page) {
   Bitmap bitmap(gam_page->bitmap, GAM_MAX_BITS);
 
   // Use the hint to start searching - avoids O(n) scan in common case
@@ -280,19 +310,19 @@ page_id_t ExtentManager::allocate_extent_in_gam_page(GAMPage* gam_page) {
   // Search from hint to end of bitmap
   for (size_t i = hint; i < GAM_MAX_BITS; ++i) {
       if (!bitmap.is_set(i)) {
-          return claim_extent_at_bit(gam_page, i);
+          return {current_gam_page_id_, claim_extent_at_bit(gam_page, i), static_cast<uint16_t>(i)};
       }
   }
 
   // Wrap around - search from 0 to hint (handles fragmentation after deallocation)
   for (size_t i = 0; i < hint; ++i) {
       if (!bitmap.is_set(i)) {
-          return claim_extent_at_bit(gam_page, i);
+          return {current_gam_page_id_, claim_extent_at_bit(gam_page, i), static_cast<uint16_t>(i)};
       }
   }
 
   // This means Page is completely full
-  return INVALID_PAGE_ID;
+  return {current_gam_page_id_, INVALID_PAGE_ID, static_cast<uint16_t>(0)};
 }
 
 void ExtentManager::print_database_header(const DatabaseHeader *header) {

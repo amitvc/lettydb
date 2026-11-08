@@ -10,6 +10,7 @@
 #include "buffer/buffer_pool_manager.h"
 #include "storage/iam_manager.h"
 #include "storage/tuple.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
 
@@ -62,7 +63,7 @@ struct SysTableRecord {
  */
 class CatalogManager {
  public:
-  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager);
+  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, TransactionManager& txn_manager);
 
   /**
    * @brief Initializes the catalog manager.
@@ -104,6 +105,7 @@ class CatalogManager {
  private:
   BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
+  TransactionManager& txn_manager_;
 
   /** In-memory cache of table metadata, keyed by table name.
    *  Populated on create_table() and first get_table() miss.
@@ -148,13 +150,13 @@ class CatalogManager {
    * @return true if successful.
    * @throws DbException if the insert cannot complete.
    */
-  bool insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size);
+  bool insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size, uint64_t txn_id);
 
   /** @brief Helper to insert a record into sys_tables. */
-  bool insert_sys_table_record(const SysTableRecord& record);
+  bool insert_sys_table_record(const SysTableRecord& record, uint64_t txn_id);
 
   /** @brief Helper to insert a record into sys_columns. */
-  bool insert_sys_column_record(uint32_t table_oid, const Column& col);
+  bool insert_sys_column_record(uint32_t table_oid, const Column& col, uint64_t txn_id);
 
 
   /**

@@ -9,6 +9,8 @@
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "common/db_exception.h"
 #include "common/logger.h"
 #include <filesystem>
@@ -23,38 +25,48 @@ protected:
     void SetUp() override {
         // Create a temporary database file for testing
         test_db_file = std::filesystem::temp_directory_path() / "iam_manager_test.db";
-        
+        test_wal_file = std::filesystem::temp_directory_path() / "iam_manager_test.db.wal";
+
         // Initialize components
         disk_manager = std::make_unique<DiskManager>(test_db_file.string());
         bpm = std::make_unique<BufferPoolManager>(
             *disk_manager, 64, std::make_unique<LRUPageReplacer>());
-        extent_manager = std::make_unique<ExtentManager>(*bpm);
+        log_manager = std::make_unique<LogManager>(test_wal_file.string());
+        txn_manager = std::make_unique<TransactionManager>(*log_manager);
+        extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
         ASSERT_TRUE(bpm->flush_all_pages());  // Flush init pages for components still using DiskManager directly
-        iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager);
+        iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
+        test_txn_id = txn_manager->begin();
 
         LOG_STORAGE_INFO("Test setup complete for IAMManager tests");
     }
-    
+
     void TearDown() override {
         // Cleanup (reverse order of construction)
         iam_manager.reset();
         extent_manager.reset();
+        txn_manager.reset();
+        log_manager.reset();
         bpm.reset();
         disk_manager.reset();
-        
+
         // Remove test file
         if (std::filesystem::exists(test_db_file)) {
             std::filesystem::remove(test_db_file);
         }
-        
+        std::string wal_segment_file = test_wal_file.string() + ".0";
+        if (std::filesystem::exists(wal_segment_file)) {
+            std::filesystem::remove(wal_segment_file);
+        }
+
         LOG_STORAGE_INFO("Test teardown complete");
     }
-    
+
     /**
      * Helper function to create a test table's IAM chain
      */
     page_id_t create_test_table_iam() {
-        return iam_manager->create_iam_chain("test_table");
+        return iam_manager->create_iam_chain("test_table", test_txn_id);
     }
     
     /**
@@ -102,10 +114,14 @@ protected:
     }
     
     std::filesystem::path test_db_file;
+    std::filesystem::path test_wal_file;
     std::unique_ptr<DiskManager> disk_manager;
     std::unique_ptr<BufferPoolManager> bpm;
+    std::unique_ptr<LogManager> log_manager;
+    std::unique_ptr<TransactionManager> txn_manager;
     std::unique_ptr<ExtentManager> extent_manager;
     std::unique_ptr<IamManager> iam_manager;
+    uint64_t test_txn_id = 0;
 };
 
 /**
@@ -145,7 +161,7 @@ TEST_F(IamManagerTest, BasicIAMPageAllocation) {
     EXPECT_EQ(count_extents_in_iam(table_iam), 0);
     
     // Allocate extent
-    page_id_t extent1 = iam_manager->allocate_extent_for_table(table_iam);
+    page_id_t extent1 = iam_manager->allocate_extent_for_table(table_iam, test_txn_id);
     ASSERT_NE(extent1, INVALID_PAGE_ID);
     
     // Should still have only 1 IAM page, but now with 1 extent
@@ -166,7 +182,7 @@ TEST_F(IamManagerTest, MultipleExtentAllocations) {
     std::vector<page_id_t> extents;
     
     for (int i = 0; i < NUM_EXTENTS; ++i) {
-        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam);
+        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam, test_txn_id);
         ASSERT_NE(extent, INVALID_PAGE_ID);
         extents.push_back(extent);
     }
@@ -248,7 +264,7 @@ TEST_F(IamManagerTest, ChainGrowthStaysInIamExtent) {
 
     // Fill the head IAM page (IAM_MAX_EXTENTS entries) plus one to force growth
     for (size_t i = 0; i < IAM_MAX_EXTENTS + 1; ++i) {
-        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam);
+        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam, test_txn_id);
         ASSERT_NE(extent, INVALID_PAGE_ID);
     }
 
@@ -279,7 +295,7 @@ TEST_F(IamManagerTest, PerformanceVerification) {
     const int NUM_ALLOCATIONS = 50;
     
     for (int i = 0; i < NUM_ALLOCATIONS; ++i) {
-        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam);
+        page_id_t extent = iam_manager->allocate_extent_for_table(table_iam, test_txn_id);
         if (extent != INVALID_PAGE_ID) {
             allocated_extents.push_back(extent);
         }
@@ -305,7 +321,7 @@ TEST_F(IamManagerTest, PerformanceVerification) {
 TEST_F(IamManagerTest, EdgeCases) {
     // Test with invalid IAM head
     EXPECT_THROW({
-        iam_manager->allocate_extent_for_table(INVALID_PAGE_ID);
+        iam_manager->allocate_extent_for_table(INVALID_PAGE_ID, test_txn_id);
     }, DbException);
     
     // Test find_page_with_space with invalid IAM

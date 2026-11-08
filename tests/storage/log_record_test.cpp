@@ -269,4 +269,35 @@ namespace letty {
     ByteBuffer bytes;
     EXPECT_FALSE(serialize_log_record(bad, bytes));
   }
+
+  TEST(LogRecordTest, SerializeGamPatch) {
+	GamPatch original{};
+	original.gam_page_id = 20;
+	original.bit_index = 100;
+
+	std::vector<Byte> bytes;
+	ASSERT_TRUE(serialize_extent_patch(original, bytes));
+
+  	GamPatch decoded{};
+	ASSERT_TRUE(deserialize_extent_patch(bytes, decoded));
+
+	EXPECT_EQ(decoded.gam_page_id, original.gam_page_id);
+	EXPECT_EQ(decoded.bit_index, original.bit_index);
+  }
+
+  TEST(LogRecordTest, SerializeIamPatch) {
+	IamPatch original{};
+	original.iam_page_id = 20;
+	original.extent_id = 1024;
+
+	std::vector<Byte> bytes;
+	ASSERT_TRUE(serialize_iam_patch(original, bytes));
+
+  	IamPatch decoded{};
+	ASSERT_TRUE(deserialize_iam_patch(bytes, decoded));
+
+	EXPECT_EQ(decoded.iam_page_id, original.iam_page_id);
+	EXPECT_EQ(decoded.extent_id, original.extent_id);
+  }
+
 }

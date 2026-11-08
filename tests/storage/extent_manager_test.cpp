@@ -8,6 +8,8 @@
 #include "storage/disk_manager.h"
 #include "storage/page_utils.h"
 #include "storage/storage_def.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 
@@ -26,6 +28,7 @@ class ExtentManagerTest : public ::testing::Test {
 
   void TearDown() override {
 	std::filesystem::remove(test_db_file);
+	std::filesystem::remove(test_db_file + ".wal.0");
   }
 
   /** Helper: creates the full DiskManager → BufferPoolManager → ExtentManager stack. */
@@ -33,6 +36,9 @@ class ExtentManagerTest : public ::testing::Test {
     std::unique_ptr<DiskManager> disk_manager;
     std::unique_ptr<BufferPoolManager> bpm;
     std::unique_ptr<ExtentManager> extent_manager;
+    std::unique_ptr<LogManager> log_manager;
+    std::unique_ptr<TransactionManager> txn_manager;
+    uint64_t txn_id;
   };
 
   TestStack CreateStack(size_t pool_size = POOL_SIZE) {
@@ -40,7 +46,10 @@ class ExtentManagerTest : public ::testing::Test {
     s.disk_manager = std::make_unique<DiskManager>(test_db_file);
     s.bpm = std::make_unique<BufferPoolManager>(
         *s.disk_manager, pool_size, std::make_unique<LRUPageReplacer>());
-    s.extent_manager = std::make_unique<ExtentManager>(*s.bpm);
+    s.log_manager = std::make_unique<LogManager>(test_db_file + ".wal");
+    s.txn_manager = std::make_unique<TransactionManager>(*s.log_manager);
+    s.extent_manager = std::make_unique<ExtentManager>(*s.bpm, *s.log_manager, *s.txn_manager);
+    s.txn_id = s.txn_manager->begin();
     return s;
   }
 
@@ -50,7 +59,7 @@ class ExtentManagerTest : public ::testing::Test {
 // Test if the db initialization works correctly when we start with empty db file.
 // This test ensures all essential pages (db header, GAM's and IAM's) are written correctly to the db file.
 TEST_F(ExtentManagerTest, TestInitialization) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Flush BPM so we can verify on-disk state
   EXPECT_TRUE(bpm->flush_all_pages());
@@ -84,14 +93,14 @@ TEST_F(ExtentManagerTest, TestInitialization) {
 
 // Verify ExtentManager allocates pages correctly.
 TEST_F(ExtentManagerTest, TestAllocation) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Allocate first available extent (extent 2, since 0=header, 1=GAM extent)
-  page_id_t extent1_start = extent_manager->allocate_extent();
+  page_id_t extent1_start = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(extent1_start, 2 * EXTENT_SIZE);  // 16
 
   // Allocate second extent
-  page_id_t extent2_start = extent_manager->allocate_extent();
+  page_id_t extent2_start = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(extent2_start, 3 * EXTENT_SIZE);  // 24
 
   // Flush BPM so we can verify GAM on disk
@@ -112,20 +121,20 @@ TEST_F(ExtentManagerTest, TestAllocation) {
 
 TEST_F(ExtentManagerTest, TestPersistence) {
   {
-	auto [disk_manager, bpm, extent_manager] = CreateStack();
+	auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
 	// First allocation is extent 2 (page 16), since 0=system, 1=GAM extent
-	page_id_t p1 = extent_manager->allocate_extent();
+	page_id_t p1 = extent_manager->allocate_extent(txn_id);
 	EXPECT_EQ(p1, 16);
     // BPM destructor flushes all dirty pages when block ends
   }
 
   // Re-open
   {
-	auto [disk_manager, bpm, extent_manager] = CreateStack();
+	auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
 	// Next allocation should be extent 3 (page 24)
-	page_id_t p2 = extent_manager->allocate_extent();
+	page_id_t p2 = extent_manager->allocate_extent(txn_id);
 	EXPECT_EQ(p2, 24);
 
 	// Flush and verify on disk
@@ -145,7 +154,7 @@ TEST_F(ExtentManagerTest, TestPersistence) {
 }
 
 TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Fill the first GAM page (page 8) through BPM (it may be cached from init)
   Page* gam_page_obj = bpm->fetch_page(FIRST_GAM_PAGE_ID);
@@ -156,7 +165,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
   bpm->unpin_page(FIRST_GAM_PAGE_ID, true);
 
   // Allocate extent. This should trigger creating a new GAM page.
-  page_id_t new_extent_page_id = extent_manager->allocate_extent();
+  page_id_t new_extent_page_id = extent_manager->allocate_extent(txn_id);
 
   // Flush so we can verify on disk
   EXPECT_TRUE(bpm->flush_all_pages());
@@ -184,16 +193,16 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansion) {
 }
 
 TEST_F(ExtentManagerTest, TestDeallocation) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Allocate two extents (extents 2 and 3, since 0=header, 1=GAM)
-  page_id_t extent1_start = extent_manager->allocate_extent();  // 16
-  page_id_t extent2_start = extent_manager->allocate_extent();  // 24
+  page_id_t extent1_start = extent_manager->allocate_extent(txn_id);  // 16
+  page_id_t extent2_start = extent_manager->allocate_extent(txn_id);  // 24
   EXPECT_EQ(extent1_start, 16);
   EXPECT_EQ(extent2_start, 24);
 
   // Deallocate the first one
-  extent_manager->deallocate_extent(extent1_start);
+  extent_manager->deallocate_extent(extent1_start, txn_id);
 
   // Flush and verify in GAM
   EXPECT_TRUE(bpm->flush_all_pages());
@@ -209,12 +218,12 @@ TEST_F(ExtentManagerTest, TestDeallocation) {
   EXPECT_TRUE(gam_bitmap.is_set(3));  // Extent 3 should still be allocated
 
   // Now, allocate again - should reuse the deallocated one
-  page_id_t reused_extent_start = extent_manager->allocate_extent();
+  page_id_t reused_extent_start = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(reused_extent_start, extent1_start);
 }
 
 TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // We need to fill up the GAM extent (extent 1, pages 8-15) with GAM pages.
   // GAM extent layout:
@@ -260,7 +269,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
 
   // Allocate!
   // Should traverse 8->9->10->11->12->13->14->15->Full -> Create new GAM at EOF.
-  page_id_t new_page_id = extent_manager->allocate_extent();
+  page_id_t new_page_id = extent_manager->allocate_extent(txn_id);
 
   // Flush to verify on disk
   EXPECT_TRUE(bpm->flush_all_pages());
@@ -292,7 +301,7 @@ TEST_F(ExtentManagerTest, TestGAMPageExpansionWhenGAMExtentIsFull) {
 TEST_F(ExtentManagerTest, TestCorruptDatabaseSignature) {
   // Create a file with valid database
   {
-	auto [disk_manager, bpm, extent_manager] = CreateStack();
+	auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
     // BPM destructor flushes all dirty pages
   }
 
@@ -309,14 +318,16 @@ TEST_F(ExtentManagerTest, TestCorruptDatabaseSignature) {
 	auto disk_manager = std::make_unique<DiskManager>(test_db_file);
 	auto bpm = std::make_unique<BufferPoolManager>(
 	    *disk_manager, POOL_SIZE, std::make_unique<LRUPageReplacer>());
+	auto log_manager = std::make_unique<LogManager>(test_db_file + ".wal");
+	auto txn_manager = std::make_unique<TransactionManager>(*log_manager);
 	EXPECT_THROW({
-				   ExtentManager em(*bpm);
+				   ExtentManager em(*bpm, *log_manager, *txn_manager);
 				 }, std::runtime_error);
   }
 }
 
 TEST_F(ExtentManagerTest, TestConcurrentAllocationDeallocation) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   const int num_threads = 4;
   const int operations_per_thread = 10;
@@ -325,10 +336,11 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationDeallocation) {
 
   // Launch allocation threads
   auto& em = extent_manager;
+  uint64_t alloc_txn_id = txn_id;
   for (int i = 0; i < num_threads; ++i) {
-	threads.emplace_back([&em, &allocated_extents, i, operations_per_thread]() {
+	threads.emplace_back([&em, &allocated_extents, i, operations_per_thread, alloc_txn_id]() {
 	  for (int j = 0; j < operations_per_thread; ++j) {
-		page_id_t extent_start = em->allocate_extent();
+		page_id_t extent_start = em->allocate_extent(alloc_txn_id);
 		EXPECT_NE(extent_start, INVALID_PAGE_ID);
 		allocated_extents[i].push_back(extent_start);
 	  }
@@ -351,9 +363,9 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationDeallocation) {
 
   // Launch deallocation threads
   for (int i = 0; i < num_threads; ++i) {
-	threads.emplace_back([&em, &allocated_extents, i]() {
+	threads.emplace_back([&em, &allocated_extents, i, alloc_txn_id]() {
 	  for (page_id_t extent : allocated_extents[i]) {
-		em->deallocate_extent(extent);
+		em->deallocate_extent(extent, alloc_txn_id);
 	  }
 	});
   }
@@ -366,7 +378,7 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationDeallocation) {
   // Verify all extents can be reallocated (showing they were properly deallocated)
   std::set < page_id_t > reallocated_extents;
   for (int i = 0; i < num_threads * operations_per_thread; ++i) {
-	page_id_t extent_start = extent_manager->allocate_extent();
+	page_id_t extent_start = extent_manager->allocate_extent(txn_id);
 	EXPECT_NE(extent_start, INVALID_PAGE_ID);
 	reallocated_extents.insert(extent_start);
   }
@@ -376,79 +388,79 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationDeallocation) {
 }
 
 TEST_F(ExtentManagerTest, TestInvalidExtentDeallocation) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Test deallocating invalid page IDs
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(INVALID_PAGE_ID));
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(999999)); // Very large invalid ID
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(INVALID_PAGE_ID, txn_id));
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(999999, txn_id)); // Very large invalid ID
 
   // Test deallocating non-extent-aligned page IDs
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(1)); // Not start of extent
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(9)); // Not start of extent
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(1, txn_id)); // Not start of extent
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(9, txn_id)); // Not start of extent
 }
 
 TEST_F(ExtentManagerTest, TestDoubleFreeExtent) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Allocate an extent
-  page_id_t extent_start = extent_manager->allocate_extent();
+  page_id_t extent_start = extent_manager->allocate_extent(txn_id);
   EXPECT_NE(extent_start, INVALID_PAGE_ID);
 
   // Deallocate it once
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(extent_start));
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(extent_start, txn_id));
 
   // Deallocate it again (double-free) - should not crash
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(extent_start));
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(extent_start, txn_id));
 
   // Verify we can still allocate and it reuses the same extent
-  page_id_t reused_extent = extent_manager->allocate_extent();
+  page_id_t reused_extent = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(reused_extent, extent_start);
 }
 
 TEST_F(ExtentManagerTest, TestDeallocateSystemExtent) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // First allocate a normal extent to ensure system is working
-  page_id_t normal_extent = extent_manager->allocate_extent();
+  page_id_t normal_extent = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(normal_extent, 2 * EXTENT_SIZE); // Should be extent 2 (page 16)
 
   // Try to deallocate system extent (extent 0)
   // This should not crash but behavior might be undefined
-  EXPECT_NO_THROW(extent_manager->deallocate_extent(0));
+  EXPECT_NO_THROW(extent_manager->deallocate_extent(0, txn_id));
 }
 
 TEST_F(ExtentManagerTest, TestGAMCacheEfficiency) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Allocate multiple extents to test cache behavior
   std::vector<page_id_t> allocated_extents;
 
   // First allocation should cache the GAM page
-  page_id_t extent1 = extent_manager->allocate_extent();
+  page_id_t extent1 = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(extent1, 2 * EXTENT_SIZE);  // First user extent is extent 2 (page 16)
   allocated_extents.push_back(extent1);
 
   // Subsequent allocations in the same GAM should hit cache
   for (int i = 0; i < 5; ++i) {
-	page_id_t extent = extent_manager->allocate_extent();
+	page_id_t extent = extent_manager->allocate_extent(txn_id);
 	EXPECT_NE(extent, INVALID_PAGE_ID);
 	allocated_extents.push_back(extent);
   }
 
   // Mix allocation and deallocation to test cache coherency
-  extent_manager->deallocate_extent(allocated_extents[1]);
+  extent_manager->deallocate_extent(allocated_extents[1], txn_id);
 
   // Allocate again - should reuse the deallocated extent (cache hit)
-  page_id_t reused = extent_manager->allocate_extent();
+  page_id_t reused = extent_manager->allocate_extent(txn_id);
   EXPECT_EQ(reused, allocated_extents[1]);
 
   // Deallocate an extent and then allocate from a different GAM
   // (when we force GAM expansion) to test cache miss scenarios
-  extent_manager->deallocate_extent(allocated_extents[2]);
+  extent_manager->deallocate_extent(allocated_extents[2], txn_id);
 }
 
 TEST_F(ExtentManagerTest, TestAllocationLimits) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   // Allocate many extents to test system behavior under pressure
   std::vector<page_id_t> allocated_extents;
@@ -456,7 +468,7 @@ TEST_F(ExtentManagerTest, TestAllocationLimits) {
   // Allocate a reasonable number of extents (not enough to fill disk)
   // This tests that the system can handle many allocations
   for (int i = 0; i < 100; ++i) {
-	page_id_t extent = extent_manager->allocate_extent();
+	page_id_t extent = extent_manager->allocate_extent(txn_id);
 	if (extent == INVALID_PAGE_ID) {
 	  // If allocation fails, that's acceptable for high counts
 	  break;
@@ -478,14 +490,14 @@ TEST_F(ExtentManagerTest, TestAllocationLimits) {
 
   // Cleanup - deallocate all extents
   for (page_id_t extent : allocated_extents) {
-	EXPECT_NO_THROW(extent_manager->deallocate_extent(extent));
+	EXPECT_NO_THROW(extent_manager->deallocate_extent(extent, txn_id));
   }
 }
 
 // For now we will keep this. Not sure if this belongs in unit test.
 // I wanted to benchmark the allocation api for extent manager
 TEST_F(ExtentManagerTest, TestConcurrentAllocationStress) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   const int num_threads = 10;
   const int allocations_per_thread = 500; // Total 5000 allocations
@@ -496,10 +508,11 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationStress) {
 
   // High contention: All threads trying to allocate simultaneously
   auto& em = extent_manager;
+  uint64_t alloc_txn_id = txn_id;
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&em, &thread_results, i, allocations_per_thread]() {
+    threads.emplace_back([&em, &thread_results, i, allocations_per_thread, alloc_txn_id]() {
       for (int j = 0; j < allocations_per_thread; ++j) {
-        page_id_t page_id = em->allocate_extent();
+        page_id_t page_id = em->allocate_extent(alloc_txn_id);
         if (page_id != INVALID_PAGE_ID) {
             thread_results[i].push_back(page_id);
         }
@@ -537,7 +550,7 @@ TEST_F(ExtentManagerTest, TestConcurrentAllocationStress) {
 }
 
 TEST_F(ExtentManagerTest, ExtentManagerBenchmark) {
-  auto [disk_manager, bpm, extent_manager] = CreateStack();
+  auto [disk_manager, bpm, extent_manager, log_manager, txn_manager, txn_id] = CreateStack();
 
   const int num_allocations = 50000;
   std::vector<page_id_t> allocated;
@@ -546,7 +559,7 @@ TEST_F(ExtentManagerTest, ExtentManagerBenchmark) {
   auto start = std::chrono::high_resolution_clock::now();
 
   for (int i = 0; i < num_allocations; ++i) {
-      page_id_t pid = extent_manager->allocate_extent();
+      page_id_t pid = extent_manager->allocate_extent(txn_id);
       if (pid == INVALID_PAGE_ID) break;
       allocated.push_back(pid);
   }

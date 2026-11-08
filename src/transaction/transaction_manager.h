@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -49,7 +48,7 @@ class TransactionManager {
 
   /**
    * Marks the beginning of the transaction.
-   * @return The transaction_id assigned to it.
+   * @return The transaction_id assigned to the transaction.
    */
   uint64_t begin();
 
@@ -60,13 +59,19 @@ class TransactionManager {
    */
   bool commit(uint64_t txn_id);
 
-  /** @brief Aborts a transaction. Appends ABORT record. */
+  /** @brief
+   * Aborts a transaction. Appends ABORT record.
+   **/
   bool abort(uint64_t txn_id);
 
-  /** @brief Records a WAL LSN against the transaction (called after each write operation). */
+  /** @brief
+   * Records a WAL LSN against the transaction (called after each write operation).
+   **/
   void record_lsn(uint64_t txn_id, lsn_t lsn);
 
-  /** @brief Returns the transaction status, or std::nullopt if not found. */
+  /** @brief
+   * Returns the transaction status, or std::nullopt if not found.
+   **/
   std::optional<TransactionStatus> get_status(uint64_t txn_id) const;
 
   /**
@@ -77,16 +82,23 @@ class TransactionManager {
    */
   lsn_t get_last_lsn(uint64_t txn_id) const;
 
-  /** @brief Returns the next LSN that will be assigned (for testing/debugging). */
+  /**
+   * @brief
+   * Returns the next LSN that will be assigned (for testing/debugging).
+   **/
   lsn_t get_next_lsn() const;
 
-  /** @brief Returns the highest LSN known to be on disk. */
+  /**
+   * @brief
+   * Returns the highest LSN known to be on disk.
+   **/
   lsn_t get_flushed_lsn() const;
 
  private:
   LogManager& log_manager_;
   mutable std::mutex latch_;
-  std::atomic<uint64_t> next_txn_id_{1};
+  // Atomically increasing transaction ID that is incremented each time a new transaction begins.
+  uint64_t next_txn_id_ = 1;
   std::unordered_map<uint64_t, Transaction> transactions_;
 };
 

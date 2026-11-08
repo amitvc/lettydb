@@ -185,9 +185,10 @@ class TableManager {
    * ExtentManager::deallocate_extent().
    *
    * @param iam_head The IAM head page for the table.
+   * @param txn_id Transaction the underlying extent deallocations are logged under.
    * @return Number of extents freed.
    */
-  int free_empty_extents(page_id_t iam_head);
+  int free_empty_extents(page_id_t iam_head, uint64_t txn_id);
 
   BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
@@ -199,7 +200,7 @@ class TableManager {
    * @brief Returns a page that can accept `needed_space` bytes, allocating a
    *        new extent (and initializing it as a SlottedPage) if none exists.
    */
-  page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space);
+  page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space, uint64_t txn_id);
 
 };
 

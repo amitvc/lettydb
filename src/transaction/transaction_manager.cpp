@@ -16,7 +16,7 @@ TransactionManager::TransactionManager(LogManager& log_manager)
 uint64_t TransactionManager::begin() {
   std::lock_guard<std::mutex> lock(latch_);
 
-  uint64_t txn_id = next_txn_id_.fetch_add(1);
+  uint64_t txn_id = next_txn_id_++;
 
   LogRecord begin_rec{};
   if (!build_transaction_record(LogRecordType::BEGIN, txn_id, begin_rec)) {
