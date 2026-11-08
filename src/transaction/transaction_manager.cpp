@@ -57,6 +57,7 @@ bool TransactionManager::commit(uint64_t txn_id) {
     LOG_TXN_ERROR("Failed to build COMMIT record for txn {}", txn_id);
     return false;
   }
+  commit_rec.header.prev_lsn = it->second.last_lsn;
 
   lsn_t commit_lsn = log_manager_.append_record(commit_rec);
   if (commit_lsn == INVALID_LSN) {
@@ -98,6 +99,7 @@ bool TransactionManager::abort(uint64_t txn_id) {
     LOG_TXN_ERROR("Failed to build ABORT record for txn {}", txn_id);
     return false;
   }
+  abort_rec.header.prev_lsn = it->second.last_lsn;
 
   lsn_t abort_lsn = log_manager_.append_record(abort_rec);
   if (abort_lsn == INVALID_LSN) {

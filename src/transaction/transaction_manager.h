@@ -18,12 +18,18 @@ enum class TransactionStatus {
   Aborted,
 };
 
+/**
+ * @brief
+ * This represents the metadata for an ongoing transaction that is useful to different components in the database
+ * to generate WAL log records.
+ */
 struct Transaction {
   uint64_t txn_id;
   TransactionStatus status;
   lsn_t begin_lsn;
   // LSN of the last WAL record for the transaction. This field keeps getting updated as Transaction manager keeps
-  // processing statements in the current transaction.
+  // processing statements in the current transaction. This is also used to associate the prev_lsn field for new
+  // WAL log record.
   lsn_t last_lsn;
 };
 
