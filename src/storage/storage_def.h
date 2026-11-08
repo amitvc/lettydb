@@ -278,10 +278,15 @@ struct IAMPage {
   uint32_t extent_ids[IAM_MAX_EXTENTS];       // 4080 bytes = 1020 extent IDs
   
   /**
-   * @brief Add an extent to the list.
-   * @return true if added, false if list is full.
+   * @brief Add an extent to the list. Idempotent — adding an extent_id
+   * already present is a no-op, so WAL redo can safely replay this twice.
+   * @return true if the extent is present after the call, false if the list
+   * is full and extent_id was not already present.
    */
   bool add_extent(uint32_t extent_id) {
+    if (contains_extent(extent_id)) {
+      return true;
+    }
     if (extent_count >= IAM_MAX_EXTENTS) {
       return false;
     }
