@@ -63,7 +63,9 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
   iam_page.page_lsn = log_iam_extent_change(LogRecordType::IAM_ADD_EXTENT, txn_id, new_iam_page_id, extent_id);
   store_page_layout(new_iam_guard, iam_page);
 
-  if (prev_iam_page == INVALID_PAGE_ID) return new_iam_page_id;
+  if (prev_iam_page == INVALID_PAGE_ID){
+	return new_iam_page_id;
+  }
 
   PageGuard prev_iam_guard = buffer_pool_.fetch_page_guard(prev_iam_page);
   if (!prev_iam_guard) {
@@ -71,7 +73,31 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
                                             " while linking IAM chain");
   }
   auto prev_iam = load_page_layout<IAMPage>(prev_iam_guard);
+
+  ByteBuffer before_image(sizeof(page_id_t));
+  write_le32(before_image.data(), prev_iam.next_page_id);
+
   prev_iam.next_page_id = new_iam_page_id;
+
+  ByteBuffer after_image(sizeof(page_id_t));
+  write_le32(after_image.data(), prev_iam.next_page_id);
+
+  PagePatch patch;
+  patch.page_id = prev_iam_page;
+  patch.offset = 0;
+  patch.before_payload = before_image;
+  patch.after_payload = after_image;
+
+  LogRecord wal_record{};
+  if (build_page_patch_record(txn_id, patch, wal_record)) {
+    wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+    lsn_t lsn = log_manager_.append_record(wal_record);
+    if (lsn != INVALID_LSN) {
+      txn_manager_.record_lsn(txn_id, lsn);
+      prev_iam.page_lsn = lsn;
+    }
+  }
+
   store_page_layout(prev_iam_guard, prev_iam);
 
   LOG_STORAGE_INFO("Created new IAM page {} and added extent {}", new_iam_page_id, extent_id);
@@ -229,7 +255,31 @@ bool IamManager::remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t ext
       if (!prev_guard) return false;
 
       auto prev_iam = load_page_layout<IAMPage>(prev_guard);
+
+      ByteBuffer before_image(sizeof(page_id_t));
+      write_le32(before_image.data(), prev_iam.next_page_id);
+
       prev_iam.next_page_id = next_iam;
+
+      ByteBuffer after_image(sizeof(page_id_t));
+      write_le32(after_image.data(), prev_iam.next_page_id);
+
+      PagePatch patch;
+      patch.page_id = prev_iam_page;
+      patch.offset = 0;
+      patch.before_payload = before_image;
+      patch.after_payload = after_image;
+
+      LogRecord wal_record{};
+      if (build_page_patch_record(txn_id, patch, wal_record)) {
+        wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+        lsn_t lsn = log_manager_.append_record(wal_record);
+        if (lsn != INVALID_LSN) {
+          txn_manager_.record_lsn(txn_id, lsn);
+          prev_iam.page_lsn = lsn;
+        }
+      }
+
       store_page_layout(prev_guard, prev_iam);
     }
 
