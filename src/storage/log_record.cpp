@@ -332,6 +332,56 @@ bool deserialize_checkpoint_patch(const ByteBuffer &bytes, CheckpointPatch &out)
   return true;
 }
 
+bool serialize_checkpoint_marker(const CheckpointMarker &marker, ByteBuffer &out) {
+  out.resize(sizeof(CheckpointMarker));
+  auto cursor = 0;
+
+  std::memcpy(out.data() + cursor, marker.signature, sizeof(marker.signature));
+  cursor += sizeof(marker.signature);
+
+  write_le64(out.data() + cursor, static_cast<uint64_t>(marker.last_checkpoint_lsn));
+  cursor += sizeof(marker.last_checkpoint_lsn);
+
+  uint32_t crc = compute_crc32(out.data(), cursor);
+  write_le32(out.data() + cursor, crc);
+
+  return true;
+}
+
+bool deserialize_checkpoint_marker(const ByteBuffer &bytes, CheckpointMarker &out) {
+  if (bytes.size() != sizeof(CheckpointMarker)) {
+	LOG_WAL_ERROR("CheckpointMarker buffer must be exactly {} bytes, got {}", sizeof(CheckpointMarker), bytes.size());
+	return false;
+  }
+
+  auto cursor = 0;
+  char signature[18]{};
+  std::memcpy(signature, bytes.data() + cursor, sizeof(signature));
+  cursor += sizeof(signature);
+
+  if (std::memcmp(signature, CHECKPOINT_MARKER_SIGNATURE, sizeof(signature)) != 0) {
+	LOG_WAL_ERROR("Invalid CheckpointMarker signature");
+	return false;
+  }
+
+  auto rec_lsn = static_cast<lsn_t>(read_le64(bytes.data() + cursor));
+  cursor += sizeof(lsn_t);
+
+  uint32_t stored_checksum = read_le32(bytes.data() + cursor);
+  uint32_t computed_checksum = compute_crc32(bytes.data(), cursor);
+
+  if (stored_checksum != computed_checksum) {
+	LOG_WAL_ERROR("CheckpointMarker checksum mismatch: expected {}, got {}", stored_checksum, computed_checksum);
+	return false;
+  }
+
+  std::memcpy(out.signature, signature, sizeof(out.signature));
+  out.last_checkpoint_lsn = rec_lsn;
+  out.checksum = stored_checksum;
+
+  return true;
+}
+
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out) {
 	ByteBuffer payload;
 	if (!serialize_page_patch(patch, payload)) {

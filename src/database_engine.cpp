@@ -4,6 +4,7 @@
 #include "buffer/lru_replacer.h"
 #include "storage/log_manager.h"
 #include "transaction/transaction_manager.h"
+#include "storage/checkpoint_manager.h"
 #include "storage/extent_manager.h"
 #include "storage/iam_manager.h"
 #include "catalog/catalog_manager.h"
@@ -19,6 +20,7 @@ DatabaseEngine::DatabaseEngine(const std::string& db_path) {
       *disk_manager_, DEFAULT_POOL_SIZE, std::make_unique<LRUPageReplacer>());
   log_manager_ = std::make_unique<LogManager>(db_path + ".wal");
   txn_manager_ = std::make_unique<TransactionManager>(*log_manager_);
+  checkpoint_manager_ = std::make_unique<CheckpointManager>(db_path, *buffer_pool_, *log_manager_, *txn_manager_);
   extent_manager_ = std::make_unique<ExtentManager>(*buffer_pool_, *log_manager_, *txn_manager_);
   iam_manager_ = std::make_unique<IamManager>(*buffer_pool_, *extent_manager_, *log_manager_, *txn_manager_);
   catalog_manager_ = std::make_unique<CatalogManager>(*buffer_pool_, *iam_manager_, *txn_manager_);
@@ -35,5 +37,6 @@ Executor& DatabaseEngine::get_executor() { return *executor_; }
 StorageInspector& DatabaseEngine::get_inspector() { return *inspector_; }
 CatalogManager& DatabaseEngine::get_catalog() { return *catalog_manager_; }
 BufferPoolManager& DatabaseEngine::get_buffer_pool() { return *buffer_pool_; }
+CheckpointManager& DatabaseEngine::get_checkpoint_manager() { return *checkpoint_manager_; }
 
 } // namespace letty

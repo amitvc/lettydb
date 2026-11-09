@@ -151,6 +151,32 @@ static constexpr auto CHECKPOINT_PATCH_HEADER_SIZE = 8; // dirty_pages_count + a
 static constexpr auto DIRTY_PAGE_ENTRY_SIZE = 12;  // page_id_t + lsn_t
 static constexpr auto ACTIVE_TXN_ENTRY_SIZE = 16;  // txn_id + lsn_t
 
+/**
+ * @struct CheckpointMarker
+ * @brief On-disk checkpoint marker file format.
+ *
+ * Stores the LSN of the last BEGIN_CHECKPOINT record, allowing recovery to
+ * know where to start scanning the WAL. Written to a separate file
+ * (e.g., `<db_path>.checkpoint`) for atomicity and to keep the database
+ * header page read-only.
+ *
+ * Format:
+ *   [signature (18B): "CHECK_POINT_MARKER"]
+ *   [last_checkpoint_lsn (8B)]
+ *   [checksum (4B): CRC32 of the above fields]
+ * Total: 30 bytes
+ */
+#pragma pack(push, 1)
+struct CheckpointMarker {
+  char signature[18];       // "CHECK_POINT_MARKER"
+  lsn_t last_checkpoint_lsn;
+  uint32_t checksum;
+};
+#pragma pack(pop)
+static_assert(sizeof(CheckpointMarker) == 30, "CheckpointMarker must be exactly 30 bytes");
+
+static constexpr const char CHECKPOINT_MARKER_SIGNATURE[] = "CHECK_POINT_MARKER";
+
 
 bool serialize_page_patch(const PagePatch &payload, ByteBuffer &out);
 bool deserialize_page_patch(const ByteBuffer &bytes, PagePatch &out);
@@ -163,6 +189,17 @@ bool serialize_compensation_patch(const CompensationPatch &compensation_patch, B
 bool deserialize_compensation_patch(const ByteBuffer &bytes, CompensationPatch& compensation_patch);
 bool serialize_checkpoint_patch(const CheckpointPatch &patch, ByteBuffer &out);
 bool deserialize_checkpoint_patch(const ByteBuffer &bytes, CheckpointPatch &out);
+
+/**
+ * @brief Serializes a CheckpointMarker to a 20-byte buffer with CRC32 checksum.
+ */
+bool serialize_checkpoint_marker(const CheckpointMarker &marker, ByteBuffer &out);
+
+/**
+ * @brief Deserializes a 20-byte buffer into a CheckpointMarker, verifying CRC32.
+ * @return true if checksum is valid, false otherwise (marker not modified).
+ */
+bool deserialize_checkpoint_marker(const ByteBuffer &bytes, CheckpointMarker &out);
 bool serialize_log_record(const LogRecord &record, ByteBuffer &out);
 bool deserialize_log_record(const ByteBuffer &bytes, LogRecord &out);
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out);

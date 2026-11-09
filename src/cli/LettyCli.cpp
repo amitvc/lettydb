@@ -1,5 +1,6 @@
 #include "LettyCli.h"
 #include "database_engine.h"
+#include "storage/checkpoint_manager.h"
 #include "catalog/catalog_manager.h"
 #include "monitoring/storage_inspector.h"
 #include "storage/tuple.h"
@@ -438,6 +439,12 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
         if (!result.success) {
             fmt::print(stderr, "Error: {}\n", result.error_message);
             return;
+        }
+
+        if (db_engine_->get_checkpoint_manager().should_checkpoint()) {
+            if (!db_engine_->get_checkpoint_manager().run_checkpoint()) {
+                fmt::print(stderr, "Warning: Checkpoint failed\n");
+            }
         }
 
         if (!result.rows.empty() || !result.column_names.empty()) {
