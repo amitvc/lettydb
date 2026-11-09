@@ -100,6 +100,18 @@ class TransactionManager {
    **/
   lsn_t get_flushed_lsn() const;
 
+  /**
+   * @brief Returns a snapshot of the active transaction table for checkpoint persistence.
+   *
+   * Committed and aborted transactions are erased from transactions_ as soon as their
+   * terminal WAL record is durable, so every remaining entry is implicitly Active. The
+   * map is {txn_id → last_lsn}, taken under the latch so it is consistent with the
+   * current state at that instant.
+   *
+   * @return Copy of the active transaction table.
+   */
+  std::unordered_map<uint64_t, lsn_t> get_active_transaction_table() const;
+
  private:
   LogManager& log_manager_;
   mutable std::mutex latch_;

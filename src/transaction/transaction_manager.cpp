@@ -73,7 +73,7 @@ bool TransactionManager::commit(uint64_t txn_id) {
     return false;
   }
 
-  it->second.status = TransactionStatus::Committed;
+  transactions_.erase(it);
 
   LOG_TXN_INFO("Transaction {} committed at LSN {}", txn_id, commit_lsn);
   return true;
@@ -107,8 +107,7 @@ bool TransactionManager::abort(uint64_t txn_id) {
     return false;
   }
 
-  it->second.last_lsn = abort_lsn;
-  it->second.status = TransactionStatus::Aborted;
+  transactions_.erase(it);
 
   LOG_TXN_INFO("Transaction {} aborted at LSN {}", txn_id, abort_lsn);
   return true;
@@ -151,6 +150,16 @@ lsn_t TransactionManager::get_next_lsn() const {
 
 lsn_t TransactionManager::get_flushed_lsn() const {
   return log_manager_.get_flushed_lsn();
+}
+
+std::unordered_map<uint64_t, lsn_t> TransactionManager::get_active_transaction_table() const {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  std::unordered_map<uint64_t, lsn_t> att;
+  for (const auto& [txn_id, txn] : transactions_) {
+    att.emplace(txn_id, txn.last_lsn);
+  }
+  return att;
 }
 
 }

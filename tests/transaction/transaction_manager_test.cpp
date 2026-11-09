@@ -54,10 +54,10 @@ TEST_F(TransactionManagerTest, BeginIncrementsTxnId) {
   EXPECT_GT(txn3, txn2);
 }
 
-TEST_F(TransactionManagerTest, CommitMarksTransactionCommitted) {
+TEST_F(TransactionManagerTest, CommitErasesTransactionFromActiveTable) {
   uint64_t txn_id = txn_mgr_->begin();
   EXPECT_TRUE(txn_mgr_->commit(txn_id));
-  EXPECT_EQ(txn_mgr_->get_status(txn_id), TransactionStatus::Committed);
+  EXPECT_EQ(txn_mgr_->get_status(txn_id), std::nullopt);
 }
 
 TEST_F(TransactionManagerTest, CommitFlushesWALToDisk) {
@@ -79,10 +79,10 @@ TEST_F(TransactionManagerTest, CommitNonActiveTransactionFails) {
   EXPECT_FALSE(txn_mgr_->commit(txn_id));
 }
 
-TEST_F(TransactionManagerTest, AbortMarksTransactionAborted) {
+TEST_F(TransactionManagerTest, AbortErasesTransactionFromActiveTable) {
   uint64_t txn_id = txn_mgr_->begin();
   EXPECT_TRUE(txn_mgr_->abort(txn_id));
-  EXPECT_EQ(txn_mgr_->get_status(txn_id), TransactionStatus::Aborted);
+  EXPECT_EQ(txn_mgr_->get_status(txn_id), std::nullopt);
 }
 
 TEST_F(TransactionManagerTest, AbortUnknownTransactionFails) {
@@ -101,11 +101,55 @@ TEST_F(TransactionManagerTest, MultipleTransactionsIndependent) {
   uint64_t txn2 = txn_mgr_->begin();
 
   EXPECT_TRUE(txn_mgr_->commit(txn1));
-  EXPECT_EQ(txn_mgr_->get_status(txn1), TransactionStatus::Committed);
+  EXPECT_EQ(txn_mgr_->get_status(txn1), std::nullopt);
   EXPECT_EQ(txn_mgr_->get_status(txn2), TransactionStatus::Active);
 
   EXPECT_TRUE(txn_mgr_->abort(txn2));
-  EXPECT_EQ(txn_mgr_->get_status(txn2), TransactionStatus::Aborted);
+  EXPECT_EQ(txn_mgr_->get_status(txn2), std::nullopt);
+}
+
+// ─── Active Transaction Table (ATT) ───────────────────────────────
+
+TEST_F(TransactionManagerTest, ActiveTransactionTableTracksActiveTxns) {
+  uint64_t txn1 = txn_mgr_->begin();
+  uint64_t txn2 = txn_mgr_->begin();
+
+  auto att = txn_mgr_->get_active_transaction_table();
+  EXPECT_EQ(att.size(), 2);
+  EXPECT_EQ(att.at(txn1), txn_mgr_->get_last_lsn(txn1));
+  EXPECT_EQ(att.at(txn2), txn_mgr_->get_last_lsn(txn2));
+}
+
+TEST_F(TransactionManagerTest, ActiveTransactionTableExcludesCommitted) {
+  uint64_t txn1 = txn_mgr_->begin();
+  uint64_t txn2 = txn_mgr_->begin();
+
+  EXPECT_TRUE(txn_mgr_->commit(txn1));
+
+  auto att = txn_mgr_->get_active_transaction_table();
+  EXPECT_EQ(att.size(), 1);
+  EXPECT_EQ(att.find(txn1), att.end());
+  EXPECT_NE(att.find(txn2), att.end());
+}
+
+TEST_F(TransactionManagerTest, ActiveTransactionTableExcludesAborted) {
+  uint64_t txn1 = txn_mgr_->begin();
+  uint64_t txn2 = txn_mgr_->begin();
+
+  EXPECT_TRUE(txn_mgr_->abort(txn1));
+
+  auto att = txn_mgr_->get_active_transaction_table();
+  EXPECT_EQ(att.size(), 1);
+  EXPECT_EQ(att.find(txn1), att.end());
+  EXPECT_NE(att.find(txn2), att.end());
+}
+
+TEST_F(TransactionManagerTest, ActiveTransactionTableEmptyWhenNoneActive) {
+  uint64_t txn_id = txn_mgr_->begin();
+  EXPECT_TRUE(txn_mgr_->commit(txn_id));
+
+  auto att = txn_mgr_->get_active_transaction_table();
+  EXPECT_TRUE(att.empty());
 }
 
 }  // namespace letty
