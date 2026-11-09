@@ -300,4 +300,96 @@ namespace letty {
 	EXPECT_EQ(decoded.extent_id, original.extent_id);
   }
 
+  TEST(LogRecordTest, SerializeCheckpointPatchBasicRoundTrip) {
+    CheckpointPatch original{};
+    original.dirty_pages.push_back({10, 100});
+    original.dirty_pages.push_back({20, 200});
+    original.active_transactions.push_back({1, 150});
+    original.active_transactions.push_back({2, 175});
+
+    ByteBuffer bytes;
+    ASSERT_TRUE(serialize_checkpoint_patch(original, bytes));
+
+    CheckpointPatch decoded{};
+    ASSERT_TRUE(deserialize_checkpoint_patch(bytes, decoded));
+
+    EXPECT_EQ(decoded.dirty_pages.size(), 2);
+    EXPECT_EQ(decoded.dirty_pages[0].first, 10);
+    EXPECT_EQ(decoded.dirty_pages[0].second, 100);
+    EXPECT_EQ(decoded.dirty_pages[1].first, 20);
+    EXPECT_EQ(decoded.dirty_pages[1].second, 200);
+
+    EXPECT_EQ(decoded.active_transactions.size(), 2);
+    EXPECT_EQ(decoded.active_transactions[0].first, 1);
+    EXPECT_EQ(decoded.active_transactions[0].second, 150);
+    EXPECT_EQ(decoded.active_transactions[1].first, 2);
+    EXPECT_EQ(decoded.active_transactions[1].second, 175);
+  }
+
+  TEST(LogRecordTest, SerializeCheckpointPatchEmptySnapshot) {
+    CheckpointPatch original{};
+
+    ByteBuffer bytes;
+    ASSERT_TRUE(serialize_checkpoint_patch(original, bytes));
+    EXPECT_EQ(bytes.size(), CHECKPOINT_PATCH_HEADER_SIZE);
+
+    CheckpointPatch decoded{};
+    ASSERT_TRUE(deserialize_checkpoint_patch(bytes, decoded));
+
+    EXPECT_TRUE(decoded.dirty_pages.empty());
+    EXPECT_TRUE(decoded.active_transactions.empty());
+  }
+
+  TEST(LogRecordTest, SerializeCheckpointPatchOnlyDirtyPages) {
+    CheckpointPatch original{};
+    original.dirty_pages.push_back({5, 50});
+    original.dirty_pages.push_back({15, 150});
+    original.dirty_pages.push_back({25, 250});
+
+    ByteBuffer bytes;
+    ASSERT_TRUE(serialize_checkpoint_patch(original, bytes));
+
+    CheckpointPatch decoded{};
+    ASSERT_TRUE(deserialize_checkpoint_patch(bytes, decoded));
+
+    EXPECT_EQ(decoded.dirty_pages.size(), 3);
+    EXPECT_EQ(decoded.dirty_pages[0], std::make_pair(5, 50));
+    EXPECT_EQ(decoded.dirty_pages[1], std::make_pair(15, 150));
+    EXPECT_EQ(decoded.dirty_pages[2], std::make_pair(25, 250));
+    EXPECT_TRUE(decoded.active_transactions.empty());
+  }
+
+  TEST(LogRecordTest, SerializeCheckpointPatchOnlyActiveTransactions) {
+    CheckpointPatch original{};
+    original.active_transactions.push_back({100, 1000});
+    original.active_transactions.push_back({200, 2000});
+
+    ByteBuffer bytes;
+    ASSERT_TRUE(serialize_checkpoint_patch(original, bytes));
+
+    CheckpointPatch decoded{};
+    ASSERT_TRUE(deserialize_checkpoint_patch(bytes, decoded));
+
+    EXPECT_TRUE(decoded.dirty_pages.empty());
+    EXPECT_EQ(decoded.active_transactions.size(), 2);
+    EXPECT_EQ(decoded.active_transactions[0], std::make_pair(100, 1000));
+    EXPECT_EQ(decoded.active_transactions[1], std::make_pair(200, 2000));
+  }
+
+  TEST(LogRecordTest, DeserializeCheckpointPatchRejectsSizeMismatch) {
+    CheckpointPatch original{};
+    original.dirty_pages.push_back({10, 100});
+    original.active_transactions.push_back({1, 150});
+
+    ByteBuffer bytes;
+    ASSERT_TRUE(serialize_checkpoint_patch(original, bytes));
+
+    write_le32(bytes.data(), 999);
+
+    CheckpointPatch out{};
+    out.dirty_pages.push_back({777, 777});
+    EXPECT_FALSE(deserialize_checkpoint_patch(bytes, out));
+    EXPECT_EQ(out.dirty_pages[0].first, 777);
+  }
+
 }

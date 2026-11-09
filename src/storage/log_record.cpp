@@ -260,6 +260,78 @@ namespace letty {
   }
 
 
+bool serialize_checkpoint_patch(const CheckpointPatch &patch, ByteBuffer &out) {
+  size_t total_size = CHECKPOINT_PATCH_HEADER_SIZE +
+	  patch.dirty_pages.size() * DIRTY_PAGE_ENTRY_SIZE +
+	  patch.active_transactions.size() * ACTIVE_TXN_ENTRY_SIZE;
+  out.resize(total_size);
+
+  auto cursor = 0;
+  write_le32(out.data() + cursor, static_cast<uint32_t>(patch.dirty_pages.size()));
+  cursor += sizeof(uint32_t);
+  write_le32(out.data() + cursor, static_cast<uint32_t>(patch.active_transactions.size()));
+  cursor += sizeof(uint32_t);
+
+  for (const auto &[page_id, rec_lsn] : patch.dirty_pages) {
+	write_le32(out.data() + cursor, static_cast<uint32_t>(page_id));
+	cursor += sizeof(uint32_t);
+	write_le64(out.data() + cursor, static_cast<uint64_t>(rec_lsn));
+	cursor += sizeof(uint64_t);
+  }
+
+  for (const auto &[txn, last_lsn] : patch.active_transactions) {
+	write_le64(out.data() + cursor, static_cast<uint64_t>(txn));
+	cursor += sizeof(uint64_t);
+	write_le64(out.data() + cursor, static_cast<uint64_t>(last_lsn));
+	cursor += sizeof(uint64_t);
+  }
+
+  return true;
+}
+
+bool deserialize_checkpoint_patch(const ByteBuffer &bytes, CheckpointPatch &out) {
+  if (bytes.size() < CHECKPOINT_PATCH_HEADER_SIZE) {
+	LOG_WAL_ERROR("Payload too short to contain a CheckpointPatch header");
+	return false;
+  }
+
+  auto cursor = 0;
+  uint32_t dirty_pages_count = read_le32(bytes.data() + cursor);
+  cursor += sizeof(uint32_t);
+  uint32_t active_txns_count = read_le32(bytes.data() + cursor);
+  cursor += sizeof(uint32_t);
+
+  size_t expected_size = CHECKPOINT_PATCH_HEADER_SIZE +
+	  static_cast<size_t>(dirty_pages_count) * DIRTY_PAGE_ENTRY_SIZE +
+	  static_cast<size_t>(active_txns_count) * ACTIVE_TXN_ENTRY_SIZE;
+  if (expected_size != bytes.size()) {
+	LOG_WAL_ERROR("Declared dirty_pages/active_txns counts do not match the actual buffer size");
+	return false;
+  }
+
+  out.dirty_pages.clear();
+  out.dirty_pages.reserve(dirty_pages_count);
+  for (uint32_t i = 0; i < dirty_pages_count; ++i) {
+	auto page_id = static_cast<page_id_t>(read_le32(bytes.data() + cursor));
+	cursor += sizeof(uint32_t);
+	auto rec_lsn = static_cast<lsn_t>(read_le64(bytes.data() + cursor));
+	cursor += sizeof(uint64_t);
+	out.dirty_pages.emplace_back(page_id, rec_lsn);
+  }
+
+  out.active_transactions.clear();
+  out.active_transactions.reserve(active_txns_count);
+  for (uint32_t i = 0; i < active_txns_count; ++i) {
+	auto txn = static_cast<txn_id>(read_le64(bytes.data() + cursor));
+	cursor += sizeof(uint64_t);
+	auto last_lsn = static_cast<lsn_t>(read_le64(bytes.data() + cursor));
+	cursor += sizeof(uint64_t);
+	out.active_transactions.emplace_back(txn, last_lsn);
+  }
+
+  return true;
+}
+
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out) {
 	ByteBuffer payload;
 	if (!serialize_page_patch(patch, payload)) {

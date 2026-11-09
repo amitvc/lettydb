@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "config.h"
@@ -128,6 +129,28 @@ struct IamPatch {
 };
 static constexpr auto IAM_PATCH_SIZE = 8; // page_id_t + uint32_t
 
+/**
+ * @struct CheckpointPatch
+ * @brief Builder input for an END_CHECKPOINT record.
+ *
+ * Carries a fuzzy snapshot of the dirty page table and active transaction
+ * table, taken sometime after the matching BEGIN_CHECKPOINT was written.
+ * BEGIN_CHECKPOINT itself carries no payload — it is a plain marker record
+ * built with build_transaction_record(), whose LSN is what recovery's
+ * Analysis phase rewinds to, since this snapshot may already be stale by
+ * the time END_CHECKPOINT is durable.
+ *
+ * Not an on-disk struct, so serialize field by field.
+ */
+struct CheckpointPatch {
+  std::vector<std::pair<page_id_t, lsn_t>> dirty_pages;   // page_id -> recLSN
+  std::vector<std::pair<txn_id, lsn_t>> active_transactions;      // txn_id  -> last_lsn
+};
+
+static constexpr auto CHECKPOINT_PATCH_HEADER_SIZE = 8; // dirty_pages_count + active_txns_count
+static constexpr auto DIRTY_PAGE_ENTRY_SIZE = 12;  // page_id_t + lsn_t
+static constexpr auto ACTIVE_TXN_ENTRY_SIZE = 16;  // txn_id + lsn_t
+
 
 bool serialize_page_patch(const PagePatch &payload, ByteBuffer &out);
 bool deserialize_page_patch(const ByteBuffer &bytes, PagePatch &out);
@@ -138,6 +161,8 @@ bool deserialize_iam_patch(const ByteBuffer &bytes, IamPatch &out);
 
 bool serialize_compensation_patch(const CompensationPatch &compensation_patch, ByteBuffer &out);
 bool deserialize_compensation_patch(const ByteBuffer &bytes, CompensationPatch& compensation_patch);
+bool serialize_checkpoint_patch(const CheckpointPatch &patch, ByteBuffer &out);
+bool deserialize_checkpoint_patch(const ByteBuffer &bytes, CheckpointPatch &out);
 bool serialize_log_record(const LogRecord &record, ByteBuffer &out);
 bool deserialize_log_record(const ByteBuffer &bytes, LogRecord &out);
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out);
