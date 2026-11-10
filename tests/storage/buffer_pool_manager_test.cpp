@@ -9,7 +9,6 @@
 
 using namespace letty;
 
-// ─── Mock DiskManager ──────────────────────────────────────────────
 
 class MockDiskManager : public IDiskManager {
  public:
@@ -19,7 +18,6 @@ class MockDiskManager : public IDiskManager {
   MOCK_METHOD(bool, sync, (), (override));
 };
 
-// ─── Test Fixture ──────────────────────────────────────────────────
 
 class BufferPoolManagerTest : public ::testing::Test {
  protected:
@@ -33,7 +31,6 @@ class BufferPoolManagerTest : public ::testing::Test {
   }
 };
 
-// ─── Basic Fetch / Unpin ───────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, FetchPageLoadsFromDisk) {
   auto bpm = CreateBPM();
@@ -110,7 +107,6 @@ TEST_F(BufferPoolManagerTest, DirtyFlagSticksAcrossUnpins) {
   bpm->unpin_page(1, false);
 }
 
-// ─── Eviction ──────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, EvictsLRUWhenPoolFull) {
   auto bpm = CreateBPM();
@@ -182,7 +178,6 @@ TEST_F(BufferPoolManagerTest, PoolFullAllPinnedReturnsNullptr) {
   }
 }
 
-// ─── Pin Count ─────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, PinCountTracksCorrectly) {
   auto bpm = CreateBPM();
@@ -209,7 +204,6 @@ TEST_F(BufferPoolManagerTest, PinCountTracksCorrectly) {
   EXPECT_EQ(page->get_pin_count(), 0);
 }
 
-// ─── New Page ──────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, NewPageCreatesInPool) {
   auto bpm = CreateBPM();
@@ -240,7 +234,6 @@ TEST_F(BufferPoolManagerTest, NewPageDuplicateReturnsNullptr) {
   bpm->unpin_page(42, false);
 }
 
-// ─── Flush ─────────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, FlushPageWritesDirtyToDisk) {
   auto bpm = CreateBPM();
@@ -386,7 +379,6 @@ TEST_F(BufferPoolManagerTest, DeleteNonExistentPageReturnsFalse) {
   EXPECT_FALSE(bpm->delete_page(99));
 }
 
-// ─── Destructor ────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, DestructorFlushesDirtyPages) {
   auto bpm = CreateBPM();
