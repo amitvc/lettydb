@@ -12,6 +12,14 @@
 
 namespace letty {
 
+// Test harness to access protected methods
+class TestableLogManager : public LogManager {
+ public:
+  using LogManager::LogManager;
+  using LogManager::list_segment_ids;
+  using LogManager::find_latest_segment;
+};
+
 class LogManagerTest : public ::testing::Test {
  protected:
   static constexpr uint32_t TEST_SEGMENT_SIZE = 1024;
@@ -319,6 +327,153 @@ TEST_F(LogManagerTest, MultipleRecordsBatchedIntoSingleFlush) {
     ASSERT_TRUE(rec.has_value());
     EXPECT_EQ(rec->header.tran_id, i + 1);
   }
+}
+
+TEST_F(LogManagerTest, ReadRecordsFromSkipsEarlierRecordsInSameSegment) {
+  LogManager log_mgr(test_prefix_, 1024 * 1024);
+
+  std::vector<lsn_t> lsns;
+  for (uint64_t i = 1; i <= 5; ++i) {
+    LogRecord rec{};
+    ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, i, rec));
+    lsn_t lsn = log_mgr.append_record(rec);
+    ASSERT_NE(lsn, INVALID_LSN);
+    lsns.push_back(lsn);
+  }
+  log_mgr.flush_to_lsn(lsns.back());
+
+  auto subset = log_mgr.read_records_from(lsns[2]);
+  ASSERT_EQ(subset.size(), 3u);
+  EXPECT_EQ(subset[0].header.tran_id, 3u);
+  EXPECT_EQ(subset[1].header.tran_id, 4u);
+  EXPECT_EQ(subset[2].header.tran_id, 5u);
+}
+
+TEST_F(LogManagerTest, ReadRecordsFromSkipsEarlierSegments) {
+  LogManager log_mgr(test_prefix_, 200);
+
+  std::vector<lsn_t> lsns;
+  for (uint64_t i = 1; i <= 15; ++i) {
+    LogRecord rec{};
+    ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, i, rec));
+    lsn_t lsn = log_mgr.append_record(rec);
+    ASSERT_NE(lsn, INVALID_LSN);
+    lsns.push_back(lsn);
+  }
+  log_mgr.flush_to_lsn(lsns.back());
+
+  EXPECT_GT(log_mgr.get_current_segment_id(), 0u);
+
+  lsn_t target_lsn = lsns[8];
+  auto subset = log_mgr.read_records_from(target_lsn);
+  ASSERT_EQ(subset.size(), 7u);
+  EXPECT_EQ(subset.front().header.lsn, target_lsn);
+  EXPECT_EQ(subset.front().header.tran_id, 9u);
+  EXPECT_EQ(subset.back().header.tran_id, 15u);
+}
+
+TEST_F(LogManagerTest, ListSegmentIdsReturnsEmptyForFreshDirectory) {
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto segments = log_mgr.list_segment_ids();
+  ASSERT_EQ(segments.size(), 1u);
+  EXPECT_EQ(segments[0], 0u);
+}
+
+TEST_F(LogManagerTest, ListSegmentIdsSortsMultipleSegments) {
+  write_valid_segment(5, 100);
+  write_valid_segment(2, 100);
+  write_valid_segment(8, 100);
+  write_valid_segment(1, 100);
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto segments = log_mgr.list_segment_ids();
+  ASSERT_EQ(segments.size(), 4u);
+  EXPECT_EQ(segments[0], 1u);
+  EXPECT_EQ(segments[1], 2u);
+  EXPECT_EQ(segments[2], 5u);
+  EXPECT_EQ(segments[3], 8u);
+}
+
+TEST_F(LogManagerTest, ListSegmentIdsIgnoresInvalidFilenames) {
+  write_valid_segment(0, 50);
+  write_valid_segment(1, 50);
+  write_valid_segment(3, 50);
+
+  std::ofstream((test_dir_ / "letty.wal.abc").string()).put('x');
+  std::ofstream((test_dir_ / "letty.wal.1.2.3").string()).put('y');
+  std::ofstream((test_dir_ / "letty.wal.").string()).put('z');
+  std::ofstream((test_dir_ / "other.wal.0").string()).put('w');
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto segments = log_mgr.list_segment_ids();
+  ASSERT_EQ(segments.size(), 3u);
+  EXPECT_EQ(segments[0], 0u);
+  EXPECT_EQ(segments[1], 1u);
+  EXPECT_EQ(segments[2], 3u);
+}
+
+TEST_F(LogManagerTest, ListSegmentIdsHandlesGapsInSegmentIds) {
+  write_valid_segment(10, 100);
+  write_valid_segment(20, 100);
+  write_valid_segment(30, 100);
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto segments = log_mgr.list_segment_ids();
+  ASSERT_EQ(segments.size(), 3u);
+  EXPECT_EQ(segments[0], 10u);
+  EXPECT_EQ(segments[1], 20u);
+  EXPECT_EQ(segments[2], 30u);
+}
+
+TEST_F(LogManagerTest, FindLatestSegmentReturnsSegmentZeroOnFreshStart) {
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto latest = log_mgr.find_latest_segment();
+  ASSERT_TRUE(latest.has_value());
+  EXPECT_EQ(latest->first, 0u);
+  EXPECT_EQ(latest->second, WAL_SIGNATURE_SIZE);
+}
+
+TEST_F(LogManagerTest, FindLatestSegmentReturnsSingleSegment) {
+  write_valid_segment(0, 256);
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto latest = log_mgr.find_latest_segment();
+  ASSERT_TRUE(latest.has_value());
+  EXPECT_EQ(latest->first, 0u);
+  EXPECT_EQ(latest->second, WAL_SIGNATURE_SIZE + 256);
+}
+
+TEST_F(LogManagerTest, FindLatestSegmentReturnsHighestId) {
+  write_valid_segment(2, 100);
+  write_valid_segment(0, 150);
+  write_valid_segment(5, 200);
+  write_valid_segment(3, 50);
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto latest = log_mgr.find_latest_segment();
+  ASSERT_TRUE(latest.has_value());
+  EXPECT_EQ(latest->first, 5u);
+  EXPECT_EQ(latest->second, WAL_SIGNATURE_SIZE + 200);
+}
+
+TEST_F(LogManagerTest, FindLatestSegmentWithGappedIds) {
+  write_valid_segment(100, 256);
+  write_valid_segment(50, 100);
+  write_valid_segment(200, 512);
+
+  TestableLogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE);
+
+  auto latest = log_mgr.find_latest_segment();
+  ASSERT_TRUE(latest.has_value());
+  EXPECT_EQ(latest->first, 200u);
+  EXPECT_EQ(latest->second, WAL_SIGNATURE_SIZE + 512);
 }
 
 }  // namespace letty

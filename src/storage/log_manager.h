@@ -94,6 +94,14 @@ class LogManager {
    */
   std::vector<LogRecord> read_records();
 
+  /**
+   * @brief Reads valid records sequentially starting from a given LSN up to EOF.
+   * Skips all WAL segments prior to the segment containing start_lsn.
+   * @param start_lsn The LSN to begin reading from.
+   * @return Valid records in append order starting from start_lsn.
+   */
+  std::vector<LogRecord> read_records_from(lsn_t start_lsn);
+
   /** @brief Returns the LSN that will be assigned to the next appended record. */
   lsn_t get_next_lsn() const { return next_lsn_; }
 
@@ -104,7 +112,7 @@ class LogManager {
   /** @brief Returns the currently active WAL segment ID. */
   uint32_t get_current_segment_id() const { return current_segment_id_; }
 
- private:
+ protected:
   uint32_t segment_id_from_lsn(lsn_t lsn) const {
     return static_cast<uint32_t>(lsn / segment_size_);
   }
@@ -129,6 +137,8 @@ class LogManager {
   bool rollover_to_next_segment();
   std::optional<LogRecord> read_record_from_fd(int fd, lsn_t expected_lsn, uint32_t offset) const;
   std::optional<LogRecord> read_record_from_buffer(lsn_t expected_lsn) const;
+
+ private:
 
   std::string file_prefix_;
   uint32_t segment_size_;

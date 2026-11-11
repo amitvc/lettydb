@@ -218,6 +218,7 @@ lsn_t LogManager::append_record(LogRecord& record) {
 
   // This is the LSN we assigned to the WAL record. We need to return it to the caller.
   lsn_t assigned_lsn = next_lsn_;
+  // Move the cursor to current wal log record + next_lsn_. That new position is the next lsn.
   next_lsn_ += bytes.size();
 
   auto elapsed = std::chrono::steady_clock::now() - last_flush_time_;
@@ -346,13 +347,29 @@ bool LogManager::truncate() {
   return true;
 }
 
-std::vector<LogRecord> LogManager::read_records() {
+std::vector<LogRecord> LogManager::read_records_from(lsn_t start_lsn) {
   std::lock_guard<std::mutex> lock(latch_);
 
   std::vector<LogRecord> records;
+  if (start_lsn >= next_lsn_) {
+    return records;
+  }
+
+  uint32_t start_seg_id = segment_id_from_lsn(start_lsn);
+  uint32_t start_offset = calculate_file_offset_from_lsn(start_lsn);
+  if (start_offset < WAL_SIGNATURE_SIZE) {
+    start_offset = static_cast<uint32_t>(WAL_SIGNATURE_SIZE);
+  }
+
   for (uint32_t seg_id : list_segment_ids()) {
+    if (seg_id < start_seg_id) {
+      continue;
+    }
+
     int seg_fd = (seg_id == current_segment_id_) ? fd_ : open_segment_file(seg_id);
-    uint32_t offset = static_cast<uint32_t>(WAL_SIGNATURE_SIZE);
+    uint32_t offset = (seg_id == start_seg_id)
+                          ? start_offset
+                          : static_cast<uint32_t>(WAL_SIGNATURE_SIZE);
 
     while (offset + sizeof(LogRecordHeader) <= segment_size_) {
       lsn_t expected_lsn = build_lsn(seg_id, offset);
@@ -374,6 +391,10 @@ std::vector<LogRecord> LogManager::read_records() {
     }
   }
   return records;
+}
+
+std::vector<LogRecord> LogManager::read_records() {
+  return read_records_from(WAL_SIGNATURE_SIZE);
 }
 
 }
