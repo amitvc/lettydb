@@ -204,7 +204,10 @@ lsn_t LogManager::append_record(LogRecord& record) {
     }
   }
 
-  record.header.lsn = next_lsn_;
+  // This is the LSN we assigned to the WAL record. We need to return it to the caller.
+  lsn_t assigned_lsn = next_lsn_;
+
+  record.header.lsn = assigned_lsn;
   ByteBuffer bytes;
   if (!serialize_log_record(record, bytes)) {
     return INVALID_LSN;
@@ -216,8 +219,6 @@ lsn_t LogManager::append_record(LogRecord& record) {
   }
   log_buffer_.insert(log_buffer_.end(), bytes.begin(), bytes.end());
 
-  // This is the LSN we assigned to the WAL record. We need to return it to the caller.
-  lsn_t assigned_lsn = next_lsn_;
   // Move the cursor to current wal log record + next_lsn_. That new position is the next lsn.
   next_lsn_ += bytes.size();
 

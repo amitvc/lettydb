@@ -232,7 +232,7 @@ class BufferPoolManager {
    * @param page_id The page that was just dirtied.
    * @param lsn The LSN of the WAL record responsible for the mutation.
    */
-  void track_dirtied_page(page_id_t page_id, lsn_t lsn);
+  void update_dirtied_page_lsn(page_id_t page_id, lsn_t lsn);
 
   /**
    * @brief Returns a snapshot of the dirty page table for checkpoint persistence.

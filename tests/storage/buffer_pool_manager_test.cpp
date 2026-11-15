@@ -572,7 +572,7 @@ TEST_F(BufferPoolManagerTest, TrackDirtiedPageRecordsLSN) {
   auto bpm = CreateBPM();
 
   constexpr lsn_t LSN_100 = 100;
-  bpm->track_dirtied_page(42, LSN_100);
+  bpm->update_dirtied_page_lsn(42, LSN_100);
 
   auto dpt = bpm->get_dirty_page_table();
   EXPECT_EQ(dpt.size(), 1);
@@ -585,8 +585,8 @@ TEST_F(BufferPoolManagerTest, TrackDirtiedPageFirstWinsSemantics) {
   constexpr lsn_t LSN_100 = 100;
   constexpr lsn_t LSN_200 = 200;
 
-  bpm->track_dirtied_page(42, LSN_100);
-  bpm->track_dirtied_page(42, LSN_200);
+  bpm->update_dirtied_page_lsn(42, LSN_100);
+  bpm->update_dirtied_page_lsn(42, LSN_200);
 
   auto dpt = bpm->get_dirty_page_table();
   EXPECT_EQ(dpt.size(), 1);
@@ -603,7 +603,7 @@ TEST_F(BufferPoolManagerTest, FlushPageRemovesDPTEntry) {
   bpm->unpin_page(5, true);
 
   constexpr lsn_t LSN_100 = 100;
-  bpm->track_dirtied_page(5, LSN_100);
+  bpm->update_dirtied_page_lsn(5, LSN_100);
 
   auto dpt_before = bpm->get_dirty_page_table();
   EXPECT_EQ(dpt_before.size(), 1);
@@ -628,9 +628,9 @@ TEST_F(BufferPoolManagerTest, FlushAllPagesRemovesAllDPTEntries) {
     bpm->unpin_page(i, true);
   }
 
-  bpm->track_dirtied_page(0, 100);
-  bpm->track_dirtied_page(1, 200);
-  bpm->track_dirtied_page(2, 300);
+  bpm->update_dirtied_page_lsn(0, 100);
+  bpm->update_dirtied_page_lsn(1, 200);
+  bpm->update_dirtied_page_lsn(2, 300);
 
   EXPECT_EQ(bpm->get_dirty_page_table().size(), 3);
 
@@ -653,7 +653,7 @@ TEST_F(BufferPoolManagerTest, DeletePageRemovesDPTEntry) {
   bpm->fetch_page(7);
   bpm->unpin_page(7, false);
 
-  bpm->track_dirtied_page(7, 500);
+  bpm->update_dirtied_page_lsn(7, 500);
   EXPECT_EQ(bpm->get_dirty_page_table().size(), 1);
 
   bpm->delete_page(7);

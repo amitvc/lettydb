@@ -164,7 +164,7 @@ TEST_F(RecoveryManagerTest, AnalysisWithoutCheckpointTracksAborted) {
 
 TEST_F(RecoveryManagerTest, AnalysisWithCheckpointSeedsFromEndCheckpoint) {
   uint64_t txn1 = txn_mgr_->begin();
-  bpm_->track_dirtied_page(10, 50);
+  bpm_->update_dirtied_page_lsn(10, 50);
 
   CheckpointManager checkpoint_mgr(db_path_, *bpm_, *log_mgr_, *txn_mgr_, 60000, 1024 * 1024);
   ASSERT_TRUE(checkpoint_mgr.run_checkpoint());
@@ -190,7 +190,7 @@ TEST_F(RecoveryManagerTest, AnalysisWithCheckpointSeedsFromEndCheckpoint) {
 
 TEST_F(RecoveryManagerTest, AnalysisWithCheckpointHandlesCommittedLoser) {
   uint64_t txn1 = txn_mgr_->begin();
-  bpm_->track_dirtied_page(10, 50);
+  bpm_->update_dirtied_page_lsn(10, 50);
 
   CheckpointManager checkpoint_mgr(db_path_, *bpm_, *log_mgr_, *txn_mgr_, 60000, 1024 * 1024);
   ASSERT_TRUE(checkpoint_mgr.run_checkpoint());
@@ -284,4 +284,333 @@ TEST_F(RecoveryManagerTest, AnalysisExplicitFromLsn) {
   EXPECT_EQ(result.dirty_page_table[16], update_lsn);
 }
 
-}  // namespace letty
+TEST_F(RecoveryManagerTest, RedoAppliesPagePatchToDirtiedPage) {
+  uint64_t txn1 = txn_mgr_->begin();
+
+  page_id_t page_id = 100;
+  bpm_->new_page(page_id);
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    char* data = pg.get_page()->get_data();
+    std::memset(data, 0, PAGE_SIZE);
+    data[100] = 'A';
+    data[101] = 'B';
+    data[102] = 'C';
+  }
+
+  PagePatch patch{};
+  patch.page_id = page_id;
+  patch.offset = 100;
+  patch.before_payload = {0x41, 0x42, 0x43};
+  patch.after_payload = {0x58, 0x59, 0x5A};
+
+  LogRecord record{};
+  build_page_patch_record(txn1, patch, record);
+  lsn_t update_lsn = log_mgr_->append_record(record);
+  ASSERT_NE(update_lsn, INVALID_LSN);
+
+  txn_mgr_->record_lsn(txn1, update_lsn);
+  bpm_->update_dirtied_page_lsn(page_id, update_lsn);
+  bpm_->unpin_page(page_id, false);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(update_lsn));
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found the record
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find PAGE_UPDATE record";
+  ASSERT_EQ(result.dirty_page_table.size(), 1u);
+  ASSERT_NE(result.dirty_page_table.find(page_id), result.dirty_page_table.end());
+
+  PageGuard recovered_guard = bpm_->fetch_page_guard(page_id);
+  ASSERT_NE(recovered_guard.get_page(), nullptr);
+  // Verify patch was actually applied
+  EXPECT_EQ((unsigned char)recovered_guard.get_page()->get_data()[100], 0x58u);
+  EXPECT_EQ((unsigned char)recovered_guard.get_page()->get_data()[101], 0x59u);
+  EXPECT_EQ((unsigned char)recovered_guard.get_page()->get_data()[102], 0x5Au);
+  EXPECT_EQ(recovered_guard.get_page()->get_page_lsn(), update_lsn);
+}
+
+TEST_F(RecoveryManagerTest, RedoSkipsAlreadyAppliedChanges) {
+  uint64_t txn1 = txn_mgr_->begin();
+
+  page_id_t page_id = 101;
+  bpm_->new_page(page_id);
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    char* data = pg.get_page()->get_data();
+    std::memset(data, 0, PAGE_SIZE);
+    data[50] = 0xFF;
+  }
+
+  PagePatch patch{};
+  patch.page_id = page_id;
+  patch.offset = 50;
+  patch.before_payload = {0x00};
+  patch.after_payload = {0xFF};
+
+  LogRecord record{};
+  build_page_patch_record(txn1, patch, record);
+  lsn_t update_lsn = log_mgr_->append_record(record);
+
+  txn_mgr_->record_lsn(txn1, update_lsn);
+  bpm_->update_dirtied_page_lsn(page_id, update_lsn);
+  bpm_->unpin_page(page_id, false);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(update_lsn));
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    pg.get_page()->set_page_lsn(update_lsn);
+  }
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found the record
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find PAGE_UPDATE record";
+  ASSERT_EQ(result.dirty_page_table.size(), 1u);
+  ASSERT_NE(result.dirty_page_table.find(page_id), result.dirty_page_table.end());
+
+  PageGuard page_guard = bpm_->fetch_page_guard(page_id);
+  ASSERT_NE(page_guard.get_page(), nullptr);
+  // Verify page was not modified (already had correct page_lsn)
+  EXPECT_EQ((unsigned char)page_guard.get_page()->get_data()[50], 0xFFu);
+  EXPECT_EQ(page_guard.get_page()->get_page_lsn(), update_lsn);
+}
+
+TEST_F(RecoveryManagerTest, RedoAppliesCompensationPatch) {
+  uint64_t txn1 = txn_mgr_->begin();
+
+  page_id_t page_id = 102;
+  bpm_->new_page(page_id);
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    char* data = pg.get_page()->get_data();
+    std::memset(data, 0, PAGE_SIZE);
+    data[80] = 0x11;
+  }
+
+  lsn_t update_lsn = append_page_update(txn1, page_id, 80);
+  bpm_->update_dirtied_page_lsn(page_id, update_lsn);
+  bpm_->unpin_page(page_id, false);
+
+  CompensationPatch clr_patch{};
+  clr_patch.page_id = page_id;
+  clr_patch.offset = 80;
+  clr_patch.undo_next_lsn = update_lsn;
+  clr_patch.payload = {0x99};
+
+  LogRecord clr_record{};
+  build_compensation_patch_record(txn1, clr_patch, clr_record);
+  lsn_t clr_lsn = log_mgr_->append_record(clr_record);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(clr_lsn));
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found both records
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find PAGE_UPDATE and COMPENSATION records";
+  ASSERT_EQ(result.dirty_page_table.size(), 1u);
+  ASSERT_NE(result.dirty_page_table.find(page_id), result.dirty_page_table.end());
+
+  PageGuard page_guard = bpm_->fetch_page_guard(page_id);
+  ASSERT_NE(page_guard.get_page(), nullptr);
+  // Verify CLR patch was applied
+  EXPECT_EQ((unsigned char)page_guard.get_page()->get_data()[80], 0x99u);
+  EXPECT_EQ(page_guard.get_page()->get_page_lsn(), clr_lsn);
+}
+
+TEST_F(RecoveryManagerTest, RedoAppliesMultiplePatchesToSamePage) {
+  uint64_t txn1 = txn_mgr_->begin();
+
+  page_id_t page_id = 103;
+  bpm_->new_page(page_id);
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    std::memset(pg.get_page()->get_data(), 0, PAGE_SIZE);
+  }
+
+  PagePatch patch1{};
+  patch1.page_id = page_id;
+  patch1.offset = 10;
+  patch1.before_payload = {0x00};
+  patch1.after_payload = {0xAA};
+
+  LogRecord record1{};
+  build_page_patch_record(txn1, patch1, record1);
+  lsn_t lsn1 = log_mgr_->append_record(record1);
+  txn_mgr_->record_lsn(txn1, lsn1);
+
+  PagePatch patch2{};
+  patch2.page_id = page_id;
+  patch2.offset = 20;
+  patch2.before_payload = {0x00};
+  patch2.after_payload = {0xBB};
+
+  LogRecord record2{};
+  build_page_patch_record(txn1, patch2, record2);
+  lsn_t lsn2 = log_mgr_->append_record(record2);
+  txn_mgr_->record_lsn(txn1, lsn2);
+
+  bpm_->update_dirtied_page_lsn(page_id, lsn1);
+  bpm_->unpin_page(page_id, false);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(lsn2));
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found both records
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find both PAGE_UPDATE records";
+  ASSERT_EQ(result.dirty_page_table.size(), 1u);
+  ASSERT_NE(result.dirty_page_table.find(page_id), result.dirty_page_table.end());
+
+  PageGuard page_guard = bpm_->fetch_page_guard(page_id);
+  ASSERT_NE(page_guard.get_page(), nullptr);
+  // Verify both patches were applied in order
+  EXPECT_EQ((unsigned char)page_guard.get_page()->get_data()[10], 0xAAu);
+  EXPECT_EQ((unsigned char)page_guard.get_page()->get_data()[20], 0xBBu);
+  EXPECT_EQ(page_guard.get_page()->get_page_lsn(), lsn2);
+}
+
+TEST_F(RecoveryManagerTest, RedoMaintainsPageLsnOrdering) {
+  uint64_t txn1 = txn_mgr_->begin();
+
+  page_id_t page_id = 105;
+  bpm_->new_page(page_id);
+
+  {
+    PageGuard pg = bpm_->fetch_page_guard(page_id);
+    ASSERT_NE(pg.get_page(), nullptr);
+    std::memset(pg.get_page()->get_data(), 0, PAGE_SIZE);
+  }
+
+  PagePatch patch1{};
+  patch1.page_id = page_id;
+  patch1.offset = 0;
+  patch1.before_payload = {0x00};
+  patch1.after_payload = {0x11};
+
+  LogRecord record1{};
+  build_page_patch_record(txn1, patch1, record1);
+  lsn_t lsn1 = log_mgr_->append_record(record1);
+
+  PagePatch patch2{};
+  patch2.page_id = page_id;
+  patch2.offset = 10;
+  patch2.before_payload = {0x00};
+  patch2.after_payload = {0x22};
+
+  LogRecord record2{};
+  build_page_patch_record(txn1, patch2, record2);
+  lsn_t lsn2 = log_mgr_->append_record(record2);
+
+  bpm_->update_dirtied_page_lsn(page_id, lsn1);
+  bpm_->unpin_page(page_id, false);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(lsn2));
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found both records
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find both PAGE_UPDATE records";
+  ASSERT_EQ(result.dirty_page_table.size(), 1u);
+  ASSERT_NE(result.dirty_page_table.find(page_id), result.dirty_page_table.end());
+
+  PageGuard page_guard = bpm_->fetch_page_guard(page_id);
+  ASSERT_NE(page_guard.get_page(), nullptr);
+  // Verify page_lsn was set to the latest record LSN
+  EXPECT_EQ(page_guard.get_page()->get_page_lsn(), lsn2);
+  EXPECT_LT(lsn1, lsn2);
+}
+
+TEST_F(RecoveryManagerTest, RedoFullRecoveryIntegration) {
+  uint64_t txn1 = txn_mgr_->begin();
+  uint64_t txn2 = txn_mgr_->begin();
+
+  page_id_t page_id1 = 106;
+  page_id_t page_id2 = 107;
+  bpm_->new_page(page_id1);
+  bpm_->new_page(page_id2);
+
+  {
+    PageGuard pg1 = bpm_->fetch_page_guard(page_id1);
+    PageGuard pg2 = bpm_->fetch_page_guard(page_id2);
+    ASSERT_NE(pg1.get_page(), nullptr);
+    ASSERT_NE(pg2.get_page(), nullptr);
+    std::memset(pg1.get_page()->get_data(), 0, PAGE_SIZE);
+    std::memset(pg2.get_page()->get_data(), 0, PAGE_SIZE);
+    pg1.get_page()->get_data()[50] = 0xAA;
+    pg2.get_page()->get_data()[50] = 0xBB;
+  }
+
+  PagePatch patch1{};
+  patch1.page_id = page_id1;
+  patch1.offset = 50;
+  patch1.before_payload = {0xAA};
+  patch1.after_payload = {0xCC};
+
+  LogRecord record1{};
+  build_page_patch_record(txn1, patch1, record1);
+  lsn_t lsn1 = log_mgr_->append_record(record1);
+  txn_mgr_->record_lsn(txn1, lsn1);
+
+  PagePatch patch2{};
+  patch2.page_id = page_id2;
+  patch2.offset = 50;
+  patch2.before_payload = {0xBB};
+  patch2.after_payload = {0xDD};
+
+  LogRecord record2{};
+  build_page_patch_record(txn2, patch2, record2);
+  lsn_t lsn2 = log_mgr_->append_record(record2);
+  txn_mgr_->record_lsn(txn2, lsn2);
+
+  ASSERT_TRUE(txn_mgr_->commit(txn1));
+
+  bpm_->update_dirtied_page_lsn(page_id1, lsn1);
+  bpm_->unpin_page(page_id1, false);
+  bpm_->update_dirtied_page_lsn(page_id2, lsn2);
+  bpm_->unpin_page(page_id2, false);
+
+  ASSERT_TRUE(log_mgr_->flush_to_lsn(lsn2));
+
+  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_);
+  AnalysisResult result = recovery.analyze();
+
+  // Verify analysis found all records
+  ASSERT_NE(result.min_rec_lsn, INVALID_LSN) << "Analysis should find both PAGE_UPDATE records";
+  ASSERT_EQ(result.dirty_page_table.size(), 2u) << "Both pages should be in DPT";
+
+  // Verify ATT correctly reflects transaction state
+  EXPECT_EQ(result.active_transactions.size(), 1u);
+  EXPECT_EQ(result.active_transactions.find(txn1), result.active_transactions.end()) << "txn1 should be committed";
+  EXPECT_NE(result.active_transactions.find(txn2), result.active_transactions.end()) << "txn2 should be active";
+
+  EXPECT_EQ(result.dirty_page_table[page_id1], lsn1);
+  EXPECT_EQ(result.dirty_page_table[page_id2], lsn2);
+
+  PageGuard pg1_recovered = bpm_->fetch_page_guard(page_id1);
+  PageGuard pg2_recovered = bpm_->fetch_page_guard(page_id2);
+  ASSERT_NE(pg1_recovered.get_page(), nullptr);
+  ASSERT_NE(pg2_recovered.get_page(), nullptr);
+  EXPECT_EQ((unsigned char)pg1_recovered.get_page()->get_data()[50], 0xCCu);
+  EXPECT_EQ((unsigned char)pg2_recovered.get_page()->get_data()[50], 0xDDu);
+  EXPECT_EQ(pg1_recovered.get_page()->get_page_lsn(), lsn1);
+  EXPECT_EQ(pg2_recovered.get_page()->get_page_lsn(), lsn2);
+}
+
+}

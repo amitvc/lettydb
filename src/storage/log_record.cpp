@@ -45,7 +45,7 @@ namespace letty {
 
 	if (payload.offset + payload.before_payload.size() > PAGE_SIZE ||
 		payload.offset + payload.after_payload.size() > PAGE_SIZE) {
-	  //throw DbException(DbErrorCode::NoSpace, "Payload size going beyond 4k which is what we support right now.");
+	  LOG_WAL_ERROR("Payload size going beyond 4k which is what we support right now. bpl sz = {}, apl sz {}", payload.before_payload.size(), payload.after_payload.size());
 	  return false;
 	}
 
@@ -385,6 +385,7 @@ bool deserialize_checkpoint_marker(const ByteBuffer &bytes, CheckpointMarker &ou
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out) {
 	ByteBuffer payload;
 	if (!serialize_page_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize page_patch record");
 	  return false;
 	}
 
@@ -401,6 +402,7 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
   bool build_compensation_patch_record(txn_id tran_id, const CompensationPatch &patch, LogRecord &out) {
 	ByteBuffer payload;
 	if (!serialize_compensation_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize compensation patch record");
 	  return false;
 	}
 
@@ -518,6 +520,7 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 
 	ByteBuffer payload(EXTENT_PATCH_SIZE);
 	if (!serialize_extent_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize gam patch record");
 	  return false;
 	}
 	out.header.type = type;
@@ -538,6 +541,7 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 
 	ByteBuffer payload(IAM_PATCH_SIZE);
 	if (!serialize_iam_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize iam patch record");
 	  return false;
 	}
 
@@ -550,5 +554,4 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 	out.payload = std::move(payload);
 	return true;
   }
-
 }

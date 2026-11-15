@@ -145,3 +145,8 @@ public:
 #define LOG_TXN_INFO(...)         LOG_INFO("[TXN] " __VA_ARGS__)
 #define LOG_TXN_WARN(...)         LOG_WARN("[TXN] " __VA_ARGS__)
 #define LOG_TXN_ERROR(...)        LOG_ERROR("[TXN] " __VA_ARGS__)
+
+#define LOG_RECOVERY_MGR_DEBUG(...)    LOG_DEBUG("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_INFO(...)     LOG_INFO("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_WARN(...)     LOG_WARN("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_ERROR(...)    LOG_ERROR("[RECOVERY] " __VA_ARGS__)

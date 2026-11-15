@@ -140,7 +140,7 @@ lsn_t ExtentManager::log_extent_change(LogRecordType type, uint64_t txn_id, page
   }
 
   txn_manager_.record_lsn(txn_id, lsn);
-  buffer_pool_.track_dirtied_page(gam_page_id, lsn);
+  buffer_pool_.update_dirtied_page_lsn(gam_page_id, lsn);
   return lsn;
 }
 

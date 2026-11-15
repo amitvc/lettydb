@@ -12,6 +12,7 @@ namespace letty {
 
 class BufferPoolManager;
 class LogManager;
+class Page;
 
 template <typename PatchType>
 struct patch_traits;
@@ -87,7 +88,7 @@ class RecoveryManager {
  private:
   std::string db_path_;
   LogManager& log_manager_;
-  BufferPoolManager& buffer_pool_;
+  BufferPoolManager& bpm_;
 
   lsn_t read_checkpoint_marker() const;
 
@@ -104,6 +105,11 @@ class RecoveryManager {
                       std::unordered_map<txn_id, lsn_t>& active_transaction_table,
                       std::unordered_map<page_id_t, lsn_t>& dirty_page_table,
                       Deserializer deserializer);
+
+  bool is_page_modifying_record(const LogRecord& record) const;
+  page_id_t extract_page_id(const LogRecord& record) const;
+  bool apply_payload_to_page(Page* page, uint16_t offset, const ByteBuffer& payload) const;
+  uint64_t redo(const AnalysisResult& analysis);
 };
 
 }

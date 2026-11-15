@@ -60,7 +60,7 @@ std::optional<uint16_t> TableManager::insert_row(const TableMetadata& meta, cons
   }
 
   txn_manager_.record_lsn(txn_id, lsn);
-  buffer_pool_.track_dirtied_page(target_page_id, lsn);
+  buffer_pool_.update_dirtied_page_lsn(target_page_id, lsn);
   sp.set_page_lsn(lsn);
   guard.mark_dirty();
 
@@ -128,7 +128,7 @@ bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint
       lsn_t lsn = log_manager_.append_record(wal_record);
       if (lsn != INVALID_LSN) {
         txn_manager_.record_lsn(txn_id, lsn);
-		buffer_pool_.track_dirtied_page(page_id, lsn);
+		buffer_pool_.update_dirtied_page_lsn(page_id, lsn);
         sp.set_page_lsn(lsn);
       }
     }

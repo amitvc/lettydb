@@ -101,8 +101,8 @@ TEST_F(CheckpointManagerTest, RunCheckpointCreatesMarkerAndWALRecords) {
   uint64_t txn2 = txn_mgr_->begin();
   txn_mgr_->record_lsn(txn1, 150);
 
-  bpm_->track_dirtied_page(10, 100);
-  bpm_->track_dirtied_page(20, 200);
+  bpm_->update_dirtied_page_lsn(10, 100);
+  bpm_->update_dirtied_page_lsn(20, 200);
 
   CheckpointManager checkpoint_mgr(db_path_, *bpm_, *log_mgr_, *txn_mgr_, 60000, 1024 * 1024);
   ASSERT_TRUE(checkpoint_mgr.run_checkpoint());
@@ -227,7 +227,7 @@ TEST_F(CheckpointManagerTest, SequentialCheckpointsAdvanceMarker) {
 
 TEST_F(CheckpointManagerTest, ManualAnalysisReconstruction) {
   uint64_t txn1 = txn_mgr_->begin();
-  bpm_->track_dirtied_page(10, 100);
+  bpm_->update_dirtied_page_lsn(10, 100);
 
   CheckpointManager checkpoint_mgr(db_path_, *bpm_, *log_mgr_, *txn_mgr_, 60000, 1024 * 1024);
   ASSERT_TRUE(checkpoint_mgr.run_checkpoint());
@@ -235,7 +235,7 @@ TEST_F(CheckpointManagerTest, ManualAnalysisReconstruction) {
   ASSERT_NE(marker_lsn, INVALID_LSN);
 
   uint64_t txn2 = txn_mgr_->begin();
-  bpm_->track_dirtied_page(20, 200);
+  bpm_->update_dirtied_page_lsn(20, 200);
   ASSERT_TRUE(txn_mgr_->commit(txn1));
 
   auto records = log_mgr_->read_records();
@@ -302,7 +302,7 @@ TEST_F(CheckpointManagerTest, CheckpointWithNoDirtiedPages) {
 
 TEST_F(CheckpointManagerTest, CheckpointWithNoActiveTransactions) {
   uint64_t txn1 = txn_mgr_->begin();
-  bpm_->track_dirtied_page(10, 100);
+  bpm_->update_dirtied_page_lsn(10, 100);
   ASSERT_TRUE(txn_mgr_->commit(txn1));
 
   CheckpointManager checkpoint_mgr(db_path_, *bpm_, *log_mgr_, *txn_mgr_, 60000, 1024 * 1024);

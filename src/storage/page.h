@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include "storage/config.h"
+#include "storage/slotted_page.h"
 
 namespace letty {
 
@@ -46,6 +47,18 @@ class Page {
 
   /** @brief Returns true if the in-memory content differs from what is on disk. */
   bool is_dirty() const { return is_dirty_; }
+
+  /** @brief Returns the page LSN (log sequence number) from page data. */
+  lsn_t get_page_lsn() const {
+    auto header = reinterpret_cast<const SlottedPageHeader*>(data_);
+    return header->page_lsn;
+  }
+
+  /** @brief Sets the page LSN (log sequence number) in page data. */
+  void set_page_lsn(lsn_t lsn) {
+    auto header = reinterpret_cast<SlottedPageHeader*>(data_);
+    header->page_lsn = lsn;
+  }
 
  private:
   // Only BPM can modify the Page metadata since all modifiers functions are kept private.

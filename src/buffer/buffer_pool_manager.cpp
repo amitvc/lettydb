@@ -312,7 +312,7 @@ CacheStats BufferPoolManager::get_cache_stats() const {
   };
 }
 
-void BufferPoolManager::track_dirtied_page(page_id_t page_id, lsn_t lsn) {
+void BufferPoolManager::update_dirtied_page_lsn(page_id_t page_id, lsn_t lsn) {
   std::lock_guard<std::mutex> lock(latch_);
   // Emplace : If the key already exists the operation is noops.
   dirty_page_table_.emplace(page_id, lsn);
