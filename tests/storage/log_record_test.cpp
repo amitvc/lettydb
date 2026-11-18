@@ -106,9 +106,30 @@ namespace letty {
     ASSERT_TRUE(deserialize_compensation_patch(bytes, decoded));
 
     EXPECT_EQ(decoded.page_id, original.page_id);
+    EXPECT_EQ(decoded.kind, CompensationKind::BytePatch);
     EXPECT_EQ(decoded.offset, original.offset);
     EXPECT_EQ(decoded.undo_next_lsn, original.undo_next_lsn);
     EXPECT_EQ(decoded.payload, original.payload);
+  }
+
+  TEST(LogRecordTest, SerializeLogicalCompensationPatchRoundTrips) {
+    CompensationPatch original{};
+    original.page_id = 8;
+    original.kind = CompensationKind::GamClearBit;
+    original.param = 42;
+    original.undo_next_lsn = 777;
+
+    std::vector<Byte> bytes;
+    ASSERT_TRUE(serialize_compensation_patch(original, bytes));
+
+    CompensationPatch decoded{};
+    ASSERT_TRUE(deserialize_compensation_patch(bytes, decoded));
+
+    EXPECT_EQ(decoded.page_id, original.page_id);
+    EXPECT_EQ(decoded.kind, CompensationKind::GamClearBit);
+    EXPECT_EQ(decoded.param, 42u);
+    EXPECT_EQ(decoded.undo_next_lsn, original.undo_next_lsn);
+    EXPECT_TRUE(decoded.payload.empty());
   }
 
   TEST(LogRecordTest, SerializeCompensationPatchFailsOnInvalidPageID) {
@@ -132,9 +153,9 @@ namespace letty {
     std::vector<Byte> bytes;
     ASSERT_TRUE(serialize_compensation_patch(original, bytes));
 
-    // Corrupt payload_size (byte offset 14: page_id 4 + offset 2 + undo_next_lsn 8) to claim
-    // more bytes than the buffer actually has.
-    write_le16(bytes.data() + 14, 9999);
+    // Corrupt payload_size (byte offset 19: page_id 4 + kind 1 + offset 2 + param 4 +
+    // undo_next_lsn 8) to claim more bytes than the buffer actually has.
+    write_le16(bytes.data() + 19, 9999);
 
     CompensationPatch out{};
     out.page_id = 777; // sentinel - must not change on failure

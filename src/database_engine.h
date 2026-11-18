@@ -20,6 +20,7 @@ class StorageInspector;
 class LogManager;
 class TransactionManager;
 class CheckpointManager;
+class RollbackManager;
 
 /**
  * @class DatabaseEngine
@@ -51,6 +52,7 @@ class DatabaseEngine {
   std::unique_ptr<DiskManager> disk_manager_;
   std::unique_ptr<BufferPoolManager> buffer_pool_;
   std::unique_ptr<LogManager> log_manager_;
+  std::unique_ptr<RollbackManager> rollback_manager_;
   std::unique_ptr<TransactionManager> txn_manager_;
   std::unique_ptr<CheckpointManager> checkpoint_manager_;
   std::unique_ptr<ExtentManager> extent_manager_;

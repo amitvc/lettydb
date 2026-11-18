@@ -12,6 +12,8 @@
 
 namespace letty {
 
+class RollbackManager;
+
 enum class TransactionStatus {
   Active,
   Committed,
@@ -45,12 +47,23 @@ struct Transaction {
  * - begin() appends a BEGIN record, returns the assigned txn_id.
  * - commit(txn_id) appends a COMMIT record, then calls flush_to_lsn() to ensure
  *   durability. Returns only after fsync completes.
- * - abort(txn_id) appends an ABORT record and marks the transaction as aborted.
- *   Rollback of modified pages is handled separately during recovery.
+ * - abort(txn_id) appends an ABORT marker, rolls back the transaction's page
+ *   changes via RollbackManager (when one is wired in), and writes an END record.
  */
 class TransactionManager {
  public:
+  /**
+   * @brief Constructs a TransactionManager without rollback support.
+   * abort() will log ABORT + END but cannot physically undo_transactions page changes. Used
+   * by unit tests with no storage layer.
+   */
   explicit TransactionManager(LogManager& log_manager);
+
+  /**
+   * @brief Constructs a TransactionManager that rolls back page changes on abort.
+   * @param rollback_manager Undo engine used to reverse a transaction's updates.
+   */
+  TransactionManager(LogManager& log_manager, RollbackManager& rollback_manager);
 
   /**
    * Marks the beginning of the transaction.
@@ -114,6 +127,7 @@ class TransactionManager {
 
  private:
   LogManager& log_manager_;
+  RollbackManager* rollback_manager_ = nullptr;
   mutable std::mutex latch_;
   // Atomically increasing transaction ID that is incremented each time a new transaction begins.
   uint64_t next_txn_id_ = 1;

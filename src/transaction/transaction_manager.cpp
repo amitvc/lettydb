@@ -7,11 +7,15 @@
 #include <optional>
 #include "common/logger.h"
 #include "storage/log_record.h"
+#include "storage/rollback_manager.h"
 
 namespace letty {
 
 TransactionManager::TransactionManager(LogManager& log_manager)
     : log_manager_(log_manager) {}
+
+TransactionManager::TransactionManager(LogManager& log_manager, RollbackManager& rollback_manager)
+    : log_manager_(log_manager), rollback_manager_(&rollback_manager) {}
 
 uint64_t TransactionManager::begin() {
   std::lock_guard<std::mutex> lock(latch_);
@@ -105,6 +109,20 @@ bool TransactionManager::abort(uint64_t txn_id) {
   if (abort_lsn == INVALID_LSN) {
     LOG_TXN_ERROR("Failed to append ABORT record for txn {}", txn_id);
     return false;
+  }
+  it->second.last_lsn = abort_lsn;
+
+  // Roll back the transaction's page changes, writing a CLR per update and a
+  // terminal END record. Without a RollbackManager (storage-less contexts) we
+  // can't undo pages, so just mark the transaction resolved with an END record.
+  if (rollback_manager_ != nullptr) {
+    rollback_manager_->rollback_transaction(txn_id, abort_lsn);
+  } else {
+    LogRecord end_rec{};
+    if (build_transaction_record(LogRecordType::END, txn_id, end_rec)) {
+      end_rec.header.prev_lsn = abort_lsn;
+      log_manager_.append_record(end_rec);
+    }
   }
 
   transactions_.erase(it);

@@ -8,6 +8,8 @@
 #include "buffer/buffer_pool_manager.h"
 #include "storage/log_manager.h"
 #include "storage/log_record.h"
+#include "storage/log_apply.h"
+#include "storage/rollback_manager.h"
 #include "common/logger.h"
 
 
@@ -15,10 +17,12 @@ namespace letty {
 
 RecoveryManager::RecoveryManager(std::string db_path,
 								 LogManager &log_manager,
-								 BufferPoolManager &buffer_pool)
+								 BufferPoolManager &buffer_pool,
+								 RollbackManager &rollback_manager)
 	: db_path_(std::move(db_path)),
 	  log_manager_(log_manager),
-	  bpm_(buffer_pool) {
+	  bpm_(buffer_pool),
+	  rollback_manager_(rollback_manager) {
 
 }
 
@@ -69,8 +73,10 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
 
   if (checkpoint_lsn != INVALID_LSN) {
 	bool is_checkpoint = false;
-	bool found_end_checkpoint = false;
 
+	// Iterate through records to find begin and end checkpoint. begin checkpoint is just a marker record
+	// The ATT and DTP are actually read from the EndCheckpoint record. These 2 structures are important for us to
+	// identify which active transactions and dirty pages were in the system at the time check point was taken.
 	for (const auto &record : records) {
 	  if (record.header.lsn == checkpoint_lsn &&
 		  record.header.type == LogRecordType::BEGIN_CHECKPOINT) {
@@ -82,29 +88,12 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
 		  record.header.type == LogRecordType::END_CHECKPOINT) {
 		assert(record.header.tran_id == INVALID_TXN_ID);
 		apply_checkpoint_snapshot(record, result.active_transactions, result.dirty_page_table);
-		found_end_checkpoint = true;
 		break;
 	  }
-	}
-
-	if (is_checkpoint && !found_end_checkpoint) {
-	  scan_start_lsn = WAL_SIGNATURE_SIZE;
-	  result.scan_start_lsn = scan_start_lsn;
-	  records = log_manager_.read_records_from(scan_start_lsn);
 	}
   }
 
   for (const auto &record : records) {
-	if (record.header.lsn < scan_start_lsn) {
-	  continue;
-	}
-
-	if (record.header.type == LogRecordType::BEGIN_CHECKPOINT ||
-		record.header.type == LogRecordType::END_CHECKPOINT) {
-	  result.last_log_lsn = record.header.lsn;
-	  continue;
-	}
-
 	process_log_record(record, result.active_transactions, result.dirty_page_table);
 	result.last_log_lsn = record.header.lsn;
   }
@@ -117,6 +106,7 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
   }
   result.min_rec_lsn = min_rec_lsn;
   redo(result);
+  rollback_manager_.undo_transactions(result.active_transactions);
   return result;
 }
 
@@ -150,8 +140,12 @@ void RecoveryManager::process_log_record(const LogRecord &record,
 	  break;
 
 	case LogRecordType::COMMIT:
-	case LogRecordType::ABORT:
 	case LogRecordType::END: active_transaction_table.erase(record.header.tran_id);
+	  break;
+
+	case LogRecordType::ABORT:
+	  // ABORT only marks that rollback has begun; the transaction stays a loser
+	  // until its END record. A crash mid-rollback is therefore resumed by recovery.
 	  break;
 
 	case LogRecordType::PAGE_UPDATE:
@@ -208,38 +202,88 @@ void RecoveryManager::process_update(const LogRecord &record,
   }
 }
 
-bool RecoveryManager::is_page_modifying_record(const LogRecord& record) const {
-  return record.header.type == LogRecordType::PAGE_UPDATE ||
-         record.header.type == LogRecordType::COMPENSATION;
-}
-
 page_id_t RecoveryManager::extract_page_id(const LogRecord& record) const {
-  if (record.header.type == LogRecordType::PAGE_UPDATE) {
-    PagePatch patch{};
-    if (deserialize_page_patch(record.payload, patch)) {
-      return patch.page_id;
+  switch (record.header.type) {
+    case LogRecordType::PAGE_UPDATE: {
+      PagePatch patch{};
+      if (deserialize_page_patch(record.payload, patch)) {
+        return patch.page_id;
+      }
+      break;
     }
-  } else if (record.header.type == LogRecordType::COMPENSATION) {
-    CompensationPatch patch{};
-    if (deserialize_compensation_patch(record.payload, patch)) {
-      return patch.page_id;
+    case LogRecordType::COMPENSATION: {
+      CompensationPatch patch{};
+      if (deserialize_compensation_patch(record.payload, patch)) {
+        return patch.page_id;
+      }
+      break;
     }
+    case LogRecordType::ALLOCATE_EXTENT:
+    case LogRecordType::DEALLOCATE_EXTENT: {
+      GamPatch patch{};
+      if (deserialize_extent_patch(record.payload, patch)) {
+        return patch.gam_page_id;
+      }
+      break;
+    }
+    case LogRecordType::IAM_ADD_EXTENT:
+    case LogRecordType::IAM_REMOVE_EXTENT: {
+      IamPatch patch{};
+      if (deserialize_iam_patch(record.payload, patch)) {
+        return patch.iam_page_id;
+      }
+      break;
+    }
+    default:
+      break;
   }
   return INVALID_PAGE_ID;
 }
 
-bool RecoveryManager::apply_payload_to_page(Page* page, uint16_t offset,
-                                             const ByteBuffer& payload) const {
-  if (offset + payload.size() > PAGE_SIZE) {
-    LOG_RECOVERY_MGR_WARN("Patch offset {} + size {} exceeds page size",
-                          offset, payload.size());
-    return false;
+bool RecoveryManager::redo_record(const LogRecord& record, Page* page) const {
+  switch (record.header.type) {
+    case LogRecordType::PAGE_UPDATE: {
+      PagePatch patch{};
+      if (!deserialize_page_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize PAGE_UPDATE patch");
+        return false;
+      }
+      return apply_payload_to_page(page, patch.offset, patch.after_payload);
+    }
+    case LogRecordType::COMPENSATION: {
+      CompensationPatch patch{};
+      if (!deserialize_compensation_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize COMPENSATION patch");
+        return false;
+      }
+      return apply_compensation(page, patch);
+    }
+    case LogRecordType::ALLOCATE_EXTENT:
+    case LogRecordType::DEALLOCATE_EXTENT: {
+      GamPatch patch{};
+      if (!deserialize_extent_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize extent patch");
+        return false;
+      }
+      return apply_gam_bit(page, patch.bit_index,
+                           record.header.type == LogRecordType::ALLOCATE_EXTENT);
+    }
+    case LogRecordType::IAM_ADD_EXTENT:
+    case LogRecordType::IAM_REMOVE_EXTENT: {
+      IamPatch patch{};
+      if (!deserialize_iam_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize IAM patch");
+        return false;
+      }
+      return apply_iam_extent(page, patch.extent_id,
+                              record.header.type == LogRecordType::IAM_ADD_EXTENT);
+    }
+    default:
+      return false;
   }
-  std::memcpy(page->get_data() + offset, payload.data(), payload.size());
-  return true;
 }
 
-uint64_t RecoveryManager::redo(const AnalysisResult &analysis) {
+int RecoveryManager::redo(const AnalysisResult &analysis) {
   if (analysis.min_rec_lsn == INVALID_LSN) {
 	LOG_RECOVERY_MGR_WARN("Can't continue the redo phase since min_rec_lsn is invalid");
 	return 0;
@@ -247,13 +291,9 @@ uint64_t RecoveryManager::redo(const AnalysisResult &analysis) {
 
 
   std::vector<LogRecord> records = log_manager_.read_records_from(analysis.min_rec_lsn);
-  uint64_t pages_redone = 0;
+  int pages_redone = 0;
 
   for (const auto &record : records) {
-    if (!is_page_modifying_record(record)) {
-      continue;
-    }
-
     page_id_t page_id = extract_page_id(record);
     if (page_id == INVALID_PAGE_ID) {
       continue;
@@ -266,34 +306,22 @@ uint64_t RecoveryManager::redo(const AnalysisResult &analysis) {
     PageGuard page_guard = bpm_.fetch_page_guard(page_id);
     Page* page = page_guard.get_page();
     if (!page) {
+	  // TODO log warning here
       continue;
     }
 
+	// If the page's LSN is greater than log records lsn then this log record has already been proceesed. Nothing to do here.
     if (page->get_page_lsn() >= record.header.lsn) {
+	  // TODO log info here
       continue;
     }
 
-    if (record.header.type == LogRecordType::PAGE_UPDATE) {
-      PagePatch patch{};
-      if (!deserialize_page_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize PAGE_UPDATE patch");
-        continue;
-      }
-      if (!apply_payload_to_page(page, patch.offset, patch.after_payload)) {
-        continue;
-      }
-    } else if (record.header.type == LogRecordType::COMPENSATION) {
-      CompensationPatch patch{};
-      if (!deserialize_compensation_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize COMPENSATION patch");
-        continue;
-      }
-      if (!apply_payload_to_page(page, patch.offset, patch.payload)) {
-        continue;
-      }
+    if (!redo_record(record, page)) {
+      continue;
     }
 
     page->set_page_lsn(record.header.lsn);
+    page_guard.mark_dirty();
     pages_redone++;
   }
 

@@ -191,11 +191,11 @@ inline DatabaseHeader make_database_header() {
  * Byte Offsets (PAGE_SIZE = 4096)
  *
  *  +--------------------------------------------------------------+ 0
- *  | next_page_id (page_id_t, 4 bytes)                            |
- *  |   - Next GAM page in the chain (INVALID_PAGE_ID if last)     |
- *  +--------------------------------------------------------------+ 4
  *  | page_lsn (lsn_t, 8 bytes)                                    |
  *  |   - LSN of the last WAL record that modified this GAM page   |
+ *  +--------------------------------------------------------------+ 8
+ *  | next_page_id (page_id_t, 4 bytes)                            |
+ *  |   - Next GAM page in the chain (INVALID_PAGE_ID if last)     |
  *  +--------------------------------------------------------------+ 12
  *  | first_free_bit_hint (uint16_t, 2 bytes)                      |
  *  |   - Bit index in [0, 32656) to start the next free search    |
@@ -208,8 +208,8 @@ inline DatabaseHeader make_database_header() {
  * @endverbatim
  */
 struct GAMPage {
-  page_id_t next_page_id = INVALID_PAGE_ID;
   lsn_t page_lsn = 0;
+  page_id_t next_page_id = INVALID_PAGE_ID;
 
   // Starting bit index (0..GAM_MAX_BITS-1) for the next free-extent search.
   // ExtentManager scans from this hint to GAM_MAX_BITS, then wraps around to
@@ -217,7 +217,7 @@ struct GAMPage {
   uint16_t first_free_bit_hint = 0;
 
   // Extent allocation bitmap (1 = allocated, 0 = free).
-  // 4082 bytes = 4096 - (4 bytes next_page_id + 8 bytes page_lsn + 2 bytes hint).
+  // 4082 bytes = 4096 - (8 bytes page_lsn + 4 bytes next_page_id + 2 bytes hint).
   uint8_t bitmap[GAM_BITMAP_ARRAY_SIZE];
 };
 
@@ -252,11 +252,11 @@ inline GAMPage make_gam_page() {
  * Byte Offsets (PAGE_SIZE = 4096)
  *
  *  +--------------------------------------------------------------+ 0
- *  | next_page_id (page_id_t, 4 bytes)                            |
- *  |   - Next IAM page in this table's chain (or INVALID_PAGE_ID) |
- *  +--------------------------------------------------------------+ 4
  *  | page_lsn (lsn_t, 8 bytes)                                    |
  *  |   - LSN of the last WAL record that modified this IAM page   |
+ *  +--------------------------------------------------------------+ 8
+ *  | next_page_id (page_id_t, 4 bytes)                            |
+ *  |   - Next IAM page in this table's chain (or INVALID_PAGE_ID) |
  *  +--------------------------------------------------------------+ 12
  *  | extent_count (uint16_t, 2 bytes)                             |
  *  |   - Number of valid entries in extent_ids[0..extent_count-1] |
@@ -271,8 +271,8 @@ inline GAMPage make_gam_page() {
  * @endverbatim
  */
 struct IAMPage {
+  lsn_t page_lsn = 0;	     				  // 8 bytes
   page_id_t next_page_id = INVALID_PAGE_ID;   // 4 bytes
-  lsn_t page_lsn = 0;	     					  // 8 bytes
   uint16_t extent_count = 0;                  // 2 bytes
   uint16_t reserved = 0;                      // 2 bytes (alignment)
   uint32_t extent_ids[IAM_MAX_EXTENTS];       // 4080 bytes = 1020 extent IDs

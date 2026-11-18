@@ -158,8 +158,8 @@ template <> inline GAMPage load_page_layout<GAMPage>(Page* page, size_t offset) 
   const Byte* data = reinterpret_cast<const Byte*>(page->get_data()) + offset;
 
   GAMPage value{};
-  value.next_page_id = static_cast<page_id_t>(read_le32(data));
-  value.page_lsn = static_cast<lsn_t>(read_le64(data + 4));
+  value.page_lsn = static_cast<lsn_t>(read_le64(data));
+  value.next_page_id = static_cast<page_id_t>(read_le32(data + 8));
   value.first_free_bit_hint = read_le16(data + 12);
   std::memcpy(value.bitmap, data + 14, GAM_BITMAP_ARRAY_SIZE);
   return value;
@@ -171,8 +171,8 @@ template <> inline void store_page_layout<GAMPage>(Page* page, const GAMPage& va
 
   Byte* data = reinterpret_cast<Byte*>(page->get_data()) + offset;
 
-  write_le32(data, static_cast<uint32_t>(value.next_page_id));
-  write_le64(data + 4, static_cast<uint64_t>(value.page_lsn));
+  write_le64(data, static_cast<uint64_t>(value.page_lsn));
+  write_le32(data + 8, static_cast<uint32_t>(value.next_page_id));
   write_le16(data + 12, value.first_free_bit_hint);
   std::memcpy(data + 14, value.bitmap, GAM_BITMAP_ARRAY_SIZE);
 }
@@ -185,8 +185,8 @@ template <> inline IAMPage load_page_layout<IAMPage>(Page* page, size_t offset) 
   const Byte* data = reinterpret_cast<const Byte*>(page->get_data()) + offset;
 
   IAMPage value{};
-  value.next_page_id = static_cast<page_id_t>(read_le32(data));
-  value.page_lsn = static_cast<lsn_t>(read_le64(data + 4));
+  value.page_lsn = static_cast<lsn_t>(read_le64(data));
+  value.next_page_id = static_cast<page_id_t>(read_le32(data + 8));
   value.extent_count = read_le16(data + 12);
   value.reserved = read_le16(data + 14);
   for (size_t i = 0; i < value.extent_count; ++i) {
@@ -201,8 +201,8 @@ template <> inline void store_page_layout<IAMPage>(Page* page, const IAMPage& va
 
   Byte* data = reinterpret_cast<Byte*>(page->get_data()) + offset;
 
-  write_le32(data, static_cast<uint32_t>(value.next_page_id));
-  write_le64(data + 4, static_cast<uint64_t>(value.page_lsn));
+  write_le64(data, static_cast<uint64_t>(value.page_lsn));
+  write_le32(data + 8, static_cast<uint32_t>(value.next_page_id));
   write_le16(data + 12, value.extent_count);
   write_le16(data + 14, value.reserved);
   for (size_t i = 0; i < value.extent_count; ++i) {

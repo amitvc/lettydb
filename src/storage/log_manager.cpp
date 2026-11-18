@@ -235,7 +235,7 @@ lsn_t LogManager::append_record(LogRecord& record) {
 bool LogManager::flush_to_lsn(lsn_t target_lsn) {
   std::lock_guard<std::mutex> lock(latch_);
 
-  if (target_lsn == INVALID_LSN || target_lsn <= flushed_lsn_) {
+  if (target_lsn == INVALID_LSN || target_lsn < flushed_lsn_) {
 	LOG_WAL_INFO("Last flushed lsn {} is greater than target lsn {}", flushed_lsn_, target_lsn);
     return true;
   }
@@ -307,6 +307,7 @@ std::optional<LogRecord> LogManager::read_record_at(lsn_t lsn) {
   if (lsn < WAL_SIGNATURE_SIZE || lsn >= next_lsn_) {
     return std::nullopt;
   }
+  // If the lsn is greater than flushed_lsn then it means record is in-memory buffer of LogManager.
   if (lsn >= flushed_lsn_) {
     return read_record_from_buffer(lsn);
   }

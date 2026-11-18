@@ -68,7 +68,7 @@ struct LogRecord {
  * @brief Builder input for a PAGE_UPDATE record. One patch, before and after bytes.
  *
  * Covers things like inserting/updating or deleting a tuple.
- * before_payload is for undo, after_payload is for redo.
+ * before_payload is for undo_transactions, after_payload is for redo.
  * Not an on-disk struct, so serialize field by field, don't memcpy.
  * One struct = one patch. More patches or more pages means more records.
  */
@@ -82,17 +82,30 @@ struct PagePatch {
 static constexpr auto PAGE_PATCH_HEADER_SIZE = 10; // page_id + offset + before_payloadsize + after_payloadsize
 
 /**
+ * @enum CompensationKind
+ * @brief What a CLR restores. BytePatch is a slotted-page byte image; the rest
+ * are logical inverses re-applied against the current page at redo time, so
+ * they compose even when transactions interleave on the same GAM/IAM page.
+ */
+enum class CompensationKind : uint8_t {
+  BytePatch,        // restore `payload` bytes at `offset` (slotted page undo)
+  GamSetBit,        // set bit `param` in GAM page   (undo of DEALLOCATE_EXTENT)
+  GamClearBit,      // clear bit `param` in GAM page (undo of ALLOCATE_EXTENT)
+  IamAddExtent,     // add extent `param` to IAM page      (undo of IAM_REMOVE_EXTENT)
+  IamRemoveExtent,  // remove extent `param` from IAM page (undo of IAM_ADD_EXTENT)
+};
+
+/**
  * @struct CompensationPatch
- * @brief Builder input for a COMPENSATION record. Logs undoing one PAGE_UPDATE.
+ * @brief Builder input for a COMPENSATION record. Logs undoing one update.
  *
- * Written during rollback. payload holds the restoration bytes (the
- * original before-image) applied at page_id/offset. Only one direction
- * needed here, not before/after like PagePatch, because a CLR is
- * redo-only and never gets undone itself. That's what keeps rollback from
- * recursing and guarantees it terminates.
+ * kind selects the restoration: BytePatch applies payload bytes at offset;
+ * the logical kinds re-apply an inverse op (set/clear a GAM bit, add/remove an
+ * IAM extent) identified by param. A CLR is redo-only and never gets undone
+ * itself, which keeps rollback from recursing and guarantees it terminates.
  *
  * undo_next_lsn is the important field. It's the prev_lsn of the record
- * being compensated for, i.e. where undo picks up next. If we crash
+ * being compensated for, i.e. where undo_transactions picks up next. If we crash
  * mid-rollback, recovery reads this off the last CLR and resumes there
  * instead of re-undoing what's already done. Not the same as the header's
  * own prev_lsn, which just points to whatever came before in append order.
@@ -101,12 +114,14 @@ static constexpr auto PAGE_PATCH_HEADER_SIZE = 10; // page_id + offset + before_
  */
 struct CompensationPatch {
   page_id_t page_id;
-  uint16_t offset;
-  lsn_t undo_next_lsn; // CRITICAL: Points to the next log record to undo (copied from target's PrevLSN)
-  ByteBuffer payload;
+  CompensationKind kind = CompensationKind::BytePatch;
+  uint16_t offset = 0;          // BytePatch only
+  uint32_t param = 0;           // bit_index (GAM) or extent_id (IAM) for logical kinds
+  lsn_t undo_next_lsn;          // CRITICAL: next log record to undo (copied from target's PrevLSN)
+  ByteBuffer payload;           // BytePatch only
 };
 
-static constexpr auto COMPENSATION_PATCH_HEADER_SIZE = 16; // page_id + offset + undo_next_lsn + payload_size
+static constexpr auto COMPENSATION_PATCH_HEADER_SIZE = 21; // page_id(4) + kind(1) + offset(2) + param(4) + undo_next_lsn(8) + payload_size(2)
 
 
 /**

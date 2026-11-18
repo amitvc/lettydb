@@ -13,6 +13,7 @@ namespace letty {
 class BufferPoolManager;
 class LogManager;
 class Page;
+class RollbackManager;
 
 template <typename PatchType>
 struct patch_traits;
@@ -62,10 +63,12 @@ class RecoveryManager {
    * @param db_path Database file path (marker file is located at <db_path>.checkpoint).
    * @param log_manager Reference to LogManager for reading WAL records.
    * @param buffer_pool Reference to BufferPoolManager.
+   * @param rollback_manager Reference to RollbackManager; the Undo pass is delegated to it.
    */
   RecoveryManager(std::string db_path,
                   LogManager& log_manager,
-                  BufferPoolManager& buffer_pool);
+                  BufferPoolManager& buffer_pool,
+                  RollbackManager& rollback_manager);
 
   /**
    * @brief Executes the ARIES Analysis pass.
@@ -89,6 +92,7 @@ class RecoveryManager {
   std::string db_path_;
   LogManager& log_manager_;
   BufferPoolManager& bpm_;
+  RollbackManager& rollback_manager_;
 
   lsn_t read_checkpoint_marker() const;
 
@@ -106,10 +110,9 @@ class RecoveryManager {
                       std::unordered_map<page_id_t, lsn_t>& dirty_page_table,
                       Deserializer deserializer);
 
-  bool is_page_modifying_record(const LogRecord& record) const;
   page_id_t extract_page_id(const LogRecord& record) const;
-  bool apply_payload_to_page(Page* page, uint16_t offset, const ByteBuffer& payload) const;
-  uint64_t redo(const AnalysisResult& analysis);
+  bool redo_record(const LogRecord& record, Page* page) const;
+  int redo(const AnalysisResult& analysis);
 };
 
 }

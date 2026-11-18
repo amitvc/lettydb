@@ -190,6 +190,90 @@ TEST_F(LogManagerTest, AppendFlushAndReadRecordAt) {
   EXPECT_EQ(decoded_patch.after_payload, (ByteBuffer{5, 6, 7, 8}));
 }
 
+TEST_F(LogManagerTest, ReadRecordAtReadsUnflushedRecordFromBuffer) {
+  const uint32_t FLUSH_INTERVAL = 5000;  // long interval, no auto-flush
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, FLUSH_INTERVAL);
+
+  PagePatch patch_input{7, 64, {9, 9}, {1, 2, 3}};
+  LogRecord rec{};
+  ASSERT_TRUE(build_page_patch_record(3, patch_input, rec));
+  lsn_t lsn = log_mgr.append_record(rec);
+  ASSERT_NE(lsn, INVALID_LSN);
+
+  // Nothing has been flushed yet, so this read must come from the in-memory buffer.
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), WAL_SIGNATURE_SIZE);
+
+  auto read_back = log_mgr.read_record_at(lsn);
+  ASSERT_TRUE(read_back.has_value());
+  EXPECT_EQ(read_back->header.lsn, lsn);
+  EXPECT_EQ(read_back->header.tran_id, 3u);
+  EXPECT_EQ(read_back->header.type, LogRecordType::PAGE_UPDATE);
+
+  PagePatch decoded{};
+  ASSERT_TRUE(deserialize_page_patch(read_back->payload, decoded));
+  EXPECT_EQ(decoded.page_id, 7);
+  EXPECT_EQ(decoded.offset, 64);
+  EXPECT_EQ(decoded.before_payload, (ByteBuffer{9, 9}));
+  EXPECT_EQ(decoded.after_payload, (ByteBuffer{1, 2, 3}));
+}
+
+TEST_F(LogManagerTest, ReadRecordAtReadsEachUnflushedRecordFromBuffer) {
+  const uint32_t FLUSH_INTERVAL = 5000;  // long interval, no auto-flush
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, FLUSH_INTERVAL);
+
+  std::vector<lsn_t> lsns;
+  for (uint64_t i = 1; i <= 4; ++i) {
+    LogRecord rec{};
+    ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, i, rec));
+    lsn_t lsn = log_mgr.append_record(rec);
+    ASSERT_NE(lsn, INVALID_LSN);
+    lsns.push_back(lsn);
+  }
+
+  // All four records are still sitting unflushed in the buffer.
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), WAL_SIGNATURE_SIZE);
+
+  for (size_t i = 0; i < lsns.size(); ++i) {
+    auto rec = log_mgr.read_record_at(lsns[i]);
+    ASSERT_TRUE(rec.has_value());
+    EXPECT_EQ(rec->header.lsn, lsns[i]);
+    EXPECT_EQ(rec->header.tran_id, i + 1);
+    EXPECT_EQ(rec->header.type, LogRecordType::BEGIN);
+  }
+}
+
+TEST_F(LogManagerTest, ReadRecordAtDispatchesDiskOrBufferAcrossFlushBoundary) {
+  const uint32_t FLUSH_INTERVAL = 5000;  // long interval, no auto-flush
+  LogManager log_mgr(test_prefix_, TEST_SEGMENT_SIZE, FLUSH_INTERVAL);
+
+  LogRecord flushed_rec{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 1, flushed_rec));
+  lsn_t flushed_lsn = log_mgr.append_record(flushed_rec);
+  ASSERT_NE(flushed_lsn, INVALID_LSN);
+  ASSERT_TRUE(log_mgr.flush_to_lsn(flushed_lsn));
+  ASSERT_EQ(log_mgr.get_flushed_lsn(), log_mgr.get_next_lsn());
+
+  LogRecord unflushed_rec{};
+  ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, 2, unflushed_rec));
+  lsn_t unflushed_lsn = log_mgr.append_record(unflushed_rec);
+  ASSERT_NE(unflushed_lsn, INVALID_LSN);
+
+  // Only flushed_rec is durable. flushed_lsn_ sits exactly at unflushed_lsn,
+  // so flushed_lsn falls on the disk side of read_record_at's dispatch and
+  // unflushed_lsn falls on the buffer side.
+  EXPECT_EQ(log_mgr.get_flushed_lsn(), unflushed_lsn);
+
+  auto read_flushed = log_mgr.read_record_at(flushed_lsn);
+  ASSERT_TRUE(read_flushed.has_value());
+  EXPECT_EQ(read_flushed->header.lsn, flushed_lsn);
+  EXPECT_EQ(read_flushed->header.tran_id, 1u);
+
+  auto read_unflushed = log_mgr.read_record_at(unflushed_lsn);
+  ASSERT_TRUE(read_unflushed.has_value());
+  EXPECT_EQ(read_unflushed->header.lsn, unflushed_lsn);
+  EXPECT_EQ(read_unflushed->header.tran_id, 2u);
+}
+
 TEST_F(LogManagerTest, SegmentRolloverAndReadRecordsAcrossSegments) {
   static constexpr uint32_t SMALL_SEGMENT = 128;
   LogManager log_mgr(test_prefix_, SMALL_SEGMENT);

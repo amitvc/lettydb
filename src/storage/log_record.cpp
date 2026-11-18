@@ -125,8 +125,12 @@ namespace letty {
 	auto cursor = 0;
 	write_le32(out.data() + cursor, static_cast<uint32_t>(compensation_patch.page_id));
 	cursor += sizeof(uint32_t);
+	out.data()[cursor] = static_cast<Byte>(compensation_patch.kind);
+	cursor += sizeof(Byte);
 	write_le16(out.data() + cursor, compensation_patch.offset);
 	cursor += sizeof(uint16_t);
+	write_le32(out.data() + cursor, compensation_patch.param);
+	cursor += sizeof(uint32_t);
 
 	write_le64(out.data() + cursor, static_cast<uint64_t>(compensation_patch.undo_next_lsn));
 	cursor += sizeof(uint64_t);
@@ -147,8 +151,12 @@ namespace letty {
 	auto cursor = 0;
 	auto page_id = static_cast<page_id_t>(read_le32(bytes.data()));
 	cursor += sizeof(uint32_t);
+	auto kind = static_cast<CompensationKind>(bytes[cursor]);
+	cursor += sizeof(Byte);
 	uint16_t offset = read_le16(bytes.data() + cursor);
 	cursor += sizeof(uint16_t);
+	uint32_t param = read_le32(bytes.data() + cursor);
+	cursor += sizeof(uint32_t);
 	auto undo_next_lsn = static_cast<lsn_t>(read_le64(bytes.data() + cursor));
 	cursor += sizeof(uint64_t);
 	uint16_t payload_size = read_le16(bytes.data() + cursor);
@@ -159,13 +167,20 @@ namespace letty {
 	  return false;
 	}
 
+	if (static_cast<uint8_t>(kind) > static_cast<uint8_t>(CompensationKind::IamRemoveExtent)) {
+	  LOG_WAL_ERROR("Decoded CompensationKind {} is out of range", static_cast<uint8_t>(kind));
+	  return false;
+	}
+
 	if (COMPENSATION_PATCH_HEADER_SIZE + payload_size != bytes.size()) {
 	  LOG_WAL_ERROR("Declared payload size does not match the actual buffer size");
 	  return false;
 	}
 
 	compensation_patch.page_id = page_id;
+	compensation_patch.kind = kind;
 	compensation_patch.offset = offset;
+	compensation_patch.param = param;
 	compensation_patch.undo_next_lsn = undo_next_lsn;
 	compensation_patch.payload.assign(bytes.begin() + COMPENSATION_PATCH_HEADER_SIZE,
 									   bytes.begin() + COMPENSATION_PATCH_HEADER_SIZE + payload_size);
