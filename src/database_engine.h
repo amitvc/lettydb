@@ -17,6 +17,10 @@ class CatalogManager;
 class TableManager;
 class Executor;
 class StorageInspector;
+class LogManager;
+class TransactionManager;
+class CheckpointManager;
+class RollbackManager;
 
 /**
  * @class DatabaseEngine
@@ -42,10 +46,15 @@ class DatabaseEngine {
   StorageInspector& get_inspector();
   CatalogManager& get_catalog();
   BufferPoolManager& get_buffer_pool();
+  CheckpointManager& get_checkpoint_manager();
 
  private:
   std::unique_ptr<DiskManager> disk_manager_;
   std::unique_ptr<BufferPoolManager> buffer_pool_;
+  std::unique_ptr<LogManager> log_manager_;
+  std::unique_ptr<RollbackManager> rollback_manager_;
+  std::unique_ptr<TransactionManager> txn_manager_;
+  std::unique_ptr<CheckpointManager> checkpoint_manager_;
   std::unique_ptr<ExtentManager> extent_manager_;
   std::unique_ptr<IamManager> iam_manager_;
   std::unique_ptr<CatalogManager> catalog_manager_;

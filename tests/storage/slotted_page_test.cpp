@@ -10,7 +10,7 @@ class SlottedPageTest : public ::testing::Test {
     std::memset(buffer, 0, PAGE_SIZE);
   }
 
-  char buffer[PAGE_SIZE];
+  Byte buffer[PAGE_SIZE];
 };
 
 TEST_F(SlottedPageTest, Initialization) {
@@ -25,17 +25,17 @@ TEST_F(SlottedPageTest, InsertAndGetTuple) {
   SlottedPage page = SlottedPage::init(buffer);
 
   std::string data1 = "Hello World";
-  auto slot_id = page.insert_tuple(data1.c_str(), data1.size() + 1);
+  auto slot_id = page.insert_tuple(reinterpret_cast<const Byte*>(data1.c_str()), static_cast<uint32_t>(data1.size() + 1));
 
   ASSERT_TRUE(slot_id.has_value());
   EXPECT_EQ(page.get_num_slots(), 1);
 
   uint32_t size;
-  const char* retrieved_data = page.get_tuple(*slot_id, &size);
+  const Byte* retrieved_data = page.get_tuple(*slot_id, &size);
 
   ASSERT_NE(retrieved_data, nullptr);
   EXPECT_EQ(size, data1.size() + 1);
-  EXPECT_STREQ(retrieved_data, data1.c_str());
+  EXPECT_STREQ(reinterpret_cast<const char*>(retrieved_data), data1.c_str());
 }
 
 TEST_F(SlottedPageTest, MultipleInserts) {
@@ -45,7 +45,7 @@ TEST_F(SlottedPageTest, MultipleInserts) {
   std::vector<uint16_t> slot_ids;
 
   for (const auto& s : strings) {
-    auto id = page.insert_tuple(s.c_str(), s.size() + 1);
+    auto id = page.insert_tuple(reinterpret_cast<const Byte*>(s.c_str()), static_cast<uint32_t>(s.size() + 1));
     ASSERT_TRUE(id.has_value());
     slot_ids.push_back(*id);
   }
@@ -54,21 +54,20 @@ TEST_F(SlottedPageTest, MultipleInserts) {
 
   for (int i = 0; i < 4; ++i) {
     uint32_t size;
-    const char* data = page.get_tuple(slot_ids[i], &size);
-    EXPECT_STREQ(data, strings[i].c_str());
+    const Byte* data = page.get_tuple(slot_ids[i], &size);
+    EXPECT_STREQ(reinterpret_cast<const char*>(data), strings[i].c_str());
   }
 }
 
 TEST_F(SlottedPageTest, PageFull) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  char huge_data[4000];
+  Byte huge_data[4000];
   std::memset(huge_data, 'A', 4000);
 
   auto id1 = page.insert_tuple(huge_data, 4000);
   ASSERT_TRUE(id1.has_value());
 
-  // Should fail — no space left
   auto id2 = page.insert_tuple(huge_data, 100);
   EXPECT_FALSE(id2.has_value());
 }
@@ -76,9 +75,9 @@ TEST_F(SlottedPageTest, PageFull) {
 TEST_F(SlottedPageTest, DeleteTuple) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  auto id1 = page.insert_tuple("Tuple 1", 8);
-  auto id2 = page.insert_tuple("Tuple 2", 8);
-  auto id3 = page.insert_tuple("Tuple 3", 8);
+  auto id1 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 1"), 8);
+  auto id2 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 2"), 8);
+  auto id3 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 3"), 8);
 
   ASSERT_TRUE(id1.has_value());
   ASSERT_TRUE(id2.has_value());
@@ -95,9 +94,9 @@ TEST_F(SlottedPageTest, DeleteTuple) {
 TEST_F(SlottedPageTest, DeleteTrailingSlotShrinksCount) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  auto id0 = page.insert_tuple("A", 2);
-  auto id1 = page.insert_tuple("B", 2);
-  auto id2 = page.insert_tuple("C", 2);
+  auto id0 = page.insert_tuple(reinterpret_cast<const Byte*>("A"), 2);
+  auto id1 = page.insert_tuple(reinterpret_cast<const Byte*>("B"), 2);
+  auto id2 = page.insert_tuple(reinterpret_cast<const Byte*>("C"), 2);
 
   ASSERT_TRUE(id0 && id1 && id2);
   EXPECT_EQ(page.get_num_slots(), 3);
@@ -115,9 +114,9 @@ TEST_F(SlottedPageTest, DeleteTrailingSlotShrinksCount) {
 TEST_F(SlottedPageTest, DeleteMiddleSlotPreservesCount) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  auto id0 = page.insert_tuple("A", 2);
-  auto id1 = page.insert_tuple("B", 2);
-  auto id2 = page.insert_tuple("C", 2);
+  auto id0 = page.insert_tuple(reinterpret_cast<const Byte*>("A"), 2);
+  auto id1 = page.insert_tuple(reinterpret_cast<const Byte*>("B"), 2);
+  auto id2 = page.insert_tuple(reinterpret_cast<const Byte*>("C"), 2);
 
   ASSERT_TRUE(id0 && id1 && id2);
 
@@ -132,7 +131,7 @@ TEST_F(SlottedPageTest, DeleteMiddleSlotPreservesCount) {
 
 TEST_F(SlottedPageTest, DeleteNonExistentSlotFails) {
   SlottedPage page = SlottedPage::init(buffer);
-  page.insert_tuple("A", 2);
+  page.insert_tuple(reinterpret_cast<const Byte*>("A"), 2);
 
   EXPECT_FALSE(page.delete_tuple(5));
 }
@@ -140,7 +139,7 @@ TEST_F(SlottedPageTest, DeleteNonExistentSlotFails) {
 TEST_F(SlottedPageTest, DeleteAlreadyDeletedSlotFails) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  auto id = page.insert_tuple("A", 2);
+  auto id = page.insert_tuple(reinterpret_cast<const Byte*>("A"), 2);
   ASSERT_TRUE(id.has_value());
 
   EXPECT_TRUE(page.delete_tuple(*id));
@@ -150,9 +149,9 @@ TEST_F(SlottedPageTest, DeleteAlreadyDeletedSlotFails) {
 TEST_F(SlottedPageTest, SlotReuse) {
   SlottedPage page = SlottedPage::init(buffer);
 
-  auto id1 = page.insert_tuple("Tuple 1", 8);
-  auto id2 = page.insert_tuple("Tuple 2", 8);
-  auto id3 = page.insert_tuple("Tuple 3", 8);
+  auto id1 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 1"), 8);
+  auto id2 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 2"), 8);
+  auto id3 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 3"), 8);
 
   ASSERT_TRUE(id1.has_value());
   ASSERT_TRUE(id2.has_value());
@@ -164,23 +163,23 @@ TEST_F(SlottedPageTest, SlotReuse) {
 
   page.delete_tuple(*id2);
 
-  auto id4 = page.insert_tuple("Tuple 4", 8);
+  auto id4 = page.insert_tuple(reinterpret_cast<const Byte*>("Tuple 4"), 8);
   ASSERT_TRUE(id4.has_value());
   EXPECT_EQ(*id4, 1);
 
   EXPECT_EQ(page.get_num_slots(), 3);
 
   uint32_t size;
-  const char* data = page.get_tuple(*id4, &size);
-  EXPECT_STREQ(data, "Tuple 4");
+  const Byte* data = page.get_tuple(*id4, &size);
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "Tuple 4");
 }
 
 // Compaction unit tests
 TEST_F(SlottedPageTest, CompactReclaimsSpaceAfterDelete) {
   SlottedPage page = SlottedPage::init(buffer);
-  auto tpl1 = page.insert_tuple("tuple 1", 8);
-  auto tpl2 = page.insert_tuple("tuple 2", 8);
-  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  auto tpl1 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 1"), 8);
+  auto tpl2 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 2"), 8);
+  auto tpl3 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 3"), 8);
   ASSERT_TRUE(tpl1.has_value());
   ASSERT_TRUE(tpl2.has_value());
   ASSERT_TRUE(tpl3.has_value());
@@ -190,24 +189,23 @@ TEST_F(SlottedPageTest, CompactReclaimsSpaceAfterDelete) {
   size_t free_space_after_compaction = page.get_free_space();
   ASSERT_TRUE(free_space_after_compaction > free_space);
 
-  // After compact, slot IDs are reassigned. All live tuples survive.
   EXPECT_EQ(page.get_num_slots(), 2);
 
   uint32_t size;
-  const char* data = page.get_tuple(0, &size);
+  const Byte* data = page.get_tuple(0, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 1");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 1");
 
   data = page.get_tuple(1, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 3");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 3");
 }
 
 TEST_F(SlottedPageTest, CompactNoOpOnCleanPage) {
   SlottedPage page = SlottedPage::init(buffer);
-  auto tpl1 = page.insert_tuple("tuple 1", 8);
-  auto tpl2 = page.insert_tuple("tuple 2", 8);
-  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  auto tpl1 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 1"), 8);
+  auto tpl2 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 2"), 8);
+  auto tpl3 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 3"), 8);
   ASSERT_TRUE(tpl1.has_value());
   ASSERT_TRUE(tpl2.has_value());
   ASSERT_TRUE(tpl3.has_value());
@@ -216,28 +214,28 @@ TEST_F(SlottedPageTest, CompactNoOpOnCleanPage) {
   size_t free_space_after_compaction = page.get_free_space();
   ASSERT_EQ(free_space_after_compaction, free_space);
   ASSERT_FALSE(tombstones_found);
-  // After compact. All live tuples survive.
+
   EXPECT_EQ(page.get_num_slots(), 3);
 
   uint32_t size;
-  const char* data = page.get_tuple(0, &size);
+  const Byte* data = page.get_tuple(0, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 1");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 1");
 
   data = page.get_tuple(1, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 2");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 2");
 
   data = page.get_tuple(2, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 3");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 3");
 }
 
 TEST_F(SlottedPageTest, CompactAfterAllDeleted) {
   SlottedPage page = SlottedPage::init(buffer);
-  auto tpl1 = page.insert_tuple("tuple 1", 8);
-  auto tpl2 = page.insert_tuple("tuple 2", 8);
-  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  auto tpl1 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 1"), 8);
+  auto tpl2 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 2"), 8);
+  auto tpl3 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 3"), 8);
   ASSERT_TRUE(tpl1.has_value());
   ASSERT_TRUE(tpl2.has_value());
   ASSERT_TRUE(tpl3.has_value());
@@ -251,34 +249,32 @@ TEST_F(SlottedPageTest, CompactAfterAllDeleted) {
 
 TEST_F(SlottedPageTest, CompactPreservesOrder) {
   SlottedPage page = SlottedPage::init(buffer);
-  auto tpl1 = page.insert_tuple("tuple 1", 8);
-  auto tpl2 = page.insert_tuple("tuple 2", 8);
-  auto tpl3 = page.insert_tuple("tuple 3", 8);
+  auto tpl1 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 1"), 8);
+  auto tpl2 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 2"), 8);
+  auto tpl3 = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 3"), 8);
   ASSERT_TRUE(tpl1 && tpl2 && tpl3);
 
   page.delete_tuple(tpl2.value());
   page.compact();
 
-  // After compact: slot 0 = "tuple 1", slot 1 = "tuple 3" (inserted in scan order).
   EXPECT_EQ(page.get_num_slots(), 2);
 
   uint32_t size;
-  const char* data = page.get_tuple(0, &size);
+  const Byte* data = page.get_tuple(0, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 1");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 1");
 
   data = page.get_tuple(1, &size);
   ASSERT_NE(data, nullptr);
-  EXPECT_STREQ(data, "tuple 3");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data), "tuple 3");
 
-  // Re-insert "tuple 2" — it gets slot 2 since num_slots is now 2.
-  auto tpl2_new = page.insert_tuple("tuple 2", 8);
+  auto tpl2_new = page.insert_tuple(reinterpret_cast<const Byte*>("tuple 2"), 8);
   ASSERT_TRUE(tpl2_new.has_value());
   EXPECT_EQ(page.get_num_slots(), 3);
 
-  const char* data2 = page.get_tuple(2, &size);
+  const Byte* data2 = page.get_tuple(2, &size);
   ASSERT_NE(data2, nullptr);
-  EXPECT_STREQ(data2, "tuple 2");
+  EXPECT_STREQ(reinterpret_cast<const char*>(data2), "tuple 2");
 }
 
 }

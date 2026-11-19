@@ -9,7 +9,6 @@ namespace letty {
 
 class TupleTest : public ::testing::Test {
  protected:
-  // Schema: id INTEGER, name VARCHAR(64), active BOOLEAN
   static Schema make_mixed_schema() {
     return Schema({
       Column("id",     DataType::INTEGER, 4,  0),
@@ -18,7 +17,6 @@ class TupleTest : public ::testing::Test {
     });
   }
 
-  // Schema: id INTEGER, score DOUBLE
   static Schema make_numeric_schema() {
     return Schema({
       Column("id",    DataType::INTEGER, 4, 0),
@@ -26,14 +24,12 @@ class TupleTest : public ::testing::Test {
     });
   }
 
-  // Schema: created DATE (10 bytes, "YYYY-MM-DD")
   static Schema make_date_schema() {
     return Schema({
       Column("created", DataType::DATE, 10, 0),
     });
   }
 
-  // Schema: ts TIMESTAMP (19 bytes, "YYYY-MM-DD HH:MM:SS")
   static Schema make_timestamp_schema() {
     return Schema({
       Column("ts", DataType::TIMESTAMP, 19, 0),
@@ -51,7 +47,7 @@ TEST_F(TupleTest, SerializeInto_Integer_WritesCorrectBytes) {
   Schema schema({Column("n", DataType::INTEGER, 4, 0)});
   Tuple t(std::vector<Value>{int32_t{400}});
 
-  char buf[16] = {};
+  Byte buf[16] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 5u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -65,7 +61,7 @@ TEST_F(TupleTest, SerializeInto_NegativeInteger_WritesCorrectBytes) {
   Schema schema({Column("n", DataType::INTEGER, 4, 0)});
   Tuple t(std::vector<Value>{int32_t{-1}});
 
-  char buf[16] = {};
+  Byte buf[16] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
 
   int32_t val;
@@ -78,7 +74,7 @@ TEST_F(TupleTest, SerializeInto_Double_WritesCorrectBytes) {
   const double expected = 3.14159;
   Tuple t(std::vector<Value>{expected});
 
-  char buf[16] = {};
+  Byte buf[16] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 9u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -92,7 +88,7 @@ TEST_F(TupleTest, SerializeInto_BooleanTrue_WritesOneByte1) {
   Schema schema({Column("flag", DataType::BOOLEAN, 1, 0)});
   Tuple t(std::vector<Value>{bool{true}});
 
-  char buf[8] = {};
+  Byte buf[8] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 2u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -103,7 +99,7 @@ TEST_F(TupleTest, SerializeInto_BooleanFalse_WritesOneByte0) {
   Schema schema({Column("flag", DataType::BOOLEAN, 1, 0)});
   Tuple t(std::vector<Value>{bool{false}});
 
-  char buf[8] = {};
+  Byte buf[8] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 2u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -111,10 +107,10 @@ TEST_F(TupleTest, SerializeInto_BooleanFalse_WritesOneByte0) {
 }
 
 TEST_F(TupleTest, SerializeInto_MultipleFixedColumns_TotalSizeIsSum) {
-  Schema schema = make_numeric_schema();  // INTEGER(4) + DOUBLE(8) = 12
+  Schema schema = make_numeric_schema();
   Tuple t(std::vector<Value>{int32_t{1}, double{2.0}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 13u);
 }
@@ -125,7 +121,7 @@ TEST_F(TupleTest, SerializeInto_Varchar_Writes2ByteLengthPrefixThenData) {
   const std::string name = "alice";
   Tuple t(std::vector<Value>{name});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 3u + name.size());
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -140,7 +136,7 @@ TEST_F(TupleTest, SerializeInto_EmptyVarchar_WritesTwoZeroBytes) {
   Schema schema({Column("name", DataType::VARCHAR, 64, 0)});
   Tuple t(std::vector<Value>{std::string{""}});
 
-  char buf[16] = {};
+  Byte buf[16] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(out_size, 3u);
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0u);
@@ -154,9 +150,9 @@ TEST_F(TupleTest, SerializeInto_NumericSchema_WritesCorrectContent) {
   Schema schema = make_numeric_schema();
   Tuple t(std::vector<Value>{int32_t{7}, double{1.5}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = t.serialize(schema, buf, sizeof(buf));
-  EXPECT_EQ(out_size, 13u);  // 1-byte null bitmap + 4 + 8
+  EXPECT_EQ(out_size, 13u);
 
   int32_t id;
   double score;
@@ -168,25 +164,25 @@ TEST_F(TupleTest, SerializeInto_NumericSchema_WritesCorrectContent) {
 
 
 TEST_F(TupleTest, SerializeInto_BufferTooSmall_Throws) {
-  Schema schema = make_numeric_schema();  // needs 12 bytes
+  Schema schema = make_numeric_schema();
   Tuple t(std::vector<Value>{int32_t{1}, double{2.0}});
 
-  char buf[4] = {};
+  Byte buf[4] = {};
   EXPECT_THROW(t.serialize(schema, buf, sizeof(buf)), std::runtime_error);
 }
 
 TEST_F(TupleTest, SerializeInto_ValueCountMismatch_Throws) {
-  Schema schema = make_numeric_schema();  // expects 2 columns
-  Tuple t(std::vector<Value>{int32_t{1}});  // only 1 value
+  Schema schema = make_numeric_schema();
+  Tuple t(std::vector<Value>{int32_t{1}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   EXPECT_THROW(t.serialize(schema, buf, sizeof(buf)), std::runtime_error);
 }
 
 TEST_F(TupleTest, Deserialize_Integer_ReturnsCorrectValue) {
   Schema schema({Column("n", DataType::INTEGER, 4, 0)});
   int32_t raw = 42;
-  char buf[5] = {};
+  Byte buf[5] = {};
   std::memcpy(buf + 1, &raw, sizeof(raw));
   Tuple t = Tuple::deserialize(schema, buf, sizeof(buf));
   ASSERT_EQ(t.size(), 1u);
@@ -196,7 +192,7 @@ TEST_F(TupleTest, Deserialize_Integer_ReturnsCorrectValue) {
 TEST_F(TupleTest, Deserialize_Double_ReturnsCorrectValue) {
   Schema schema({Column("x", DataType::DOUBLE, 8, 0)});
   double raw = 2.718;
-  char buf[9] = {};
+  Byte buf[9] = {};
   std::memcpy(buf + 1, &raw, sizeof(raw));
   Tuple t = Tuple::deserialize(schema, buf, sizeof(buf));
   ASSERT_EQ(t.size(), 1u);
@@ -205,23 +201,22 @@ TEST_F(TupleTest, Deserialize_Double_ReturnsCorrectValue) {
 
 TEST_F(TupleTest, Deserialize_BooleanTrue_ReturnsTrueValue) {
   Schema schema({Column("b", DataType::BOOLEAN, 1, 0)});
-  char raw[2] = {0, 1};
+  Byte raw[2] = {0, 1};
   Tuple t = Tuple::deserialize(schema, raw, sizeof(raw));
   ASSERT_EQ(t.size(), 1u);
   EXPECT_TRUE(std::get<bool>(t.get_value(0)));
 }
 
 TEST_F(TupleTest, Deserialize_BooleanNonZero_ReturnsTrueValue) {
-  // Any non-zero byte should deserialize as true
   Schema schema({Column("b", DataType::BOOLEAN, 1, 0)});
-  char raw[2] = {0, static_cast<char>(0xFF)};
+  Byte raw[2] = {0, static_cast<Byte>(0xFF)};
   Tuple t = Tuple::deserialize(schema, raw, sizeof(raw));
   EXPECT_TRUE(std::get<bool>(t.get_value(0)));
 }
 
 TEST_F(TupleTest, Deserialize_BooleanFalse_ReturnsFalseValue) {
   Schema schema({Column("b", DataType::BOOLEAN, 1, 0)});
-  char raw[2] = {0, 0};
+  Byte raw[2] = {0, 0};
   Tuple t = Tuple::deserialize(schema, raw, sizeof(raw));
   EXPECT_FALSE(std::get<bool>(t.get_value(0)));
 }
@@ -230,7 +225,7 @@ TEST_F(TupleTest, Deserialize_Varchar_ReturnsCorrectString) {
   Schema schema({Column("s", DataType::VARCHAR, 64, 0)});
   const char* word = "hello";
   uint16_t len = 5;
-  char buf[16] = {};
+  Byte buf[16] = {};
   std::memcpy(buf + 1, &len, sizeof(uint16_t));
   std::memcpy(buf + 3, word, 5);
 
@@ -240,10 +235,9 @@ TEST_F(TupleTest, Deserialize_Varchar_ReturnsCorrectString) {
 }
 
 TEST_F(TupleTest, Deserialize_Date_TrimsNullPadding) {
-  // Simulate a short date string padded to the field length with null bytes
-  Schema schema = make_date_schema();  // 10-byte field
-  char buf[11] = {};
-  const char* date = "2026-2-19";  // 9 chars, buf[9] stays '\0'
+  Schema schema = make_date_schema();
+  Byte buf[11] = {};
+  const char* date = "2026-2-19";
   std::memcpy(buf + 1, date, 9);
 
   Tuple t = Tuple::deserialize(schema, buf, sizeof(buf));
@@ -253,15 +247,11 @@ TEST_F(TupleTest, Deserialize_Date_TrimsNullPadding) {
   EXPECT_EQ(val, "2026-2-19");
 }
 
-// ---------------------------------------------------------------------------
-// Round-trip (serialize → deserialize)
-// ---------------------------------------------------------------------------
-
 TEST_F(TupleTest, RoundTrip_NumericSchema_PreservesAllValues) {
   Schema schema = make_numeric_schema();
   Tuple original(std::vector<Value>{int32_t{-1}, double{99.9}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
@@ -274,7 +264,7 @@ TEST_F(TupleTest, RoundTrip_NullValue_PreservesNull) {
   Schema schema = make_numeric_schema();
   Tuple original(std::vector<Value>{int32_t{7}, std::monostate{}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   EXPECT_EQ(static_cast<uint8_t>(buf[0]), 0b00000010);
 
@@ -289,7 +279,7 @@ TEST_F(TupleTest, RoundTrip_MixedSchema_PreservesAllValues) {
   Schema schema = make_mixed_schema();
   Tuple original(std::vector<Value>{int32_t{42}, std::string{"alice"}, bool{true}});
 
-  char buf[256] = {};
+  Byte buf[256] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
@@ -303,7 +293,7 @@ TEST_F(TupleTest, RoundTrip_EmptyVarchar_PreservesEmptyString) {
   Schema schema({Column("s", DataType::VARCHAR, 64, 0)});
   Tuple original(std::vector<Value>{std::string{""}});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
@@ -316,8 +306,7 @@ TEST_F(TupleTest, RoundTrip_LargeVarchar_PreservesAllCharacters) {
   std::string long_str(500, 'z');
   Tuple original(std::vector<Value>{long_str});
 
-  // 2-byte length prefix + 500 bytes of data
-  char buf[512] = {};
+  Byte buf[512] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
@@ -330,7 +319,7 @@ TEST_F(TupleTest, RoundTrip_DateField_PreservesValue) {
   const std::string date = "2026-02-19";
   Tuple original(std::vector<Value>{date});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 
@@ -343,7 +332,7 @@ TEST_F(TupleTest, RoundTrip_TimestampField_PreservesValue) {
   const std::string ts = "2026-02-19 10:30:00";
   Tuple original(std::vector<Value>{ts});
 
-  char buf[64] = {};
+  Byte buf[64] = {};
   uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
   Tuple restored = Tuple::deserialize(schema, buf, out_size);
 

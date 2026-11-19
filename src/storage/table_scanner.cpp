@@ -11,9 +11,7 @@ namespace letty {
 TableScanner::TableScanner(BufferPoolManager& buffer_pool, page_id_t iam_head)
     : buffer_pool_(buffer_pool), next_iam_page_id_(iam_head) {}
 
-TableScanner::~TableScanner() {
-  release_current_page();
-}
+TableScanner::~TableScanner() = default;
 
 bool TableScanner::next() {
   current_tuple_data_ = nullptr;
@@ -24,14 +22,14 @@ bool TableScanner::next() {
       return false;
     }
 
-    if (!current_page_ && !move_to_next_page()) {
+    if (!current_page_guard_ && !move_to_next_page()) {
       current_iam_page_.reset();
       continue;
     }
 
-    SlottedPage slotted_page = SlottedPage::from_page(current_page_);
+    SlottedPage slotted_page = SlottedPage::from_page(current_page_guard_);
     while (current_slot_ < slotted_page.get_num_slots()) {
-      const char* data = slotted_page.get_tuple(current_slot_, &current_tuple_size_);
+      const Byte* data = slotted_page.get_tuple(current_slot_, &current_tuple_size_);
       last_found_slot_ = current_slot_;
       ++current_slot_;
       if (data) {
@@ -44,7 +42,7 @@ bool TableScanner::next() {
   }
 }
 
-const char* TableScanner::get_tuple_data() const {
+const Byte* TableScanner::get_tuple_data() const {
   return current_tuple_data_;
 }
 
@@ -74,10 +72,10 @@ bool TableScanner::move_to_next_page() {
       while (current_page_offset_ < EXTENT_SIZE) {
         uint32_t extent_id = current_iam_page_->extent_ids[current_extent_index_];
         current_page_id_ = static_cast<page_id_t>(extent_id * EXTENT_SIZE + current_page_offset_);
-        current_page_ = buffer_pool_.fetch_page(current_page_id_);
+        current_page_guard_ = buffer_pool_.fetch_page_guard(current_page_id_);
         ++current_page_offset_;
 
-        if (current_page_) {
+        if (current_page_guard_) {
           current_slot_ = 0;
           return true;
         }
@@ -94,12 +92,7 @@ bool TableScanner::move_to_next_page() {
 }
 
 void TableScanner::release_current_page() {
-  if (!current_page_) {
-    return;
-  }
-
-  buffer_pool_.unpin_page(current_page_id_, false);
-  current_page_ = nullptr;
+  current_page_guard_.drop();
   current_page_id_ = INVALID_PAGE_ID;
   current_slot_ = 0;
 }

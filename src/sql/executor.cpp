@@ -2,6 +2,8 @@
 
 #include "token.h"
 #include "common/db_exception.h"
+#include "common/logger.h"
+#include "storage/checkpoint_manager.h"
 
 namespace letty {
 
@@ -87,8 +89,23 @@ bool apply_comparison(const Value& lhs, const std::string& op, const Value& rhs)
 
 }  // namespace
 
-Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager)
-    : catalog_manager_(catalog_manager), table_manager_(table_manager) {}
+Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager)
+    : catalog_manager_(catalog_manager), table_manager_(table_manager), txn_manager_(txn_manager) {}
+
+Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager,
+                   CheckpointManager& checkpoint_manager)
+    : catalog_manager_(catalog_manager),
+      table_manager_(table_manager),
+      txn_manager_(txn_manager),
+      checkpoint_manager_(&checkpoint_manager) {}
+
+void Executor::maybe_checkpoint() {
+  if (checkpoint_manager_ != nullptr && checkpoint_manager_->should_checkpoint()) {
+    if (!checkpoint_manager_->run_checkpoint()) {
+      LOG_STORAGE_WARN("Periodic checkpoint execution failed");
+    }
+  }
+}
 
 ExecutionResult Executor::execute(ASTNode* node) {
   try {
@@ -97,11 +114,19 @@ ExecutionResult Executor::execute(ASTNode* node) {
     }
 
     if (auto* create_table = dynamic_cast<CreateTableStatementNode*>(node)) {
-      return execute_create_table(create_table);
+      ExecutionResult res = execute_create_table(create_table);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* insert = dynamic_cast<InsertStatementNode*>(node)) {
-      return execute_insert(insert);
+      ExecutionResult res = execute_insert(insert);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* select = dynamic_cast<SelectStatementNode*>(node)) {
@@ -109,11 +134,19 @@ ExecutionResult Executor::execute(ASTNode* node) {
     }
 
     if (auto* del = dynamic_cast<DeleteStatementNode*>(node)) {
-      return execute_delete(del);
+      ExecutionResult res = execute_delete(del);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* compact = dynamic_cast<CompactStatementNode*>(node)) {
-      return execute_compact(compact);
+      ExecutionResult res = execute_compact(compact);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     return ExecutionResult::error("Unsupported statement type");
@@ -123,37 +156,52 @@ ExecutionResult Executor::execute(ASTNode* node) {
 }
 
 ExecutionResult Executor::execute_create_table(CreateTableStatementNode* node) {
+  uint64_t txn_id = txn_manager_.begin();
+  if (txn_id == 0) {
+    return ExecutionResult::error("Failed to begin transaction");
+  }
+
   if (!node->table_name) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("CREATE TABLE: missing table name");
   }
-  
+
   std::string table_name = node->table_name->name;
-  
+
   std::vector<Column> columns;
   uint16_t current_offset = 0;
-  
+
   for (const auto& col_def : node->columns) {
     if (!col_def || !col_def->column_name) {
+      txn_manager_.abort(txn_id);
       return ExecutionResult::error("CREATE TABLE: invalid column definition");
     }
-    
+
     std::string col_name = col_def->column_name->name;
     DataType data_type = token_type_to_data_type(col_def->data_type);
-    
+
     uint16_t col_length;
     if (data_type == DataType::VARCHAR) {
-      col_length = col_def->size > 0 ? col_def->size : 255;  // Default VARCHAR size
+      col_length = col_def->size > 0 ? col_def->size : 255;
     } else {
       col_length = Column::fixed_length_of(data_type);
     }
-    
+
     columns.emplace_back(col_name, data_type, col_length, current_offset, col_def->nullable);
     current_offset += col_length;
   }
-  
+
   Schema schema(columns);
-  
-  catalog_manager_.create_table(table_name, schema);
+
+  if (!catalog_manager_.create_table(table_name, schema)) {
+    txn_manager_.abort(txn_id);
+    return ExecutionResult::error("CREATE TABLE: failed to create table '" + table_name + "'");
+  }
+
+  if (!txn_manager_.commit(txn_id)) {
+    return ExecutionResult::error("CREATE TABLE: failed to commit transaction");
+  }
+
   return ExecutionResult::ok();
 }
 
@@ -208,28 +256,34 @@ std::optional<std::unordered_map<size_t, size_t>> Executor::build_column_index(
 }
 
 ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
+  uint64_t txn_id = txn_manager_.begin();
+  if (txn_id == 0) {
+    return ExecutionResult::error("Failed to begin transaction");
+  }
+
   if (!node->tableName) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("INSERT: missing table name");
   }
-  
+
   std::string table_name = node->tableName->name;
-  
-  // Get table metadata
-  auto* table_meta = catalog_manager_.get_table(table_name);
-  if (!table_meta) {
+
+  auto table_meta = catalog_manager_.get_table(table_name);
+  if (!table_meta.has_value()) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("INSERT: table '" + table_name + "' does not exist");
   }
-  
-  const Schema& schema = table_meta->schema;
+
+  const Schema& schema = table_meta->get().schema;
   const auto& schema_columns = schema.get_columns();
-  
-  // Build all tuples first
+
   std::vector<Tuple> tuples;
   tuples.reserve(node->values.size());
 
   std::string index_error;
   auto schema_to_value_idx = build_column_index(node->columnNames, schema_columns, index_error);
   if (!schema_to_value_idx) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error(index_error);
   }
 
@@ -237,6 +291,7 @@ ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
 
   for (const auto& row_values : node->values) {
     if (row_values.size() != expected_value_count) {
+      txn_manager_.abort(txn_id);
       return ExecutionResult::error("INSERT: value count (" + std::to_string(row_values.size()) +
                                     ") doesn't match column count (" + std::to_string(expected_value_count) + ")");
     }
@@ -246,6 +301,7 @@ ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
       auto it = schema_to_value_idx->find(si);
       Value val = (it == schema_to_value_idx->end()) ? Value{std::monostate{}} : literal_to_value(row_values[it->second].get());
       if (std::holds_alternative<std::monostate>(val) && !schema_columns[si].is_nullable()) {
+        txn_manager_.abort(txn_id);
         return ExecutionResult::error("INSERT: column '" + schema_columns[si].get_name() + "' is NOT NULL");
       }
       tuple.add_value(val);
@@ -253,11 +309,15 @@ ExecutionResult Executor::execute_insert(InsertStatementNode* node) {
     tuples.push_back(std::move(tuple));
   }
 
-  // Batch insert all tuples
-  uint32_t inserted_count = table_manager_.insert_rows(table_name, tuples);
+  uint32_t inserted_count = table_manager_.insert_rows(table_name, tuples, txn_id);
   if (inserted_count != tuples.size()) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("INSERT: failed to insert all rows into '" + table_name +
                                   "' (" + std::to_string(inserted_count) + "/" + std::to_string(tuples.size()) + ")");
+  }
+
+  if (!txn_manager_.commit(txn_id)) {
+    return ExecutionResult::error("INSERT: failed to commit transaction");
   }
 
   return ExecutionResult::ok(inserted_count);
@@ -270,15 +330,15 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
   
   std::string table_name = node->from_clause->name->name;
   
-  auto* table_meta = catalog_manager_.get_table(table_name);
-  if (!table_meta) {
+  auto table_meta = catalog_manager_.get_table(table_name);
+  if (!table_meta.has_value()) {
     return ExecutionResult::error("SELECT: table '" + table_name + "' does not exist");
   }
-  
+
   ExecutionResult result;
   result.success = true;
-  
-  const auto& schema_columns = table_meta->schema.get_columns();
+
+  const auto& schema_columns = table_meta->get().schema.get_columns();
   std::vector<size_t> selected_column_indexes;
   if (node->is_select_all) {
     for (size_t i = 0; i < schema_columns.size(); ++i) {
@@ -316,7 +376,7 @@ ExecutionResult Executor::execute_select(SelectStatementNode* node) {
 
   TableScanner scanner = table_manager_.scan_table(table_name);
   while (scanner.next()) {
-    Tuple tuple = Tuple::deserialize(table_meta->schema, scanner.get_tuple_data(), scanner.get_tuple_size());
+    Tuple tuple = Tuple::deserialize(table_meta->get().schema, scanner.get_tuple_data(), scanner.get_tuple_size());
     if (!tuple_matches_where(node, tuple, schema_columns)) {
       continue;
     }
@@ -471,25 +531,31 @@ Tuple Executor::project_tuple(const Tuple& tuple,
 }
 
 ExecutionResult Executor::execute_delete(DeleteStatementNode* node) {
+  uint64_t txn_id = txn_manager_.begin();
+  if (txn_id == 0) {
+    return ExecutionResult::error("Failed to begin transaction");
+  }
+
   if (!node->table_name) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("DELETE: missing table name");
   }
 
   std::string table_name = node->table_name->name;
 
-  auto* table_meta = catalog_manager_.get_table(table_name);
-  if (!table_meta) {
+  auto table_meta = catalog_manager_.get_table(table_name);
+  if (!table_meta.has_value()) {
+    txn_manager_.abort(txn_id);
     return ExecutionResult::error("DELETE: table '" + table_name + "' does not exist");
   }
 
-  const auto& schema_columns = table_meta->schema.get_columns();
+  const auto& schema_columns = table_meta->get().schema.get_columns();
 
   uint32_t deleted_count = 0;
   TableScanner scanner = table_manager_.scan_table(table_name);
   while (scanner.next()) {
-    Tuple tuple = Tuple::deserialize(table_meta->schema, scanner.get_tuple_data(), scanner.get_tuple_size());
+    Tuple tuple = Tuple::deserialize(table_meta->get().schema, scanner.get_tuple_data(), scanner.get_tuple_size());
 
-    // If there's a WHERE clause, check if this row matches
     if (node->where_clause) {
       bool matches = evaluate_where_clause(node->where_clause.get(), tuple, schema_columns);
       if (!matches) {
@@ -497,23 +563,26 @@ ExecutionResult Executor::execute_delete(DeleteStatementNode* node) {
       }
     }
 
-    // Delete the row
-    bool ok = table_manager_.delete_row(*table_meta, scanner.current_page_id(), scanner.current_slot_id());
+    bool ok = table_manager_.delete_row(*table_meta, scanner.current_page_id(), scanner.current_slot_id(), txn_id);
     if (ok) {
       deleted_count++;
     }
+  }
+
+  if (!txn_manager_.commit(txn_id)) {
+    return ExecutionResult::error("DELETE: failed to commit transaction");
   }
 
   return ExecutionResult::ok(deleted_count);
 }
 
 ExecutionResult Executor::execute_compact(CompactStatementNode* node) {
-  auto* table_meta = catalog_manager_.get_table(node->table_name);
-  if (!table_meta) {
+  auto table_meta = catalog_manager_.get_table(node->table_name);
+  if (!table_meta.has_value()) {
     return ExecutionResult::error("COMPACT: table '" + node->table_name + "' does not exist");
   }
 
-  CompactionStats stats = table_manager_.compact_table(*table_meta);
+  CompactionStats stats = table_manager_.compact_table(table_meta->get());
 
   ExecutionResult result;
   result.success = true;

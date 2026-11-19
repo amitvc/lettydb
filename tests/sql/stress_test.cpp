@@ -1,24 +1,23 @@
 #include <gtest/gtest.h>
 #include <cstdio>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 
+#include "database_engine.h"
+#include "buffer/lru_replacer.h"
+#include "storage/disk_manager.h"
+#include "storage/log_manager.h"
 #include "sql/executor.h"
 #include "sql/parser.h"
 #include "sql/lexer.h"
 #include "sql/token.h"
-#include "storage/disk_manager.h"
-#include "buffer/buffer_pool_manager.h"
-#include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
-#include "catalog/catalog_manager.h"
-#include "storage/table_manager.h"
 #include "monitoring/storage_inspector.h"
 
 namespace letty {
@@ -28,29 +27,30 @@ namespace letty {
 class StressTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    std::remove(db_path_.c_str());
-    disk_manager_ = std::make_unique<DiskManager>(db_path_);
-    bpm_ = std::make_unique<BufferPoolManager>(
-        *disk_manager_, 256, std::make_unique<LRUPageReplacer>());
-    extent_manager_ = std::make_unique<ExtentManager>(*bpm_);
-    iam_manager_ = std::make_unique<IamManager>(*bpm_, *extent_manager_);
-    catalog_manager_ = std::make_unique<CatalogManager>(*bpm_, *iam_manager_);
-    catalog_manager_->init();
-    table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_);
-    executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_);
-    inspector_ = std::make_unique<StorageInspector>(*bpm_, *extent_manager_, *iam_manager_, *catalog_manager_);
+    cleanup_files();
+    engine_ = std::make_unique<DatabaseEngine>(db_path_);
+    executor_ = &engine_->get_executor();
+    inspector_ = &engine_->get_inspector();
   }
 
   void TearDown() override {
-    inspector_.reset();
-    executor_.reset();
-    table_manager_.reset();
-    catalog_manager_.reset();
-    iam_manager_.reset();
-    extent_manager_.reset();
-    bpm_.reset();
-    disk_manager_.reset();
+    executor_ = nullptr;
+    inspector_ = nullptr;
+    engine_.reset();
+    // cleanup_files();  // Commented to preserve DB/WAL files for inspection
+  }
+
+  void cleanup_files() {
     std::remove(db_path_.c_str());
+    std::remove((db_path_ + ".checkpoint").c_str());
+    std::remove((db_path_ + ".wal").c_str());
+    const std::string wal_prefix = db_path_ + ".wal.";
+    for (const auto& entry : std::filesystem::directory_iterator(".")) {
+      std::string filename = entry.path().filename().string();
+      if (filename.rfind(wal_prefix, 0) == 0) {
+        std::filesystem::remove(entry.path());
+      }
+    }
   }
 
   ExecutionResult execute_sql(const std::string& sql) {
@@ -85,14 +85,9 @@ class StressTest : public ::testing::Test {
   }
 
   const std::string db_path_ = "stress_test.db";
-  std::unique_ptr<DiskManager> disk_manager_;
-  std::unique_ptr<BufferPoolManager> bpm_;
-  std::unique_ptr<ExtentManager> extent_manager_;
-  std::unique_ptr<IamManager> iam_manager_;
-  std::unique_ptr<CatalogManager> catalog_manager_;
-  std::unique_ptr<TableManager> table_manager_;
-  std::unique_ptr<Executor> executor_;
-  std::unique_ptr<StorageInspector> inspector_;
+  std::unique_ptr<DatabaseEngine> engine_;
+  Executor* executor_ = nullptr;
+  StorageInspector* inspector_ = nullptr;
 };
 
 // ——— Lexer Edge Cases ———
@@ -817,38 +812,60 @@ static int64_t file_size_bytes(const std::string& path) {
 
 }  // namespace
 
-TEST_F(StressTest, DISABLED_Create200TablesMillionSmallRows) {
+TEST_F(StressTest, Create200TablesMillionSmallRows) {
   const int NUM_TABLES = 200;
-  const int ROWS_PER_TABLE = 5000;  // 200 * 5000 = 1M rows
-  const int BATCH_SIZE = 250;
+  const int ROWS_PER_TABLE = 500000;
+  const int BATCH_SIZE = 2000;
   const std::string schema = "(id INT, name VARCHAR(30), score FLOAT, active BOOL)";
+  const int NUM_THREADS = std::thread::hardware_concurrency() > 0
+      ? std::min((int)std::thread::hardware_concurrency(), NUM_TABLES)
+      : 4;
 
   auto t0 = std::chrono::steady_clock::now();
 
+  // ——— Phase 1: Create tables sequentially ———
   for (int t = 0; t < NUM_TABLES; ++t) {
     auto cr = execute_sql("CREATE TABLE stbl_" + std::to_string(t) + " " + schema);
     ASSERT_TRUE(cr.success) << "Create stbl_" << t << ": " << cr.error_message;
   }
   std::cout << "[ScaleSmallRows] Created " << NUM_TABLES << " tables\n";
 
+  // ——— Phase 2: Insert rows in parallel (one thread per table) ———
   uint64_t total_rows = 0;
-  for (int t = 0; t < NUM_TABLES; ++t) {
-    std::string table = "stbl_" + std::to_string(t);
-    for (int start = 0; start < ROWS_PER_TABLE; start += BATCH_SIZE) {
-      int count = std::min(BATCH_SIZE, ROWS_PER_TABLE - start);
-      auto result = execute_sql(build_batch_insert(table, start, count));
-      ASSERT_TRUE(result.success)
-          << "Table " << table << " batch " << (start / BATCH_SIZE)
-          << " failed: " << result.error_message;
-      total_rows += result.affected_rows;
+  std::atomic<uint64_t> atomic_rows{0};
+  {
+    std::vector<std::thread> threads;
+    std::mutex insert_err_mutex;
+    std::string insert_error;
+    for (int t = 0; t < NUM_TABLES; ++t) {
+      threads.emplace_back([&, t]() {
+        std::string table = "stbl_" + std::to_string(t);
+        uint64_t local_count = 0;
+        for (int start = 0; start < ROWS_PER_TABLE; start += BATCH_SIZE) {
+          int count = std::min(BATCH_SIZE, ROWS_PER_TABLE - start);
+          auto result = execute_sql(build_batch_insert(table, start, count));
+          if (!result.success) {
+            std::lock_guard<std::mutex> lock(insert_err_mutex);
+            if (insert_error.empty())
+              insert_error = "Table " + table + " batch " + std::to_string(start / BATCH_SIZE)
+                             + " failed: " + result.error_message;
+            return;
+          }
+          local_count += result.affected_rows;
+        }
+        atomic_rows.fetch_add(local_count);
+      });
     }
+    for (auto& th : threads) th.join();
+    total_rows = atomic_rows.load();
+    ASSERT_TRUE(insert_error.empty()) << insert_error;
   }
 
   double insert_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   int64_t db_bytes = file_size_bytes(db_path_);
 
   std::cout << "[ScaleSmallRows] Inserted " << total_rows << " rows across " << NUM_TABLES << " tables\n"
-            << "[ScaleSmallRows] Elapsed: " << insert_s << "s  ("
+            << "[ScaleSmallRows] Threads: " << NUM_THREADS << "  Elapsed: " << insert_s << "s  ("
             << static_cast<int>(total_rows / insert_s) << " rows/s)\n"
             << "[ScaleSmallRows] DB file size: " << (db_bytes / (1024 * 1024)) << " MB\n";
 
@@ -1030,12 +1047,14 @@ TEST_F(StressTest, SmallPoolForcesEvictions) {
   std::remove("stress_pool.db");
   auto disk = std::make_unique<DiskManager>("stress_pool.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
-  auto ext_mgr = std::make_unique<ExtentManager>(*bpm);
-  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr);
-  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr);
+  auto log_mgr = std::make_unique<LogManager>("stress_pool.db.wal");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
+  auto ext_mgr = std::make_unique<ExtentManager>(*bpm, *log_mgr, *txn_mgr);
+  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr, *log_mgr, *txn_mgr);
+  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr, *txn_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog);
-  Executor exec(*catalog, *table_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
     Lexer lexer(sql);
@@ -1086,12 +1105,14 @@ TEST_F(StressTest, DirtyPagesSurviveEviction) {
   std::remove("stress_dirty.db");
   auto disk = std::make_unique<DiskManager>("stress_dirty.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
-  auto ext_mgr = std::make_unique<ExtentManager>(*bpm);
-  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr);
-  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr);
+  auto log_mgr = std::make_unique<LogManager>("stress_dirty.db.wal");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
+  auto ext_mgr = std::make_unique<ExtentManager>(*bpm, *log_mgr, *txn_mgr);
+  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr, *log_mgr, *txn_mgr);
+  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr, *txn_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog);
-  Executor exec(*catalog, *table_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
     Lexer lexer(sql);
@@ -1292,26 +1313,10 @@ TEST_F(StressTest, CreateTableThenRestartDatabase) {
   int64_t size_before = file_size_bytes(db_path_);
   EXPECT_GT(size_before, 0);
 
-  // Full teardown and rebuild (simulates restart)
-  inspector_.reset();
-  executor_.reset();
-  table_manager_.reset();
-  catalog_manager_.reset();
-  iam_manager_.reset();
-  extent_manager_.reset();
-  bpm_.reset();
-  disk_manager_.reset();
-
-  // Reopen the database
-  disk_manager_ = std::make_unique<DiskManager>(db_path_);
-  bpm_ = std::make_unique<BufferPoolManager>(*disk_manager_, 256, std::make_unique<LRUPageReplacer>());
-  extent_manager_ = std::make_unique<ExtentManager>(*bpm_);
-  iam_manager_ = std::make_unique<IamManager>(*bpm_, *extent_manager_);
-  catalog_manager_ = std::make_unique<CatalogManager>(*bpm_, *iam_manager_);
-  catalog_manager_->init();
-  table_manager_ = std::make_unique<TableManager>(*bpm_, *iam_manager_, *catalog_manager_);
-  executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_);
-  inspector_ = std::make_unique<StorageInspector>(*bpm_, *extent_manager_, *iam_manager_, *catalog_manager_);
+  engine_.reset();
+  engine_ = std::make_unique<DatabaseEngine>(db_path_);
+  executor_ = &engine_->get_executor();
+  inspector_ = &engine_->get_inspector();
 
   // Verify the table exists and data is intact
   auto result = execute_sql("SELECT * FROM persist_test");
@@ -1426,6 +1431,93 @@ TEST_F(StressTest, ManyPagesFillPattern) {
   int expected_min_extents = TARGET_ROWS / 64;  // rough lower bound
   EXPECT_GE(allocated, expected_min_extents)
       << "Expected at least " << expected_min_extents << " extents for " << TARGET_ROWS << " wide rows";
+}
+
+namespace {
+
+void parallel_table_writer_worker(StressTest* fixture,
+                                  Executor* executor,
+                                  int thread_idx,
+                                  int num_threads,
+                                  int num_tables,
+                                  int rows_per_table,
+                                  int batch_size,
+                                  std::atomic<uint64_t>* total_inserted,
+                                  std::atomic<bool>* had_failure) {
+  (void)fixture;
+  for (int start = 0; start < rows_per_table; start += batch_size) {
+    int count = std::min(batch_size, rows_per_table - start);
+    for (int t = thread_idx; t < num_tables; t += num_threads) {
+      std::string table = "ptbl_" + std::to_string(t);
+      std::ostringstream sql;
+      sql << "INSERT INTO " << table << " VALUES ";
+      for (int i = 0; i < count; ++i) {
+        if (i > 0) {
+          sql << ", ";
+        }
+        int id = start + i;
+        double score = id * 1.5 + 0.1;
+        sql << "(" << id << ", 'row_" << id << "', "
+            << std::fixed << std::setprecision(2) << score
+            << ", " << (id % 2 == 0 ? "TRUE" : "FALSE") << ")";
+      }
+      Lexer lexer(sql.str());
+      Parser parser(lexer.tokenize());
+      auto ast = parser.parse();
+      ExecutionResult res = executor->execute(ast.get());
+      if (!res.success) {
+        had_failure->store(true);
+        return;
+      }
+      total_inserted->fetch_add(res.affected_rows);
+    }
+  }
+}
+
+}  // namespace
+
+TEST_F(StressTest, ParallelMultiThreadedInsertsAcrossTables) {
+  const int NUM_THREADS = 8;
+  const int NUM_TABLES = 32;
+  const int ROWS_PER_TABLE = 2000;
+  const int BATCH_SIZE = 100;
+  const std::string schema = "(id INT, name VARCHAR(30), score FLOAT, active BOOL)";
+
+  for (int t = 0; t < NUM_TABLES; ++t) {
+    auto cr = execute_sql("CREATE TABLE ptbl_" + std::to_string(t) + " " + schema);
+    ASSERT_TRUE(cr.success) << cr.error_message;
+  }
+
+  std::atomic<uint64_t> total_inserted{0};
+  std::atomic<bool> had_failure{false};
+  std::vector<std::thread> workers;
+  workers.reserve(NUM_THREADS);
+
+  for (int tid = 0; tid < NUM_THREADS; ++tid) {
+    workers.emplace_back(parallel_table_writer_worker,
+                         this,
+                         executor_,
+                         tid,
+                         NUM_THREADS,
+                         NUM_TABLES,
+                         ROWS_PER_TABLE,
+                         BATCH_SIZE,
+                         &total_inserted,
+                         &had_failure);
+  }
+
+  for (std::thread& worker : workers) {
+    worker.join();
+  }
+
+  ASSERT_FALSE(had_failure.load());
+  EXPECT_EQ(total_inserted.load(), static_cast<uint64_t>(NUM_TABLES * ROWS_PER_TABLE));
+
+  for (int t = 0; t < NUM_TABLES; ++t) {
+    auto sel = execute_sql("SELECT * FROM ptbl_" + std::to_string(t));
+    ASSERT_TRUE(sel.success) << sel.error_message;
+    EXPECT_EQ(sel.rows.size(), static_cast<size_t>(ROWS_PER_TABLE)) << "Mismatch on ptbl_" << t;
+  }
 }
 
 } // namespace letty

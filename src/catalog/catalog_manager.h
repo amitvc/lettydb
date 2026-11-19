@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "catalog/catalog_defs.h"
@@ -10,6 +11,7 @@
 #include "buffer/buffer_pool_manager.h"
 #include "storage/iam_manager.h"
 #include "storage/tuple.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
 
@@ -31,7 +33,7 @@ struct TableMetadata {
   Schema schema;
 
   /**
-   * @brief Head page of the table's IAM chain.
+   * @brief Table's first IAM page id.
    *
    * The storage layer follows this chain to find the extents and data pages
    * belonging to the table.
@@ -62,7 +64,7 @@ struct SysTableRecord {
  */
 class CatalogManager {
  public:
-  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager);
+  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, TransactionManager& txn_manager);
 
   /**
    * @brief Initializes the catalog manager.
@@ -84,7 +86,7 @@ class CatalogManager {
    * @param name The name of the table.
    * @return Pointer to TableMetadata if found, nullptr otherwise.
    */
-  const TableMetadata* get_table(const std::string& name);
+  const  std::optional<std::reference_wrapper<TableMetadata>> get_table(const std::string& name);
 
   /**
    * @brief Checks if a table with the given name exists.
@@ -104,12 +106,14 @@ class CatalogManager {
  private:
   BufferPoolManager& buffer_pool_;
   IamManager& iam_manager_;
+  TransactionManager& txn_manager_;
 
   /** In-memory cache of table metadata, keyed by table name.
    *  Populated on create_table() and first get_table() miss.
    *  Eliminates repeated full scans of sys_tables + sys_columns.
    **/
   std::unordered_map<std::string, TableMetadata> table_cache_;
+  mutable std::mutex latch_;
 
   /// Cached IAM page IDs for sys_tables and sys_columns.
   /// Set once during init() or bootstrap() and never change.
@@ -148,13 +152,13 @@ class CatalogManager {
    * @return true if successful.
    * @throws DbException if the insert cannot complete.
    */
-  bool insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size);
+  bool insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size, uint64_t txn_id);
 
   /** @brief Helper to insert a record into sys_tables. */
-  bool insert_sys_table_record(const SysTableRecord& record);
+  bool insert_sys_table_record(const SysTableRecord& record, uint64_t txn_id);
 
   /** @brief Helper to insert a record into sys_columns. */
-  bool insert_sys_column_record(uint32_t table_oid, const Column& col);
+  bool insert_sys_column_record(uint32_t table_oid, const Column& col, uint64_t txn_id);
 
 
   /**

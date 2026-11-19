@@ -7,6 +7,8 @@
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "storage/extent_manager.h"
+#include "storage/log_manager.h"
+#include "transaction/transaction_manager.h"
 #include "common/logger.h"
 #include <filesystem>
 
@@ -23,19 +25,22 @@ TEST(IamIntegrationTest, ListBasedIamBasicFunctionality) {
         // Initialize components
         DiskManager disk_manager(test_db_file.string());
         BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
-        ExtentManager extent_manager(bpm);
+        LogManager log_manager((test_db_file.string() + ".wal"));
+        TransactionManager txn_manager(log_manager);
+        ExtentManager extent_manager(bpm, log_manager, txn_manager);
         ASSERT_TRUE(bpm.flush_all_pages());  // Flush init pages for components still using DiskManager directly
-        IamManager iam_manager(bpm, extent_manager);
+        IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
+        uint64_t txn_id = txn_manager.begin();
 
         // Create a table's IAM chain
-        page_id_t table_iam = iam_manager.create_iam_chain("test_table");
+        page_id_t table_iam = iam_manager.create_iam_chain("test_table", txn_id);
         ASSERT_NE(table_iam, INVALID_PAGE_ID);
-        
+
         // Allocate some extents
-        page_id_t extent1 = iam_manager.allocate_extent_for_table(table_iam);
+        page_id_t extent1 = iam_manager.allocate_extent_for_table(table_iam, txn_id);
         EXPECT_NE(extent1, INVALID_PAGE_ID);
-        
-        page_id_t extent2 = iam_manager.allocate_extent_for_table(table_iam);
+
+        page_id_t extent2 = iam_manager.allocate_extent_for_table(table_iam, txn_id);
         EXPECT_NE(extent2, INVALID_PAGE_ID);
         
         // Both should be valid and different
@@ -47,11 +52,19 @@ TEST(IamIntegrationTest, ListBasedIamBasicFunctionality) {
         if (std::filesystem::exists(test_db_file)) {
             std::filesystem::remove(test_db_file);
         }
+        auto wal_file = test_db_file.string() + ".wal.0";
+        if (std::filesystem::exists(wal_file)) {
+            std::filesystem::remove(wal_file);
+        }
         throw;
     }
-    
+
     if (std::filesystem::exists(test_db_file)) {
         std::filesystem::remove(test_db_file);
+    }
+    auto wal_file = test_db_file.string() + ".wal";
+    if (std::filesystem::exists(wal_file)) {
+        std::filesystem::remove(wal_file);
     }
 }
 
@@ -90,14 +103,17 @@ TEST(IamIntegrationTest, MultipleTablesGetDedicatedExtents) {
     try {
         DiskManager disk_manager(test_db_file.string());
         BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
-        ExtentManager extent_manager(bpm);
+        LogManager log_manager((test_db_file.string() + ".wal"));
+        TransactionManager txn_manager(log_manager);
+        ExtentManager extent_manager(bpm, log_manager, txn_manager);
         ASSERT_TRUE(bpm.flush_all_pages());  // Flush init pages for components still using DiskManager directly
-        IamManager iam_manager(bpm, extent_manager);
+        IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
+        uint64_t txn_id = txn_manager.begin();
 
         // Create multiple tables
-        page_id_t table1_iam = iam_manager.create_iam_chain("test_table");
-        page_id_t table2_iam = iam_manager.create_iam_chain("test_table");
-        page_id_t table3_iam = iam_manager.create_iam_chain("test_table");
+        page_id_t table1_iam = iam_manager.create_iam_chain("test_table", txn_id);
+        page_id_t table2_iam = iam_manager.create_iam_chain("test_table", txn_id);
+        page_id_t table3_iam = iam_manager.create_iam_chain("test_table", txn_id);
 
         EXPECT_NE(table1_iam, INVALID_PAGE_ID);
         EXPECT_NE(table2_iam, INVALID_PAGE_ID);
@@ -118,11 +134,19 @@ TEST(IamIntegrationTest, MultipleTablesGetDedicatedExtents) {
         if (std::filesystem::exists(test_db_file)) {
             std::filesystem::remove(test_db_file);
         }
+        auto wal_file = test_db_file.string() + ".wal.0";
+        if (std::filesystem::exists(wal_file)) {
+            std::filesystem::remove(wal_file);
+        }
         throw;
     }
 
     if (std::filesystem::exists(test_db_file)) {
         std::filesystem::remove(test_db_file);
+    }
+    auto wal_file = test_db_file.string() + ".wal.0";
+    if (std::filesystem::exists(wal_file)) {
+        std::filesystem::remove(wal_file);
     }
 }
 

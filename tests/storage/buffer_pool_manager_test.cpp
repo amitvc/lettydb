@@ -9,7 +9,6 @@
 
 using namespace letty;
 
-// ─── Mock DiskManager ──────────────────────────────────────────────
 
 class MockDiskManager : public IDiskManager {
  public:
@@ -19,7 +18,6 @@ class MockDiskManager : public IDiskManager {
   MOCK_METHOD(bool, sync, (), (override));
 };
 
-// ─── Test Fixture ──────────────────────────────────────────────────
 
 class BufferPoolManagerTest : public ::testing::Test {
  protected:
@@ -33,7 +31,6 @@ class BufferPoolManagerTest : public ::testing::Test {
   }
 };
 
-// ─── Basic Fetch / Unpin ───────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, FetchPageLoadsFromDisk) {
   auto bpm = CreateBPM();
@@ -110,7 +107,6 @@ TEST_F(BufferPoolManagerTest, DirtyFlagSticksAcrossUnpins) {
   bpm->unpin_page(1, false);
 }
 
-// ─── Eviction ──────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, EvictsLRUWhenPoolFull) {
   auto bpm = CreateBPM();
@@ -182,7 +178,6 @@ TEST_F(BufferPoolManagerTest, PoolFullAllPinnedReturnsNullptr) {
   }
 }
 
-// ─── Pin Count ─────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, PinCountTracksCorrectly) {
   auto bpm = CreateBPM();
@@ -209,7 +204,6 @@ TEST_F(BufferPoolManagerTest, PinCountTracksCorrectly) {
   EXPECT_EQ(page->get_pin_count(), 0);
 }
 
-// ─── New Page ──────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, NewPageCreatesInPool) {
   auto bpm = CreateBPM();
@@ -240,7 +234,6 @@ TEST_F(BufferPoolManagerTest, NewPageDuplicateReturnsNullptr) {
   bpm->unpin_page(42, false);
 }
 
-// ─── Flush ─────────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, FlushPageWritesDirtyToDisk) {
   auto bpm = CreateBPM();
@@ -386,7 +379,6 @@ TEST_F(BufferPoolManagerTest, DeleteNonExistentPageReturnsFalse) {
   EXPECT_FALSE(bpm->delete_page(99));
 }
 
-// ─── Destructor ────────────────────────────────────────────────────
 
 TEST_F(BufferPoolManagerTest, DestructorFlushesDirtyPages) {
   auto bpm = CreateBPM();
@@ -510,4 +502,162 @@ TEST_F(BufferPoolManagerTest, FlushAllCountsEachDirtyPage) {
 
   auto stats = bpm->get_cache_stats();
   EXPECT_EQ(stats.flushes, 3);
+}
+
+// ─── PageGuard RAII Tests ──────────────────────────────────────────
+
+TEST_F(BufferPoolManagerTest, PageGuardUnpinsOnDestruction) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(10, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  {
+    PageGuard guard = bpm->fetch_page_guard(10);
+    ASSERT_TRUE(guard.is_valid());
+    EXPECT_EQ(guard.get_page_id(), 10);
+    EXPECT_EQ(guard.get_page()->get_pin_count(), 1);
+  }
+
+  // After guard scope exits, page should be unpinned (pin count 0)
+  Page* page = bpm->fetch_page(10);
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page->get_pin_count(), 1);
+  bpm->unpin_page(10, false);
+}
+
+TEST_F(BufferPoolManagerTest, PageGuardMarksDirtyExplicitly) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(12, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+  EXPECT_CALL(mock_disk_, write_page(12, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  {
+    PageGuard guard = bpm->fetch_page_guard(12);
+    char* data = guard.get_data();
+    EXPECT_FALSE(guard.is_dirty());
+    std::memcpy(data, "GUARD", 5);
+    guard.mark_dirty();
+    EXPECT_TRUE(guard.is_dirty());
+  }
+
+  EXPECT_TRUE(bpm->flush_page(12));
+}
+
+TEST_F(BufferPoolManagerTest, PageGuardMoveSemantics) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(15, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  PageGuard guard2;
+  {
+    PageGuard guard1 = bpm->fetch_page_guard(15);
+    EXPECT_TRUE(guard1.is_valid());
+    guard2 = std::move(guard1);
+    EXPECT_FALSE(guard1.is_valid());
+    EXPECT_TRUE(guard2.is_valid());
+    EXPECT_EQ(guard2.get_page_id(), 15);
+  }
+
+  EXPECT_TRUE(guard2.is_valid());
+  EXPECT_EQ(guard2.get_page()->get_pin_count(), 1);
+  guard2.drop();
+  EXPECT_FALSE(guard2.is_valid());
+}
+
+TEST_F(BufferPoolManagerTest, TrackDirtiedPageRecordsLSN) {
+  auto bpm = CreateBPM();
+
+  constexpr lsn_t LSN_100 = 100;
+  bpm->update_dirtied_page_lsn(42, LSN_100);
+
+  auto dpt = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt.size(), 1);
+  EXPECT_EQ(dpt.at(42), LSN_100);
+}
+
+TEST_F(BufferPoolManagerTest, TrackDirtiedPageFirstWinsSemantics) {
+  auto bpm = CreateBPM();
+
+  constexpr lsn_t LSN_100 = 100;
+  constexpr lsn_t LSN_200 = 200;
+
+  bpm->update_dirtied_page_lsn(42, LSN_100);
+  bpm->update_dirtied_page_lsn(42, LSN_200);
+
+  auto dpt = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt.size(), 1);
+  EXPECT_EQ(dpt.at(42), LSN_100);
+}
+
+TEST_F(BufferPoolManagerTest, FlushPageRemovesDPTEntry) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(5, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  Page* page = bpm->fetch_page(5);
+  bpm->unpin_page(5, true);
+
+  constexpr lsn_t LSN_100 = 100;
+  bpm->update_dirtied_page_lsn(5, LSN_100);
+
+  auto dpt_before = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt_before.size(), 1);
+  EXPECT_EQ(dpt_before.at(5), LSN_100);
+
+  EXPECT_CALL(mock_disk_, write_page(5, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  bpm->flush_page(5);
+
+  auto dpt_after = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt_after.size(), 0);  // entry removed after flush
+}
+
+TEST_F(BufferPoolManagerTest, FlushAllPagesRemovesAllDPTEntries) {
+  auto bpm = CreateBPM();
+
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_CALL(mock_disk_, read_page(i, testing::_))
+        .WillOnce(testing::Return(IOResult::SUCCESS));
+    Page* page = bpm->fetch_page(i);
+    bpm->unpin_page(i, true);
+  }
+
+  bpm->update_dirtied_page_lsn(0, 100);
+  bpm->update_dirtied_page_lsn(1, 200);
+  bpm->update_dirtied_page_lsn(2, 300);
+
+  EXPECT_EQ(bpm->get_dirty_page_table().size(), 3);
+
+  EXPECT_CALL(mock_disk_, write_page(testing::_, testing::_))
+      .Times(3)
+      .WillRepeatedly(testing::Return(IOResult::SUCCESS));
+
+  bpm->flush_all_pages();
+
+  auto dpt = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt.size(), 0);  // all entries removed
+}
+
+TEST_F(BufferPoolManagerTest, DeletePageRemovesDPTEntry) {
+  auto bpm = CreateBPM();
+
+  EXPECT_CALL(mock_disk_, read_page(7, testing::_))
+      .WillOnce(testing::Return(IOResult::SUCCESS));
+
+  bpm->fetch_page(7);
+  bpm->unpin_page(7, false);
+
+  bpm->update_dirtied_page_lsn(7, 500);
+  EXPECT_EQ(bpm->get_dirty_page_table().size(), 1);
+
+  bpm->delete_page(7);
+
+  auto dpt = bpm->get_dirty_page_table();
+  EXPECT_EQ(dpt.size(), 0);  // entry removed on delete
 }

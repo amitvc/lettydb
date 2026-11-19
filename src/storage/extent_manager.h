@@ -3,7 +3,10 @@
 #include "storage_def.h"
 #include "page_utils.h"
 #include "buffer/buffer_pool_manager.h"
+#include "log_manager.h"
+#include "transaction/transaction_manager.h"
 #include <mutex>
+#include <tuple>
 
 namespace letty {
 
@@ -40,31 +43,33 @@ struct DatabaseHeader;
  */
 class ExtentManager {
  public:
-  explicit ExtentManager(BufferPoolManager& buffer_pool);
+  explicit ExtentManager(BufferPoolManager& buffer_pool, LogManager& log_manager, TransactionManager& txn_manager);
 
   /**
    * @brief Allocates a new extent
+   * @param txn_id Transaction this allocation is logged under.
    * @return PageId of the first page in the newly allocated extent.
    * @throws DbException if allocation metadata cannot be read or extended.
    */
-  page_id_t allocate_extent();
+  page_id_t allocate_extent(uint64_t txn_id);
 
   /**
    * @brief Reclaims the extent
    * @param start_page_id The starting pageId of the extent that is being deallocated.
+   * @param txn_id Transaction this deallocation is logged under.
    * @return true if deallocation succeeded, false if the page ID is not deallocatable.
    * @throws DbException if GAM metadata cannot be read or is corrupt.
    */
-  bool deallocate_extent(page_id_t start_page_id);
+  bool deallocate_extent(page_id_t start_page_id, uint64_t txn_id);
 
  private:
 
   /**
    * @brief Finds a free extent in the GAM page, marks it allocated.
    * @param gam_page Pointer to the GAM page data.
-   * @return The starting page ID of the allocated extent, or INVALID_PAGE_ID if this GAM page is full.
+   * @return {gam_page_id, allocated_page_id, bit_index}. allocated_page_id is INVALID_PAGE_ID if this GAM page is full.
    */
-  page_id_t allocate_extent_in_gam_page(GAMPage* gam_page);
+  std::tuple<page_id_t, page_id_t, uint16_t> allocate_extent_in_gam_page(GAMPage* gam_page);
 
   /**
    * @brief Marks bit_index as allocated in gam_page and returns the corresponding extent's first page ID.
@@ -73,6 +78,13 @@ class ExtentManager {
    * @throws DbException if the calculated page ID overflows.
    */
   page_id_t claim_extent_at_bit(GAMPage* gam_page, size_t bit_index);
+
+  /**
+   * @brief Builds, appends, and chains an ALLOCATE_EXTENT or DEALLOCATE_EXTENT WAL record.
+   * @return The LSN assigned to the appended record, to be stamped on the GAM page as its page_lsn.
+   * @throws DbException if the record cannot be built or appended.
+   */
+  lsn_t log_extent_change(LogRecordType type, uint64_t txn_id, page_id_t gam_page_id, uint16_t bit_index);
 
   /**
    * @brief Initializes a brand new database file.
@@ -96,6 +108,9 @@ class ExtentManager {
   // The ordinal position (0-indexed) of current_gam_page_id_ in the GAM chain.
   // Note: This is very important as it is used for calculating page IDs when allocating extents.
   size_t current_gam_chain_index_ = 0;
+
+  LogManager& log_manager_;
+  TransactionManager& txn_manager_;
 
   /**
    * @brief Advances the internal GAM cursor to the specified next page ID.
@@ -130,7 +145,7 @@ class ExtentManager {
    * @return true on success.
    * @throws DbException if the GAM page cannot be fetched.
    */
-  bool clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index);
+  bool clear_extent_bit(page_id_t gam_page_id, uint16_t bit_in_gam, size_t gam_page_index, uint64_t txn_id);
 
 
 };

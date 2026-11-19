@@ -3,6 +3,9 @@
 #include "buffer/buffer_pool_manager.h"
 #include "storage_def.h"
 #include "extent_manager.h"
+#include "log_manager.h"
+#include "transaction/transaction_manager.h"
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -22,27 +25,30 @@ namespace letty {
  */
 class IamManager {
  public:
-  IamManager(BufferPoolManager& buffer_pool, ExtentManager& extent_manager);
+  IamManager(BufferPoolManager& buffer_pool, ExtentManager& extent_manager,
+             LogManager& log_manager, TransactionManager& txn_manager);
 
   /**
    * @brief Creates a new IAM chain for a table.
    * Allocates a dedicated extent and initializes its first page as an empty IAMPage.
    * The returned page ID is always extent-aligned.
    * @param table_name Table name for which the IAM chain is being created.
+   * @param txn_id Transaction the underlying extent allocation is logged under.
    * @return The Page ID of the new IAM head page.
    * @throws DbException if the extent cannot be allocated or the page initialized.
    */
-  page_id_t create_iam_chain(const std::string &table_name);
+  page_id_t create_iam_chain(const std::string &table_name, uint64_t txn_id);
 
   /**
    * @brief Allocates a data extent for a table and adds it to the IAM.
    * Gets a new extent from ExtentManager and appends its ID to the IAM list.
    *
    * @param iam_head_page_id The IAM page for the table.
+   * @param txn_id Transaction the underlying extent allocation is logged under.
    * @return The starting Page ID of the newly allocated extent.
    * @throws DbException if the extent cannot be allocated or recorded in the IAM chain.
    */
-  page_id_t allocate_extent_for_table(page_id_t iam_head_page_id);
+  page_id_t allocate_extent_for_table(page_id_t iam_head_page_id, uint64_t txn_id);
 
   /**
    * @brief Finds a data page with sufficient free space within a table's extents.
@@ -70,19 +76,23 @@ class IamManager {
    *
    * @param iam_head_page_id The IAM head page for the table.
    * @param extent_id The extent index to remove (derived from page_id / EXTENT_SIZE).
+   * @param txn_id Transaction the underlying extent deallocation is logged under.
    * @return true if the extent was found and removed.
    */
-  bool remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t extent_id);
+  bool remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t extent_id, uint64_t txn_id);
 
  private:
   BufferPoolManager& buffer_pool_;
   ExtentManager& extent_manager_;
+  LogManager& log_manager_;
+  TransactionManager& txn_manager_;
 
   // Per-table hint: iam_head_page_id → last known data page with free space.
   // On INSERT, the hint is checked first (O(1)). On a hint miss, the hint's
   // extent is scanned forward, then the full IAM chain. Updated whenever a
   // page with space is found or a new extent is allocated.
   std::unordered_map<page_id_t, page_id_t> table_page_hints_;
+  mutable std::mutex latch_;
 
 
   /** Check the cached hint page for space. Returns page ID or INVALID_PAGE_ID. */
@@ -104,13 +114,22 @@ class IamManager {
   bool page_has_space(page_id_t page_id, uint32_t required);
 
   /**
-   * @brief Allocates a new IAM page, appends extent_id to it, and links it to
-   *        prev_iam_page (if valid). Uses the next page of prev_iam_page's extent
-   *        when one is free; otherwise allocates a fresh extent.
+   * @brief
+   * Allocates a new IAM page, appends extent_id to it, and links it to
+   * prev_iam_page (if valid). Uses the next page of prev_iam_page's extent
+   * when one is free; otherwise allocates a fresh extent.
    * @return Page ID of the new IAM page.
    * @throws DbException if the new IAM page cannot be allocated, initialized, or linked.
    */
-  page_id_t link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id);
+  page_id_t link_new_iam_page(page_id_t prev_iam_page, uint32_t extent_id, uint64_t txn_id);
+
+  /**
+   * @brief
+   * Builds, appends, and chains an IAM_ADD_EXTENT or IAM_REMOVE_EXTENT WAL record.
+   * @return The LSN assigned to the appended record, to be stamped on the IAM page as its page_lsn.
+   * @throws DbException if the record cannot be built or appended.
+   */
+  lsn_t log_iam_extent_change(LogRecordType type, uint64_t txn_id, page_id_t iam_page_id, uint32_t extent_id);
 };
 
 }

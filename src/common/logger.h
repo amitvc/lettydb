@@ -120,6 +120,12 @@ public:
 #define LOG_STORAGE_WARN(...)     LOG_WARN("[STORAGE] " __VA_ARGS__)
 #define LOG_STORAGE_ERROR(...)    LOG_ERROR("[STORAGE] " __VA_ARGS__)
 
+#define LOG_WAL_DEBUG(...)    LOG_DEBUG("[WAL] " __VA_ARGS__)
+#define LOG_WAL_INFO(...)     LOG_INFO("[WAL] " __VA_ARGS__)
+#define LOG_WAL_WARN(...)     LOG_WARN("[WAL] " __VA_ARGS__)
+#define LOG_WAL_ERROR(...)    LOG_ERROR("[WAL] " __VA_ARGS__)
+
+
 #define LOG_BPM_DEBUG(...)    	  LOG_STORAGE_DEBUG("[BPM] " __VA_ARGS__)
 #define LOG_BPM_INFO(...)         LOG_STORAGE_INFO("[BPM] " __VA_ARGS__)
 #define LOG_BPM_WARN(...)         LOG_STORAGE_WARN("[BPM] " __VA_ARGS__)
@@ -134,3 +140,13 @@ public:
 #define LOG_CATALOG_INFO(...)     LOG_INFO("[CATALOG] " __VA_ARGS__)
 #define LOG_CATALOG_WARN(...)     LOG_WARN("[CATALOG] " __VA_ARGS__)
 #define LOG_CATALOG_ERROR(...)    LOG_ERROR("[CATALOG] " __VA_ARGS__)
+
+#define LOG_TXN_DEBUG(...)        LOG_DEBUG("[TXN] " __VA_ARGS__)
+#define LOG_TXN_INFO(...)         LOG_INFO("[TXN] " __VA_ARGS__)
+#define LOG_TXN_WARN(...)         LOG_WARN("[TXN] " __VA_ARGS__)
+#define LOG_TXN_ERROR(...)        LOG_ERROR("[TXN] " __VA_ARGS__)
+
+#define LOG_RECOVERY_MGR_DEBUG(...)    LOG_DEBUG("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_INFO(...)     LOG_INFO("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_WARN(...)     LOG_WARN("[RECOVERY] " __VA_ARGS__)
+#define LOG_RECOVERY_MGR_ERROR(...)    LOG_ERROR("[RECOVERY] " __VA_ARGS__)

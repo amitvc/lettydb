@@ -15,6 +15,7 @@ class MockDiskManager : public IDiskManager {
   MOCK_METHOD(IOResult, write_page, (page_id_t page_id, const char* data), (override));
   MOCK_METHOD(IOResult, read_page, (page_id_t page_id, char* data), (override));
   MOCK_METHOD(page_id_t, get_file_size_in_pages, (), (override));
+  MOCK_METHOD(bool, sync, (), (override));
 };
 
 class PageTest : public ::testing::Test {
@@ -25,6 +26,8 @@ class PageTest : public ::testing::Test {
     EXPECT_CALL(mock_disk_, get_file_size_in_pages()).WillRepeatedly(::testing::Return(0));
     EXPECT_CALL(mock_disk_, write_page(::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(IOResult::SUCCESS));
+    EXPECT_CALL(mock_disk_, sync())
+        .WillRepeatedly(::testing::Return(true));
     return std::make_unique<BufferPoolManager>(
         mock_disk_, pool_size,
         std::make_unique<LRUPageReplacer>());

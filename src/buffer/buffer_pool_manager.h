@@ -11,6 +11,7 @@
 #include "storage/page.h"
 #include "buffer/page_replacer.h"
 #include "storage/disk_manager.h"
+#include "buffer/page_guard.h"
 
 namespace letty {
 
@@ -67,10 +68,13 @@ struct CacheStats {
  *
  * **Responsibilities of the callers**
  *
- * Every `fetch_page()` or `new_page()` returns a `Page*` with pin_count = 1.
- * The caller is responsible for exactly one matching `unpin_page()`. Forgetting
- * to unpin leaks the frame (it can never be evicted). Calling unpin twice
- * underflows the pin count (caught by `assert()` in debug builds).
+ * Prefer `fetch_page_guard()` and `allocate_page_guard()`, which return an RAII
+ * `PageGuard` that automatically calls `unpin_page()` on scope exit.
+ * When using raw `fetch_page()`, `allocate_page()`, or `new_page()`, the caller
+ * receives a `Page*` with pin_count >= 1 and is responsible for calling
+ * `unpin_page()` on every code path. Forgetting to unpin leaks the frame (it
+ * can never be evicted); calling unpin twice underflows the pin count (caught
+ * by `assert()` in debug builds).
  *
  * **Eviction order**
  *
@@ -107,19 +111,17 @@ class BufferPoolManager {
   Page* fetch_page(page_id_t page_id);
 
   /**
-   * @brief Pin an existing cached page, or allocate a zeroed dirty frame for
-   *        a new page without reading from disk.
+   * @brief Prepares a buffer frame for a newly allocated page without disk I/O.
    *
    * If page_id is already cached, the existing frame is pinned and returned.
-   * Otherwise a new frame is allocated, zeroed, and marked dirty (it has no
-   * on-disk counterpart yet). Use this when formatting a page that may not
-   * exist on disk.
+   * Otherwise a new frame is allocated, zeroed, and marked dirty. Use this when
+   * formatting a newly allocated page that does not yet exist on disk.
    *
-   * @param page_id The page to pin or allocate.
+   * @param page_id The page to allocate in the buffer pool.
    * @return Pointer to the pinned Page, or nullptr if all frames are pinned.
    *         Caller MUST call unpin_page() when done.
    */
-  Page* new_or_fetch_page(page_id_t page_id);
+  Page* allocate_page(page_id_t page_id);
 
   /**
    * @brief Release a page, decrementing its pin count.
@@ -141,13 +143,31 @@ class BufferPoolManager {
    * or eviction.
    *
    * If page_id is already cached, returns nullptr — callers that may be racing
-   * with another allocator should use new_or_fetch_page() instead.
+   * with another allocator should use allocate_page() instead.
    *
    * @param page_id The page ID to allocate.
    * @return Pointer to the pinned Page, or nullptr if page is already cached
    *         or all frames are pinned. Caller MUST call unpin_page() when done.
    */
   Page* new_page(page_id_t page_id);
+
+  /**
+   * @brief Fetch a page wrapped in an RAII PageGuard.
+   * @param page_id The page ID to fetch.
+   * @return PageGuard wrapping the fetched page, or invalid guard if null.
+   */
+  PageGuard fetch_page_guard(page_id_t page_id);
+
+  /**
+   * @brief Prepares a buffer frame for a newly allocated page without disk I/O.
+   *
+   * If page_id is already cached, returns the pinned frame. Otherwise acquires
+   * a fresh frame, zeroes it, and marks it dirty.
+   *
+   * @param page_id The page ID to allocate in the buffer pool.
+   * @return PageGuard wrapping the frame.
+   */
+  PageGuard allocate_page_guard(page_id_t page_id);
 
   /**
    * @brief Write every dirty page to disk immediately, without evicting.
@@ -200,6 +220,30 @@ class BufferPoolManager {
   /** @brief Resets cache stat counters to zero. */
   void reset_cache_stats();
 
+  /**
+   * @brief Records that page_id was dirtied by a WAL record at lsn, for recovery's
+   *        dirty page table.
+   *
+   * Only the first LSN to dirty a page since its last flush is kept (recLSN) —
+   * later calls for the same still-dirty page are no-ops. Callers invoke this
+   * right after appending their WAL record, at the same call sites that already
+   * stamp page_lsn and call TransactionManager::record_lsn.
+   *
+   * @param page_id The page that was just dirtied.
+   * @param lsn The LSN of the WAL record responsible for the mutation.
+   */
+  void update_dirtied_page_lsn(page_id_t page_id, lsn_t lsn);
+
+  /**
+   * @brief Returns a snapshot of the dirty page table for checkpoint persistence.
+   *
+   * The map is {page_id → recLSN}. This snapshot is taken under the BPM's latch
+   * so it is consistent with the current state of the buffer pool at that instant.
+   *
+   * @return Copy of dirty_page_table_.
+   */
+  std::unordered_map<page_id_t, lsn_t> get_dirty_page_table() const;
+
  private:
   IDiskManager& disk_manager_;
   size_t pool_size_;
@@ -214,9 +258,16 @@ class BufferPoolManager {
   // holds a given page. A page can land in any frame — there is no fixed formula.
   // On eviction the entry is removed; on fetch/new_page it is inserted.
   std::unordered_map<page_id_t, frame_id_t> page_table_;
+
+  // DirtyPageTable structure tracks what dirty(mutated) pages are in the in-memory buffer pool.
+  // This structure is useful during recovery process of the database.
+  // It tracks for every dirty page the lsn of the wal record that was written when the page was first mutated when it was last
+  // read from disk.
+  std::unordered_map<page_id_t, lsn_t> dirty_page_table_;
+
   std::list<frame_id_t> free_list_;
   std::unique_ptr<PageReplacer> replacer_;
-  std::mutex latch_;
+  mutable std::mutex latch_;
 
   /**
    * @brief Acquires a free frame, either from the free list or by evicting.
@@ -224,6 +275,18 @@ class BufferPoolManager {
    * @return A free frame ID, or std::nullopt if all frames are pinned.
    */
   std::optional<frame_id_t> acquire_frame();
+
+  /**
+   * @brief Formats a newly acquired frame as an empty, dirty, pinned page.
+   * @pre Caller holds latch_.
+   */
+  Page* allocate_new_page_frame(page_id_t page_id);
+
+  /**
+   * @brief Writes a dirty page to disk, clears dirty flag, and updates stats.
+   * @pre Caller holds latch_.
+   */
+  bool flush_page_internal(Page& page);
 
   // Cache performance counters
   std::atomic<uint64_t> cache_hits_{0};

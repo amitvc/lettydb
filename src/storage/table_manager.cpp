@@ -3,126 +3,139 @@
 #include "storage_def.h"
 #include "common/logger.h"
 #include "common/db_exception.h"
+#include "log_record.h"
 #include <optional>
 #include <cassert>
 
 namespace letty {
 
-TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager)
+TableManager::TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager,
+                           LogManager& log_manager, TransactionManager& txn_manager)
   : buffer_pool_(buffer_pool),
     iam_manager_(iam_manager),
-    catalog_manager_(catalog_manager) {}
+    catalog_manager_(catalog_manager),
+    log_manager_(log_manager),
+    txn_manager_(txn_manager) {}
 
-bool TableManager::insert_row(const std::string& table_name, const Tuple& tuple) {
-  auto* meta = catalog_manager_.get_table(table_name);
+std::optional<uint16_t> TableManager::insert_row(const std::string& table_name, const Tuple& tuple, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return insert_row(*meta, tuple);
+  return insert_row(meta.value(), tuple, txn_id);
 }
 
-bool TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple) {
-  char buf[PAGE_SIZE];
-  uint32_t data_size = tuple.serialize(meta.schema, buf, PAGE_SIZE);
+std::optional<uint16_t> TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple, uint64_t txn_id) {
+  std::lock_guard<std::mutex> table_lock(get_table_latch(meta.iam_page_id));
+  Byte serialized_tuple[PAGE_SIZE];
+  uint32_t data_size = tuple.serialize(meta.schema, serialized_tuple, PAGE_SIZE);
   if (data_size == 0) {
-    return false;
+    return std::nullopt;
   }
 
-  page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size);
+  page_id_t target_page_id = acquire_page_for_insert(meta.iam_page_id, data_size, txn_id);
   LOG_STORAGE_DEBUG("TableManager inserting to page: {}", target_page_id);
-  Page* page = buffer_pool_.fetch_page(target_page_id);
-  assert(page != nullptr);
+  PageGuard guard = buffer_pool_.fetch_page_guard(target_page_id);
+  assert(guard.is_valid());
 
-  SlottedPage sp = SlottedPage::from_page(page);
-  bool ok = sp.insert_tuple(buf, data_size).has_value();
-  if (!ok) {
+  SlottedPage sp = SlottedPage::from_page(guard);
+  auto slot_id = sp.insert_tuple(reinterpret_cast<const Byte*>(serialized_tuple), data_size);
+  if (!slot_id.has_value()) {
     throw DbException(DbErrorCode::Internal, "Failed to insert tuple after ensuring target page has space");
   }
-  buffer_pool_.unpin_page(target_page_id, ok);
-  return ok;
+
+  PagePatch patch;
+  patch.page_id = target_page_id;
+  patch.offset = slot_id.value();
+  patch.after_payload = ByteBuffer(serialized_tuple, serialized_tuple + data_size);
+
+  LogRecord wal_record{};
+  if (!build_page_patch_record(txn_id, patch, wal_record)) {
+    throw DbException(DbErrorCode::Internal, "Failed to build WAL record for insert");
+  }
+  wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+
+  lsn_t lsn = log_manager_.append_record(wal_record);
+  if (lsn == INVALID_LSN) {
+    throw DbException(DbErrorCode::Internal, "Failed to append WAL record for insert");
+  }
+
+  txn_manager_.record_lsn(txn_id, lsn);
+  buffer_pool_.update_dirtied_page_lsn(target_page_id, lsn);
+  sp.set_page_lsn(lsn);
+  guard.mark_dirty();
+
+  return slot_id;
 }
 
-uint32_t TableManager::insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples) {
-  auto* meta = catalog_manager_.get_table(table_name);
+uint32_t TableManager::insert_rows(const std::string& table_name, const std::vector<Tuple>& tuples, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
 
-  Page* page = nullptr;
-  page_id_t target_page_id = INVALID_PAGE_ID;
-  uint32_t inserted = 0;
-
+  uint32_t inserted_cnt = 0;
   for (const Tuple& tuple : tuples) {
-    char buf[PAGE_SIZE];
-    uint32_t data_size = tuple.serialize(meta->schema, buf, PAGE_SIZE);
-    if (data_size == 0) {
-      LOG_STORAGE_WARN("Tuple of size 0 skipped for table '{}'", table_name);
-      continue;
-    }
-
-    if (page && try_insert_into_page(page, buf, data_size)) {
-      ++inserted;
-      continue;
-    }
-
-    // Release old page and acquire new
-    if (page) {
-      buffer_pool_.unpin_page(target_page_id, inserted > 0);
-      page = nullptr;
-      target_page_id = INVALID_PAGE_ID;
-    }
-
-    page_id_t new_page = acquire_page_for_insert(meta->iam_page_id, data_size);
-    Page* new_frame = buffer_pool_.fetch_page(new_page);
-    if (!new_frame) {
-      LOG_STORAGE_ERROR("Failed to acquire page for table '{}'", table_name);
-      break;
-    }
-
-    if (try_insert_into_page(new_frame, buf, data_size)) {
-      page = new_frame;
-      target_page_id = new_page;
-      ++inserted;
-    } else {
-      // Page had no room even after allocation
-      buffer_pool_.unpin_page(new_page, false);
-      break;
+    if (insert_row(meta->get(), tuple, txn_id).has_value()) {
+      ++inserted_cnt;
     }
   }
-
-  if (page) {
-    buffer_pool_.unpin_page(target_page_id, true);
-  }
-
-  return inserted;
+  return inserted_cnt;
 }
 
 TableScanner TableManager::scan_table(const std::string& table_name) {
-  auto* meta = catalog_manager_.get_table(table_name);
+  auto meta = catalog_manager_.get_table(table_name);
   if (!meta) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return TableScanner(buffer_pool_, meta->iam_page_id);
+  return TableScanner(buffer_pool_, meta->get().iam_page_id);
 }
 
-bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id) {
-  auto* meta = catalog_manager_.get_table(table_name);
-  if (!meta) {
+bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, uint16_t slot_id, uint64_t txn_id) {
+  auto meta = catalog_manager_.get_table(table_name);
+  if (!meta.has_value()) {
     throw DbException(DbErrorCode::UndefinedTable, "table '" + table_name + "' does not exist");
   }
-  return delete_row(*meta, page_id, slot_id);
+  return delete_row(meta->get(), page_id, slot_id, txn_id);
 }
 
-bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id) {
-  Page* page = buffer_pool_.fetch_page(page_id);
-  if (!page) {
+bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id, uint64_t txn_id) {
+  std::lock_guard<std::mutex> table_lock(get_table_latch(meta.iam_page_id));
+  PageGuard guard = buffer_pool_.fetch_page_guard(page_id);
+  if (!guard) {
     LOG_STORAGE_ERROR("Failed to fetch page {} for delete on table '{}'", page_id, meta.name);
     return false;
   }
 
-  SlottedPage sp = SlottedPage::from_page(page);
+  SlottedPage sp = SlottedPage::from_page(guard);
+  uint32_t tuple_size = 0;
+  const Byte* tuple_data = sp.get_tuple(slot_id, &tuple_size);
+  if (!tuple_data) {
+    return false;
+  }
+
+  ByteBuffer before_image(tuple_data, tuple_data + tuple_size);
+
   bool ok = sp.delete_tuple(slot_id);
-  buffer_pool_.unpin_page(page_id, ok);
+  if (ok) {
+    guard.mark_dirty();
+    PagePatch patch;
+    patch.page_id = page_id;
+    patch.offset = slot_id;
+    patch.before_payload = std::move(before_image);
+
+    LogRecord wal_record{};
+    if (build_page_patch_record(txn_id, patch, wal_record)) {
+      wal_record.header.prev_lsn = txn_manager_.get_last_lsn(txn_id);
+      lsn_t lsn = log_manager_.append_record(wal_record);
+      if (lsn != INVALID_LSN) {
+        txn_manager_.record_lsn(txn_id, lsn);
+		buffer_pool_.update_dirtied_page_lsn(page_id, lsn);
+        sp.set_page_lsn(lsn);
+      }
+    }
+  }
+
   return ok;
 }
 
@@ -155,11 +168,10 @@ CompactionStats TableManager::compact_extents(const TableMetadata& meta) {
       uint32_t extent_id = iam_page->extent_ids[idx];
       for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t pid = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
-        Page* page = buffer_pool_.fetch_page(pid);
-        if (!page) continue;
-        SlottedPage sp = SlottedPage::from_page(page);
+        PageGuard guard = buffer_pool_.fetch_page_guard(pid);
+        if (!guard) continue;
+        SlottedPage sp = SlottedPage::from_page(guard);
         if (sp.is_empty()) empty_pages_before++;
-        buffer_pool_.unpin_page(pid, false);
       }
     }
   }
@@ -175,19 +187,23 @@ CompactionStats TableManager::compact_extents(const TableMetadata& meta) {
       uint32_t extent_id = iam_page->extent_ids[idx];
       for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t pid = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
-        Page* page = buffer_pool_.fetch_page(pid);
-        if (!page) continue;
+        PageGuard guard = buffer_pool_.fetch_page_guard(pid);
+        if (!guard) continue;
 
-        SlottedPage sp = SlottedPage::from_page(page);
+        SlottedPage sp = SlottedPage::from_page(guard);
         if (sp.get_num_slots() > 0) {
           sp.compact();
         }
-        buffer_pool_.unpin_page(pid, true);
+        guard.mark_dirty();
       }
     }
   }
 
-  stats.extents_freed = free_empty_extents(meta.iam_page_id);
+  uint64_t txn_id = txn_manager_.begin();
+  stats.extents_freed = free_empty_extents(meta.iam_page_id, txn_id);
+  if (!txn_manager_.commit(txn_id)) {
+    throw DbException(DbErrorCode::Internal, "failed to commit compaction transaction for table '" + meta.name + "'");
+  }
 
   // Count remaining empty pages after deallocation
   int empty_pages_after = 0;
@@ -201,11 +217,10 @@ CompactionStats TableManager::compact_extents(const TableMetadata& meta) {
       uint32_t extent_id = iam_page->extent_ids[idx];
       for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t pid = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
-        Page* page = buffer_pool_.fetch_page(pid);
-        if (!page) continue;
-        SlottedPage sp = SlottedPage::from_page(page);
+        PageGuard guard = buffer_pool_.fetch_page_guard(pid);
+        if (!guard) continue;
+        SlottedPage sp = SlottedPage::from_page(guard);
         if (sp.is_empty()) empty_pages_after++;
-        buffer_pool_.unpin_page(pid, false);
       }
     }
   }
@@ -230,16 +245,14 @@ void TableManager::survey_pages(page_id_t iam_head, const std::string& table_nam
       uint32_t extent_id = iam_page->extent_ids[idx];
       for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
         auto data_page_id = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
-        Page* data_page = buffer_pool_.fetch_page(data_page_id);
-        if (!data_page) continue;
+        PageGuard guard = buffer_pool_.fetch_page_guard(data_page_id);
+        if (!guard) continue;
 
-        SlottedPage sp = SlottedPage::from_page(data_page);
+        SlottedPage sp = SlottedPage::from_page(guard);
         uint16_t live = 0;
-        auto* slot_dir = sp.slotted_page_dir();
         for (uint16_t s = 0; s < sp.get_num_slots(); ++s) {
-          if (slot_dir[s].length > 0) ++live;
+          if (auto slot = sp.get_slot(s); slot && slot->length > 0) ++live;
         }
-        buffer_pool_.unpin_page(data_page_id, false);
 
         pages.push_back({data_page_id, live, static_cast<uint32_t>(sp.get_free_space())});
       }
@@ -248,7 +261,7 @@ void TableManager::survey_pages(page_id_t iam_head, const std::string& table_nam
 	iam_page_id = iam_page->next_page_id;
   }
 
-  LOG_STORAGE_INFO("Surveyed {} data pages for table '{}'", pages.size(), table_name);
+  LOG_STORAGE_DEBUG("Surveyed {} data pages for table '{}'", pages.size(), table_name);
 }
 
 int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
@@ -257,16 +270,16 @@ int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
   for (auto& src_info : pages) {
     if (src_info.live_count == 0) continue;
 
-    Page* src = buffer_pool_.fetch_page(src_info.id);
-    if (!src) continue;
+    PageGuard src_guard = buffer_pool_.fetch_page_guard(src_info.id);
+    if (!src_guard) continue;
 
-    SlottedPage src_sp = SlottedPage::from_page(src);
-    auto* slot_dir = src_sp.slotted_page_dir();
+    SlottedPage src_sp = SlottedPage::from_page(src_guard);
 
     for (uint16_t s_id = 0; s_id < src_sp.get_num_slots(); ++s_id) {
-      if (slot_dir[s_id].length == 0) continue;
+      auto slot = src_sp.get_slot(s_id);
+      if (!slot || slot->length == 0) continue;
 
-      uint32_t tuple_size = slot_dir[s_id].length;
+      uint32_t tuple_size = slot->length;
 
       int dst_idx = -1;
       for (int i = static_cast<int>(pages.size()) - 1; i >= 0; --i) {
@@ -277,31 +290,30 @@ int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
       }
       if (dst_idx == -1) continue;
 
-      Page* dst = buffer_pool_.fetch_page(pages[dst_idx].id);
-      if (!dst) continue;
+      PageGuard dst_guard = buffer_pool_.fetch_page_guard(pages[dst_idx].id);
+      if (!dst_guard) continue;
 
-      SlottedPage dst_sp = SlottedPage::from_page(dst);
+      SlottedPage dst_sp = SlottedPage::from_page(dst_guard);
       uint32_t read_size = 0;
-      const char* data = src_sp.get_tuple(s_id, &read_size);
+      const Byte* data = src_sp.get_tuple(s_id, &read_size);
       if (!data) {
-        buffer_pool_.unpin_page(pages[dst_idx].id, false);
         continue;
       }
 
       bool ok = dst_sp.insert_tuple(data, read_size).has_value();
       if (ok) {
         src_sp.delete_tuple(s_id);
+        dst_guard.mark_dirty();
+        src_guard.mark_dirty();
         migrated++;
         pages[dst_idx].free_space -= read_size + sizeof(Slot);
       }
-      buffer_pool_.unpin_page(pages[dst_idx].id, ok);
     }
-    buffer_pool_.unpin_page(src_info.id, true);
   }
   return migrated;
 }
 
-int TableManager::free_empty_extents(page_id_t iam_head) {
+int TableManager::free_empty_extents(page_id_t iam_head, uint64_t txn_id) {
   int extents_freed = 0;
   page_id_t dealloc_iam_page = iam_head;
 
@@ -317,19 +329,18 @@ int TableManager::free_empty_extents(page_id_t iam_head) {
       bool all_empty = true;
       for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t page_id = static_cast<page_id_t>(extent_id * EXTENT_SIZE + offset);
-        Page* page = buffer_pool_.fetch_page(page_id);
-        if (!page) {
-		  all_empty = false;
-		  continue;
-		}
+        PageGuard guard = buffer_pool_.fetch_page_guard(page_id);
+        if (!guard) {
+          all_empty = false;
+          continue;
+        }
 
-        SlottedPage sp = SlottedPage::from_page(page);
+        SlottedPage sp = SlottedPage::from_page(guard);
         if (!sp.is_empty()) all_empty = false;
-        buffer_pool_.unpin_page(page_id, false);
       }
 
       if (all_empty) {
-        bool removed = iam_manager_.remove_extent_from_iam(iam_head, extent_id);
+        bool removed = iam_manager_.remove_extent_from_iam(iam_head, extent_id, txn_id);
         if (removed) {
           extents_freed++;
           --idx;  // compensate for the shift-left in extent_ids array
@@ -341,39 +352,33 @@ int TableManager::free_empty_extents(page_id_t iam_head) {
   return extents_freed;
 }
 
-page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space) {
+page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space, uint64_t txn_id) {
   page_id_t target_page = iam_manager_.find_page_with_space(iam_head, needed_space);
 
   if (target_page != INVALID_PAGE_ID) {
-    Page* page = buffer_pool_.fetch_page(target_page);
-    if (!page) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(target_page);
+    if (!guard) {
       throw DbException(DbErrorCode::Internal, "Failed to fetch page for insert");
     }
-    buffer_pool_.unpin_page(target_page, false);
     return target_page;
   }
 
-  page_id_t extent_start = iam_manager_.allocate_extent_for_table(iam_head);
+  page_id_t extent_start = iam_manager_.allocate_extent_for_table(iam_head, txn_id);
   if (extent_start == INVALID_PAGE_ID) {
     throw DbException(DbErrorCode::Internal, "Failed to allocate extent for table");
   }
 
-  LOG_STORAGE_INFO("Materializing empty SlottedPages for new extent starting at page {} for table IAM page {}",
+  LOG_STORAGE_DEBUG("Materializing empty SlottedPages for new extent starting at page {} for table IAM page {}",
                    extent_start, iam_head);
   for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
     page_id_t new_page_id = extent_start + offset;
-    Page* page = buffer_pool_.new_or_fetch_page(new_page_id);
-    assert(page != nullptr);
-    SlottedPage::init(page->get_data());
-    buffer_pool_.unpin_page(new_page_id, true);
+    PageGuard guard = buffer_pool_.allocate_page_guard(new_page_id);
+    assert(guard.is_valid());
+    SlottedPage::init(reinterpret_cast<Byte*>(guard.get_data()));
+    guard.mark_dirty();
   }
 
   return extent_start;
-}
-
-bool TableManager::try_insert_into_page(Page* page, const char* buf, uint32_t data_size) {
-  SlottedPage sp = SlottedPage::from_page(page);
-  return sp.insert_tuple(buf, data_size).has_value();
 }
 
 }

@@ -1,0 +1,137 @@
+//
+// Created by Amit Chavan on 10/31/26.
+//
+
+#pragma once
+
+#include <cstdint>
+#include <mutex>
+#include <unordered_map>
+
+#include "storage/log_manager.h"
+
+namespace letty {
+
+class RollbackManager;
+
+enum class TransactionStatus {
+  Active,
+  Committed,
+  Aborted,
+};
+
+/**
+ * @brief
+ * This represents the metadata for an ongoing transaction that is useful to different components in the database
+ * to generate WAL log records.
+ */
+struct Transaction {
+  uint64_t txn_id;
+  TransactionStatus status;
+  lsn_t begin_lsn;
+  // LSN of the last WAL record for the transaction. This field keeps getting updated as Transaction manager keeps
+  // processing statements in the current transaction. This is also used to associate the prev_lsn field for new
+  // WAL log record.
+  lsn_t last_lsn;
+};
+
+/**
+ * @class TransactionManager
+ * @brief Manages transaction lifecycle: begin, commit, rollback.
+ *
+ * Locking strategy:
+ * - Single std::mutex (latch_) protects transaction state and LogManager access.
+ * - Each transaction is assigned a unique txn_id and tracked until commit/abort.
+ *
+ * WAL protocol:
+ * - begin() appends a BEGIN record, returns the assigned txn_id.
+ * - commit(txn_id) appends a COMMIT record, then calls flush_to_lsn() to ensure
+ *   durability. Returns only after fsync completes.
+ * - abort(txn_id) appends an ABORT marker, rolls back the transaction's page
+ *   changes via RollbackManager (when one is wired in), and writes an END record.
+ */
+class TransactionManager {
+ public:
+  /**
+   * @brief Constructs a TransactionManager without rollback support.
+   * abort() will log ABORT + END but cannot physically undo_transactions page changes. Used
+   * by unit tests with no storage layer.
+   */
+  explicit TransactionManager(LogManager& log_manager);
+
+  /**
+   * @brief Constructs a TransactionManager that rolls back page changes on abort.
+   * @param rollback_manager Undo engine used to reverse a transaction's updates.
+   */
+  TransactionManager(LogManager& log_manager, RollbackManager& rollback_manager);
+
+  /**
+   * Marks the beginning of the transaction.
+   * @return The transaction_id assigned to the transaction.
+   */
+  uint64_t begin();
+
+  /**
+   * This marks the completion of a transaction by written COMMIT wal record.
+   * @param txn_id
+   * @return
+   */
+  bool commit(uint64_t txn_id);
+
+  /** @brief
+   * Aborts a transaction. Appends ABORT record.
+   **/
+  bool abort(uint64_t txn_id);
+
+  /** @brief
+   * Records a WAL LSN against the transaction (called after each write operation).
+   **/
+  void record_lsn(uint64_t txn_id, lsn_t lsn);
+
+  /** @brief
+   * Returns the transaction status, or std::nullopt if not found.
+   **/
+  std::optional<TransactionStatus> get_status(uint64_t txn_id) const;
+
+  /**
+   * @brief
+   * Returns the last lsn for the transaction or invalid lsn if not found
+   * @param txn_id
+   * @return last recorded lsn for wal record for this transaction.
+   */
+  lsn_t get_last_lsn(uint64_t txn_id) const;
+
+  /**
+   * @brief
+   * Returns the next LSN that will be assigned (for testing/debugging).
+   **/
+  lsn_t get_next_lsn() const;
+
+  /**
+   * @brief
+   * Returns the highest LSN known to be on disk.
+   **/
+  lsn_t get_flushed_lsn() const;
+
+  /**
+   * @brief Returns a snapshot of the active transaction table for checkpoint persistence.
+   *
+   * Committed and aborted transactions are erased from transactions_ as soon as their
+   * terminal WAL record is durable, so every remaining entry is implicitly Active. The
+   * map is {txn_id → last_lsn}, taken under the latch so it is consistent with the
+   * current state at that instant.
+   *
+   * @return Copy of the active transaction table.
+   */
+  std::unordered_map<uint64_t, lsn_t> get_active_transaction_table() const;
+
+ private:
+  LogManager& log_manager_;
+  RollbackManager* rollback_manager_ = nullptr;
+  mutable std::mutex latch_;
+  // Atomically increasing transaction ID that is incremented each time a new transaction begins.
+  uint64_t next_txn_id_ = 1;
+  std::unordered_map<uint64_t, Transaction> transactions_;
+};
+
+}

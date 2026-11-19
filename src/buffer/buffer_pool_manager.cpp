@@ -122,31 +122,30 @@ Page* BufferPoolManager::new_page(page_id_t page_id) {
 
   // Don't allow duplicate pages
   if (page_table_.find(page_id) != page_table_.end()) {
-	LOG_BPM_WARN("Failed to create page {}: page is already in buffer pool", page_id);
+    LOG_BPM_WARN("Failed to create page {}: page is already in buffer pool", page_id);
     return nullptr;
   }
 
-  // Find a frame (free list or eviction)
-  auto maybe_frame = acquire_frame();
-  if (!maybe_frame) {
-	LOG_BPM_WARN("Failed to create page {}: no buffer frame available", page_id);
-	return nullptr;
-  }
-  frame_id_t frame_id = *maybe_frame;
-
-  // Initialize the new page
-  Page& page = pages_[frame_id];
-  page.reset();
-  page.set_page_id(page_id);
-  page.set_dirty(true);
-  page.increment_pin();
-
-  page_table_[page_id] = frame_id;
-
-  return &page;
+  return allocate_new_page_frame(page_id);
 }
 
-Page* BufferPoolManager::new_or_fetch_page(page_id_t page_id) {
+PageGuard BufferPoolManager::fetch_page_guard(page_id_t page_id) {
+  Page* page = fetch_page(page_id);
+  if (page == nullptr) {
+    return PageGuard();
+  }
+  return PageGuard(this, page);
+}
+
+PageGuard BufferPoolManager::allocate_page_guard(page_id_t page_id) {
+  Page* page = allocate_page(page_id);
+  if (page == nullptr) {
+    return PageGuard();
+  }
+  return PageGuard(this, page);
+}
+
+Page* BufferPoolManager::allocate_page(page_id_t page_id) {
   std::lock_guard<std::mutex> lock(latch_);
 
   auto it = page_table_.find(page_id);
@@ -158,6 +157,10 @@ Page* BufferPoolManager::new_or_fetch_page(page_id_t page_id) {
     return &page;
   }
 
+  return allocate_new_page_frame(page_id);
+}
+
+Page* BufferPoolManager::allocate_new_page_frame(page_id_t page_id) {
   auto maybe_frame = acquire_frame();
   if (!maybe_frame) {
     LOG_BPM_WARN("Failed to create page {}: no buffer frame available", page_id);
@@ -192,8 +195,7 @@ std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
 
   Page& victim = pages_[frame_id];
   if (victim.is_dirty()) {
-    IOResult result = disk_manager_.write_page(victim.get_page_id(), victim.get_data());
-    if (result != IOResult::SUCCESS) {
+    if (!flush_page_internal(victim)) {
       LOG_BPM_ERROR("Failed to evict dirty page {} from frame {}", victim.get_page_id(), frame_id);
       replacer_->mark_evictable(frame_id);
       return std::nullopt;
@@ -206,20 +208,20 @@ std::optional<frame_id_t> BufferPoolManager::acquire_frame() {
   return frame_id;
 }
 
-void BufferPoolManager::force_flush() {
-  std::lock_guard<std::mutex> lock(latch_);
-  for (size_t i = 0; i < pool_size_; ++i) {
-    Page& page = pages_[i];
-    if (page.get_page_id() != INVALID_PAGE_ID && page.is_dirty()) {
-      IOResult result = disk_manager_.write_page(page.get_page_id(), page.get_data());
-      if (result != IOResult::SUCCESS) {
-        LOG_BPM_ERROR("Failed to flush dirty page {}", page.get_page_id());
-        continue;
-      }
-      page.set_dirty(false);
-      ++flushes_;
-    }
+bool BufferPoolManager::flush_page_internal(Page& page) {
+  IOResult result = disk_manager_.write_page(page.get_page_id(), page.get_data());
+  if (result != IOResult::SUCCESS) {
+    LOG_BPM_ERROR("Failed to write page {}", page.get_page_id());
+    return false;
   }
+  page.set_dirty(false);
+  dirty_page_table_.erase(page.get_page_id());
+  ++flushes_;
+  return true;
+}
+
+void BufferPoolManager::force_flush() {
+  flush_all_pages();
 }
 
 bool BufferPoolManager::flush_page(page_id_t page_id) {
@@ -234,13 +236,7 @@ bool BufferPoolManager::flush_page(page_id_t page_id) {
   Page& page = pages_[frame_id];
 
   if (page.is_dirty()) {
-    IOResult result = disk_manager_.write_page(page_id, page.get_data());
-    if (result != IOResult::SUCCESS) {
-      LOG_BPM_ERROR("Failed to flush dirty page {}", page_id);
-      return false;
-    }
-    page.set_dirty(false);
-    ++flushes_;
+    return flush_page_internal(page);
   }
 
   return true;
@@ -254,20 +250,16 @@ bool BufferPoolManager::flush_all_pages() {
   for (auto& [page_id, frame_id] : page_table_) {
     Page& page = pages_[frame_id];
     if (page.is_dirty()) {
-      IOResult result = disk_manager_.write_page(page_id, page.get_data());
-      if (result != IOResult::SUCCESS) {
+      if (flush_page_internal(page)) {
+        ++flushed_count;
+      } else {
         ++failed_count;
-        LOG_BPM_ERROR("Failed to flush dirty page {}", page_id);
-        continue;
       }
-      page.set_dirty(false);
-      ++flushed_count;
     }
   }
 
   if (flushed_count > 0) {
-    flushes_ += flushed_count;
-    LOG_BPM_INFO("Flushed {} dirty pages", flushed_count);
+    LOG_BPM_DEBUG("Flushed {} dirty pages", flushed_count);
   }
   if (failed_count > 0) {
     LOG_BPM_ERROR("Failed to flush {} dirty page(s)", failed_count);
@@ -304,6 +296,7 @@ bool BufferPoolManager::delete_page(page_id_t page_id) {
   // Clean up
   page.reset();
   page_table_.erase(it);
+  dirty_page_table_.erase(page_id);
   free_list_.push_back(frame_id);
 
   return true;
@@ -317,6 +310,17 @@ CacheStats BufferPoolManager::get_cache_stats() const {
     dirty_evictions_.load(),
     flushes_.load()
   };
+}
+
+void BufferPoolManager::update_dirtied_page_lsn(page_id_t page_id, lsn_t lsn) {
+  std::lock_guard<std::mutex> lock(latch_);
+  // Emplace : If the key already exists the operation is noops.
+  dirty_page_table_.emplace(page_id, lsn);
+}
+
+std::unordered_map<page_id_t, lsn_t> BufferPoolManager::get_dirty_page_table() const {
+  std::lock_guard<std::mutex> lock(latch_);
+  return dirty_page_table_;
 }
 
 void BufferPoolManager::reset_cache_stats() {

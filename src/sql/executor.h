@@ -10,8 +10,11 @@
 #include "storage/tuple.h"
 #include "storage/table_manager.h"
 #include "catalog/catalog_manager.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
+
+class CheckpointManager;
 
 /**
  * @struct ExecutionResult
@@ -76,7 +79,9 @@ struct ExecutionResult {
  */
 class Executor {
  public:
-  Executor(CatalogManager& catalog_manager, TableManager& table_manager);
+  Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager);
+  Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager,
+           CheckpointManager& checkpoint_manager);
 
   /**
    * @brief Executes any AST node by dispatching to the appropriate handler.
@@ -88,6 +93,10 @@ class Executor {
  private:
   CatalogManager& catalog_manager_;
   TableManager& table_manager_;
+  TransactionManager& txn_manager_;
+  CheckpointManager* checkpoint_manager_ = nullptr;
+
+  void maybe_checkpoint();
 
   /**
    * @brief Executes a CREATE TABLE statement.

@@ -13,8 +13,8 @@ FetchContent_Declare(
 # Make the gtest and gtest_main targets available
 FetchContent_MakeAvailable(googletest)
 
-file(GLOB_RECURSE DB_SOURCES "*.cpp")
-file(GLOB_RECURSE DB_HEADERS "*.h")
+file(GLOB_RECURSE DB_SOURCES CONFIGURE_DEPENDS "*.cpp")
+file(GLOB_RECURSE DB_HEADERS CONFIGURE_DEPENDS "*.h")
 
 add_executable(lettydb_test ${DB_SOURCES} ${DB_HEADERS})
 

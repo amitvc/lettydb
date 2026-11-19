@@ -8,8 +8,8 @@
 
 namespace letty {
 
-CatalogManager::CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager)
-    : buffer_pool_(buffer_pool), iam_manager_(iam_manager) {}
+CatalogManager::CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, TransactionManager& txn_manager)
+    : buffer_pool_(buffer_pool), iam_manager_(iam_manager), txn_manager_(txn_manager) {}
 
 void CatalogManager::init() {
   auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
@@ -47,41 +47,41 @@ void CatalogManager::load_all_tables() {
     for (const auto& row : scan_system_table(sys_tables_iam_, st_schema)) {
         uint32_t oid = static_cast<uint32_t>(std::get<int32_t>(row.get_value(0)));
         std::string name = std::get<std::string>(row.get_value(1));
-        page_id_t iam = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
+        page_id_t iam_page_id = static_cast<page_id_t>(std::get<int32_t>(row.get_value(2)));
 
         auto it = columns_by_oid.find(oid);
         std::vector<Column> cols = (it != columns_by_oid.end()) ? std::move(it->second) : std::vector<Column>{};
 
-        table_cache_.emplace(name, TableMetadata{oid, name, Schema(std::move(cols)), iam});
+        table_cache_.emplace(name, TableMetadata{oid, name, Schema(std::move(cols)), iam_page_id});
     }
 }
 
 void CatalogManager::bootstrap() {
-    Page* db_header_frame = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!db_header_frame) {
+    PageGuard db_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    if (!db_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page during catalog bootstrap");
     }
-    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_frame);
+    auto db_header_page = load_page_layout<DatabaseHeader>(db_header_guard);
 
-    page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME);
-    page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME);
+    uint64_t txn_id = txn_manager_.begin();
+
+    page_id_t sys_tables_iam = iam_manager_.create_iam_chain(SYS_TABLES_NAME, txn_id);
+    page_id_t sys_columns_iam = iam_manager_.create_iam_chain(SYS_COLUMNS_NAME, txn_id);
 
     if (sys_tables_iam == INVALID_PAGE_ID || sys_columns_iam == INVALID_PAGE_ID) {
-        buffer_pool_.unpin_page(HEADER_PAGE_ID, false);
         throw DbException(DbErrorCode::NoSpace, "failed to create system catalog IAM chains");
     }
 
     // Update header in-place and cache
     db_header_page.sys_tables_iam_page = sys_tables_iam;
     db_header_page.sys_columns_iam_page = sys_columns_iam;
-    store_page_layout(db_header_frame, db_header_page);
-    buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
+    store_page_layout(db_header_guard, db_header_page);
 
     sys_tables_iam_ = sys_tables_iam;
     sys_columns_iam_ = sys_columns_iam;
 
-    page_id_t sys_tables_first_page = iam_manager_.allocate_extent_for_table(sys_tables_iam);
-    page_id_t sys_columns_first_page = iam_manager_.allocate_extent_for_table(sys_columns_iam);
+    page_id_t sys_tables_first_page = iam_manager_.allocate_extent_for_table(sys_tables_iam, txn_id);
+    page_id_t sys_columns_first_page = iam_manager_.allocate_extent_for_table(sys_columns_iam, txn_id);
     if (sys_tables_first_page == INVALID_PAGE_ID || sys_columns_first_page == INVALID_PAGE_ID) {
         throw DbException(DbErrorCode::NoSpace, "failed to allocate system catalog data extents");
     }
@@ -90,53 +90,57 @@ void CatalogManager::bootstrap() {
     initialize_data_extent(sys_columns_first_page);
 
     // Insert the metadata for sys_tables AND sys_columns INTO sys_tables
-    insert_sys_table_record({SYS_TABLES_TABLE_OID, SYS_TABLES_NAME, sys_tables_iam, SYS_TABLES_COLUMN_COUNT});
-    insert_sys_table_record({SYS_COLUMNS_TABLE_OID, SYS_COLUMNS_NAME, sys_columns_iam, SYS_COLUMNS_COLUMN_COUNT});
+    insert_sys_table_record({SYS_TABLES_TABLE_OID, SYS_TABLES_NAME, sys_tables_iam, SYS_TABLES_COLUMN_COUNT}, txn_id);
+    insert_sys_table_record({SYS_COLUMNS_TABLE_OID, SYS_COLUMNS_NAME, sys_columns_iam, SYS_COLUMNS_COLUMN_COUNT}, txn_id);
 
     // Insert column definitions into sys_columns
     Schema st_schema = sys_tables_schema();
     for (const auto& col : st_schema.get_columns()) {
-        insert_sys_column_record(SYS_TABLES_TABLE_OID, col);
+        insert_sys_column_record(SYS_TABLES_TABLE_OID, col, txn_id);
     }
     Schema sc_schema = sys_columns_schema();
     for (const auto& col : sc_schema.get_columns()) {
-        insert_sys_column_record(SYS_COLUMNS_TABLE_OID, col);
+        insert_sys_column_record(SYS_COLUMNS_TABLE_OID, col, txn_id);
     }
+
+    if (!txn_manager_.commit(txn_id)) {
+        throw DbException(DbErrorCode::Internal, "failed to commit catalog bootstrap transaction");
+    }
+    buffer_pool_.flush_all_pages();
 }
 
 uint32_t CatalogManager::get_next_table_id() {
-    Page* raw_header_page = buffer_pool_.fetch_page(HEADER_PAGE_ID);
-    if (!raw_header_page) {
+    PageGuard raw_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    if (!raw_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page for table_id allocation");
     }
-    auto db_header_page = load_page_layout<DatabaseHeader>(raw_header_page);
+    auto db_header_page = load_page_layout<DatabaseHeader>(raw_header_guard);
 
     uint16_t table_oid = db_header_page.next_table_oid;
     db_header_page.next_table_oid++;
 
-    store_page_layout(raw_header_page, db_header_page);
-    buffer_pool_.unpin_page(HEADER_PAGE_ID, true);
+    store_page_layout(raw_header_guard, db_header_page);
     return table_oid;
 }
 
 void CatalogManager::initialize_data_extent(page_id_t extent_start_page) {
     for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
         page_id_t page_id = extent_start_page + offset;
-        Page* page = buffer_pool_.new_or_fetch_page(page_id);
-        if (!page) {
+        PageGuard guard = buffer_pool_.allocate_page_guard(page_id);
+        if (!guard) {
             throw DbException(DbErrorCode::IOError, "failed to create catalog data page " + std::to_string(page_id));
         }
-        SlottedPage::init(page->get_data());
-        buffer_pool_.unpin_page(page_id, true);
+        SlottedPage::init(reinterpret_cast<Byte*>(guard.get_data()));
+        guard.mark_dirty();
     }
 }
 
-bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, uint32_t size) {
+bool CatalogManager::insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size, uint64_t txn_id) {
     page_id_t target_page_id = iam_manager_.find_page_with_space(iam_page_id, size);
 
     // No existing page has room — grow the table
     if (target_page_id == INVALID_PAGE_ID) {
-        target_page_id = iam_manager_.allocate_extent_for_table(iam_page_id);
+        target_page_id = iam_manager_.allocate_extent_for_table(iam_page_id, txn_id);
         if (target_page_id == INVALID_PAGE_ID) {
             throw DbException(DbErrorCode::NoSpace, "failed to allocate new extent for catalog table");
         }
@@ -144,19 +148,18 @@ bool CatalogManager::insert_into_table(page_id_t iam_page_id, const char* data, 
         initialize_data_extent(target_page_id);
     }
 
-    Page* page = buffer_pool_.fetch_page(target_page_id);
-    if (!page) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(target_page_id);
+    if (!guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch catalog data page");
     }
 
-    SlottedPage sp = SlottedPage::from_page(page);
+    SlottedPage sp = SlottedPage::from_page(guard);
     auto slot_id = sp.insert_tuple(data, size);
     if (!slot_id) {
-        buffer_pool_.unpin_page(target_page_id, false);
         throw DbException(DbErrorCode::NoSpace, "failed to insert catalog tuple into page " + std::to_string(target_page_id));
     }
 
-    buffer_pool_.unpin_page(target_page_id, true);
+    guard.mark_dirty();
     return true;
 }
 
@@ -177,17 +180,16 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
             for (int offset = 0; offset < EXTENT_SIZE; ++offset) {
                 page_id_t data_page_id = extent_start + offset;
 
-                Page* data_pg = buffer_pool_.fetch_page(data_page_id);
-                if (!data_pg) continue;
+                PageGuard data_guard = buffer_pool_.fetch_page_guard(data_page_id);
+                if (!data_guard) continue;
 
-                SlottedPage sp = SlottedPage::from_page(data_pg);
+                SlottedPage sp = SlottedPage::from_page(data_guard);
                 for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
                     uint32_t sz;
-                    const char* data = sp.get_tuple(slot, &sz);
+                    const Byte* data = sp.get_tuple(slot, &sz);
                     if (!data) continue;
                     results.push_back(Tuple::deserialize(schema, data, sz));
                 }
-                buffer_pool_.unpin_page(data_page_id, false);
             }
         }
 
@@ -198,9 +200,9 @@ std::vector<Tuple> CatalogManager::scan_system_table(page_id_t iam_head, const S
     return results;
 }
 
-bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
+bool CatalogManager::insert_sys_table_record(const SysTableRecord& record, uint64_t txn_id) {
     Schema st_schema = sys_tables_schema();
-    char buf[PAGE_SIZE];
+    Byte buf[PAGE_SIZE];
     uint32_t data_size;
 
     Tuple table_tuple({static_cast<int32_t>(record.table_id),
@@ -209,12 +211,12 @@ bool CatalogManager::insert_sys_table_record(const SysTableRecord& record) {
                        static_cast<int32_t>(record.column_count)});
     data_size = table_tuple.serialize(st_schema, buf, PAGE_SIZE);
 
-    return insert_into_table(sys_tables_iam_, buf, data_size);
+    return insert_into_table(sys_tables_iam_, buf, data_size, txn_id);
 }
 
-bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& col) {
+bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& col, uint64_t txn_id) {
     Schema sc_schema = sys_columns_schema();
-    char buf[PAGE_SIZE];
+    Byte buf[PAGE_SIZE];
     uint32_t data_size;
 
     Tuple col_tuple({static_cast<int32_t>(table_oid),
@@ -223,24 +225,27 @@ bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& 
                      static_cast<int32_t>(col.get_length()),
                      static_cast<int32_t>(col.get_offset())});
     data_size = col_tuple.serialize(sc_schema, buf, PAGE_SIZE);
-    return insert_into_table(sys_columns_iam_, buf, data_size);
+    return insert_into_table(sys_columns_iam_, buf, data_size, txn_id);
 }
 
 
 bool CatalogManager::table_exists(const std::string& name) {
+    std::lock_guard<std::mutex> lock(latch_);
     return table_cache_.find(name) != table_cache_.end();
 }
 
-const TableMetadata* CatalogManager::get_table(const std::string& name) {
+const std::optional<std::reference_wrapper<TableMetadata>> CatalogManager::get_table(const std::string& name) {
+    std::lock_guard<std::mutex> lock(latch_);
     auto it = table_cache_.find(name);
     if (it != table_cache_.end()) {
-        return &it->second;
+        return std::ref(it->second);
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 bool CatalogManager::create_table(const std::string& name, const Schema& schema) {
-    if (table_exists(name)) {
+    std::lock_guard<std::mutex> lock(latch_);
+    if (table_cache_.find(name) != table_cache_.end()) {
         throw DbException(DbErrorCode::DuplicateTable, "table '" + name + "' already exists");
     }
 
@@ -255,16 +260,23 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
 
     uint16_t next_oid = get_next_table_id();
 
-    page_id_t new_iam = iam_manager_.create_iam_chain(name);
+    uint64_t txn_id = txn_manager_.begin();
+
+    page_id_t new_iam = iam_manager_.create_iam_chain(name, txn_id);
     if (new_iam == INVALID_PAGE_ID) {
         throw DbException(DbErrorCode::NoSpace, "failed to create IAM chain for table '" + name + "'");
     }
 
-    insert_sys_table_record({next_oid, name, new_iam, static_cast<int32_t>(schema.get_columns().size())});
+    insert_sys_table_record({next_oid, name, new_iam, static_cast<int32_t>(schema.get_columns().size())}, txn_id);
 
     for (const auto& col : schema.get_columns()) {
-        insert_sys_column_record(next_oid, col);
+        insert_sys_column_record(next_oid, col, txn_id);
     }
+
+    if (!txn_manager_.commit(txn_id)) {
+        throw DbException(DbErrorCode::Internal, "failed to commit CREATE TABLE transaction for '" + name + "'");
+    }
+    buffer_pool_.flush_all_pages();
 
     // Cache the newly created table directly
     table_cache_.emplace(name, TableMetadata{
