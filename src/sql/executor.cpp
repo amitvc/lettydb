@@ -2,6 +2,8 @@
 
 #include "token.h"
 #include "common/db_exception.h"
+#include "common/logger.h"
+#include "storage/checkpoint_manager.h"
 
 namespace letty {
 
@@ -90,6 +92,21 @@ bool apply_comparison(const Value& lhs, const std::string& op, const Value& rhs)
 Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager)
     : catalog_manager_(catalog_manager), table_manager_(table_manager), txn_manager_(txn_manager) {}
 
+Executor::Executor(CatalogManager& catalog_manager, TableManager& table_manager, TransactionManager& txn_manager,
+                   CheckpointManager& checkpoint_manager)
+    : catalog_manager_(catalog_manager),
+      table_manager_(table_manager),
+      txn_manager_(txn_manager),
+      checkpoint_manager_(&checkpoint_manager) {}
+
+void Executor::maybe_checkpoint() {
+  if (checkpoint_manager_ != nullptr && checkpoint_manager_->should_checkpoint()) {
+    if (!checkpoint_manager_->run_checkpoint()) {
+      LOG_STORAGE_WARN("Periodic checkpoint execution failed");
+    }
+  }
+}
+
 ExecutionResult Executor::execute(ASTNode* node) {
   try {
     if (!node) {
@@ -97,11 +114,19 @@ ExecutionResult Executor::execute(ASTNode* node) {
     }
 
     if (auto* create_table = dynamic_cast<CreateTableStatementNode*>(node)) {
-      return execute_create_table(create_table);
+      ExecutionResult res = execute_create_table(create_table);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* insert = dynamic_cast<InsertStatementNode*>(node)) {
-      return execute_insert(insert);
+      ExecutionResult res = execute_insert(insert);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* select = dynamic_cast<SelectStatementNode*>(node)) {
@@ -109,11 +134,19 @@ ExecutionResult Executor::execute(ASTNode* node) {
     }
 
     if (auto* del = dynamic_cast<DeleteStatementNode*>(node)) {
-      return execute_delete(del);
+      ExecutionResult res = execute_delete(del);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     if (auto* compact = dynamic_cast<CompactStatementNode*>(node)) {
-      return execute_compact(compact);
+      ExecutionResult res = execute_compact(compact);
+      if (res.success) {
+        maybe_checkpoint();
+      }
+      return res;
     }
 
     return ExecutionResult::error("Unsupported statement type");

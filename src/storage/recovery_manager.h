@@ -49,6 +49,8 @@ struct AnalysisResult {
   lsn_t min_rec_lsn = INVALID_LSN;
   lsn_t scan_start_lsn = INVALID_LSN;
   lsn_t last_log_lsn = INVALID_LSN;
+  int records_redone = 0;
+  int records_undone = 0;
 };
 
 /**
@@ -111,7 +113,8 @@ class RecoveryManager {
                       Deserializer deserializer);
 
   page_id_t extract_page_id(const LogRecord& record) const;
-  bool redo_record(const LogRecord& record, Page* page) const;
+  void materialize_data_extent(uint32_t extent_id);
+  bool redo_record(const LogRecord& record, Page* page);
   int redo(const AnalysisResult& analysis);
 };
 

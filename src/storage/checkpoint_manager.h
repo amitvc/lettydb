@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "storage_def.h"
@@ -79,6 +80,7 @@ class CheckpointManager {
 
   std::chrono::steady_clock::time_point last_checkpoint_time_;
   lsn_t last_checkpoint_lsn_ = INVALID_LSN;
+  mutable std::mutex latch_;
 
   std::string checkpoint_marker_path() const;
   bool write_checkpoint_marker(lsn_t checkpoint_lsn) const;

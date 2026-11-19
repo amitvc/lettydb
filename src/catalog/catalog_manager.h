@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "catalog/catalog_defs.h"
@@ -112,6 +113,7 @@ class CatalogManager {
    *  Eliminates repeated full scans of sys_tables + sys_columns.
    **/
   std::unordered_map<std::string, TableMetadata> table_cache_;
+  mutable std::mutex latch_;
 
   /// Cached IAM page IDs for sys_tables and sys_columns.
   /// Set once during init() or bootstrap() and never change.

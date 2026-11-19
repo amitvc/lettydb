@@ -13,6 +13,7 @@ IamManager::IamManager(BufferPoolManager &buffer_pool, ExtentManager &extent_man
       log_manager_(log_manager), txn_manager_(txn_manager) {}
 
 page_id_t IamManager::create_iam_chain(const std::string &table_name, uint64_t txn_id) {
+  std::lock_guard<std::mutex> lock(latch_);
   LOG_STORAGE_DEBUG("Creating new IAM chain for table {}", table_name.c_str());
 
   page_id_t iam_page_id = extent_manager_.allocate_extent(txn_id);
@@ -107,6 +108,7 @@ page_id_t IamManager::link_new_iam_page(page_id_t prev_iam_page, uint32_t extent
 
 
 page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id, uint64_t txn_id) {
+  std::lock_guard<std::mutex> lock(latch_);
   LOG_STORAGE_DEBUG("Allocating extent for IAM chain at page {}", iam_head_page_id);
 
   if (iam_head_page_id == INVALID_PAGE_ID) {
@@ -154,6 +156,7 @@ page_id_t IamManager::allocate_extent_for_table(page_id_t iam_head_page_id, uint
 
 
 page_id_t IamManager::find_page_with_space(page_id_t iam_head_page_id, uint32_t required_space) {
+  std::lock_guard<std::mutex> lock(latch_);
   if (iam_head_page_id == INVALID_PAGE_ID) {
     LOG_STORAGE_ERROR("Invalid IAM head page ID");
     return INVALID_PAGE_ID;
@@ -228,6 +231,7 @@ page_id_t IamManager::scan_iam_chain(page_id_t iam_head_page_id, uint32_t total_
 }
 
 bool IamManager::remove_extent_from_iam(page_id_t iam_head_page_id, uint32_t extent_id, uint64_t txn_id) {
+  std::lock_guard<std::mutex> lock(latch_);
   page_id_t current_iam_page = iam_head_page_id;
   page_id_t prev_iam_page = INVALID_PAGE_ID;
 

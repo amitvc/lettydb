@@ -191,4 +191,71 @@ void SlottedPage::set_page_lsn(lsn_t lsn) {
   store_header();
 }
 
+void SlottedPage::repack_tuples_preserving_slots(uint16_t excluded_slot_id) {
+  std::vector< std::pair<uint16_t, std::vector<Byte>> > live_slots;
+  for (uint16_t i = 0; i < header_.num_slots; ++i) {
+    if (i == excluded_slot_id) {
+      continue;
+    }
+    auto slot = get_slot(i);
+    if (slot && slot->length > 0) {
+      std::vector<Byte> buf(slot->length);
+      std::memcpy(buf.data(), data_ + slot->offset, slot->length);
+      live_slots.emplace_back(i, std::move(buf));
+    }
+  }
+
+  header_.free_space_pointer = PAGE_SIZE;
+  for (const auto& entry : live_slots) {
+    uint16_t slot_idx = entry.first;
+    const std::vector<Byte>& tuple_bytes = entry.second;
+    uint16_t len = static_cast<uint16_t>(tuple_bytes.size());
+    header_.free_space_pointer -= len;
+    std::memcpy(data_ + header_.free_space_pointer, tuple_bytes.data(), len);
+    set_slot(slot_idx, Slot{header_.free_space_pointer, len});
+  }
+}
+
+bool SlottedPage::apply_slot_payload(uint16_t slot_id, const Byte* tuple_data, uint32_t tuple_size) {
+  if (header_.free_space_pointer == 0 && header_.num_slots == 0) {
+    header_.free_space_pointer = PAGE_SIZE;
+    header_.next_page_id = INVALID_PAGE_ID;
+    header_.prev_page_id = INVALID_PAGE_ID;
+  }
+
+  if (tuple_size == 0) {
+    if (slot_id >= header_.num_slots) {
+      return true;
+    }
+    auto slot = get_slot(slot_id);
+    if (!slot || slot->length == 0) {
+      return true;
+    }
+    return delete_tuple(slot_id);
+  }
+
+  uint16_t required_slots = (slot_id >= header_.num_slots) ? static_cast<uint16_t>(slot_id + 1) : header_.num_slots;
+  size_t required_header_bytes = sizeof(SlottedPageHeader) + (required_slots * sizeof(Slot));
+
+  if (required_header_bytes + tuple_size > header_.free_space_pointer) {
+    repack_tuples_preserving_slots(slot_id);
+    if (required_header_bytes + tuple_size > header_.free_space_pointer) {
+      return false;
+    }
+  }
+
+  if (slot_id >= header_.num_slots) {
+    for (uint16_t i = header_.num_slots; i <= slot_id; ++i) {
+      store_slot_to_bytes(data_ + slot_data_offset(i), Slot{0, 0});
+    }
+    header_.num_slots = required_slots;
+  }
+
+  header_.free_space_pointer -= static_cast<uint16_t>(tuple_size);
+  std::memcpy(data_ + header_.free_space_pointer, tuple_data, tuple_size);
+  set_slot(slot_id, Slot{header_.free_space_pointer, static_cast<uint16_t>(tuple_size)});
+  store_header();
+  return true;
+}
+
 }

@@ -106,6 +106,7 @@ void CatalogManager::bootstrap() {
     if (!txn_manager_.commit(txn_id)) {
         throw DbException(DbErrorCode::Internal, "failed to commit catalog bootstrap transaction");
     }
+    buffer_pool_.flush_all_pages();
 }
 
 uint32_t CatalogManager::get_next_table_id() {
@@ -229,10 +230,12 @@ bool CatalogManager::insert_sys_column_record(uint32_t table_oid, const Column& 
 
 
 bool CatalogManager::table_exists(const std::string& name) {
+    std::lock_guard<std::mutex> lock(latch_);
     return table_cache_.find(name) != table_cache_.end();
 }
 
 const std::optional<std::reference_wrapper<TableMetadata>> CatalogManager::get_table(const std::string& name) {
+    std::lock_guard<std::mutex> lock(latch_);
     auto it = table_cache_.find(name);
     if (it != table_cache_.end()) {
         return std::ref(it->second);
@@ -241,7 +244,8 @@ const std::optional<std::reference_wrapper<TableMetadata>> CatalogManager::get_t
 }
 
 bool CatalogManager::create_table(const std::string& name, const Schema& schema) {
-    if (table_exists(name)) {
+    std::lock_guard<std::mutex> lock(latch_);
+    if (table_cache_.find(name) != table_cache_.end()) {
         throw DbException(DbErrorCode::DuplicateTable, "table '" + name + "' already exists");
     }
 
@@ -272,6 +276,7 @@ bool CatalogManager::create_table(const std::string& name, const Schema& schema)
     if (!txn_manager_.commit(txn_id)) {
         throw DbException(DbErrorCode::Internal, "failed to commit CREATE TABLE transaction for '" + name + "'");
     }
+    buffer_pool_.flush_all_pages();
 
     // Cache the newly created table directly
     table_cache_.emplace(name, TableMetadata{

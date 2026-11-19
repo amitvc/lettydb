@@ -32,17 +32,15 @@ DatabaseEngine::DatabaseEngine(const std::string& db_path) {
   RecoveryManager recovery_manager(db_path, *log_manager_, *buffer_pool_, *rollback_manager_);
   recovery_manager.analyze();
 
-  // Finalize recovery: flush the reconstructed pages to disk and write a
-  // checkpoint so a subsequent restart resumes from here instead of replaying
-  // this WAL again.
-  buffer_pool_->flush_all_pages();
-  checkpoint_manager_->run_checkpoint();
   extent_manager_ = std::make_unique<ExtentManager>(*buffer_pool_, *log_manager_, *txn_manager_);
   iam_manager_ = std::make_unique<IamManager>(*buffer_pool_, *extent_manager_, *log_manager_, *txn_manager_);
   catalog_manager_ = std::make_unique<CatalogManager>(*buffer_pool_, *iam_manager_, *txn_manager_);
   catalog_manager_->init();
+
+  buffer_pool_->flush_all_pages();
+  checkpoint_manager_->run_checkpoint();
   table_manager_ = std::make_unique<TableManager>(*buffer_pool_, *iam_manager_, *catalog_manager_, *log_manager_, *txn_manager_);
-  executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_, *txn_manager_);
+  executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_, *txn_manager_, *checkpoint_manager_);
   inspector_ = std::make_unique<StorageInspector>(
       *buffer_pool_, *extent_manager_, *iam_manager_, *catalog_manager_);
 }

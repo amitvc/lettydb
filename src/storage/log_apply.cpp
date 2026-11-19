@@ -3,8 +3,8 @@
 //
 
 #include "storage/log_apply.h"
-#include <cstring>
 #include "storage/page.h"
+#include "storage/slotted_page.h"
 #include "storage/storage_def.h"
 #include "storage/page_utils.h"
 #include "common/logger.h"
@@ -12,12 +12,12 @@
 namespace letty {
 
 bool apply_payload_to_page(Page* page, uint16_t offset, const ByteBuffer& payload) {
-  if (offset + payload.size() > PAGE_SIZE) {
-    LOG_RECOVERY_MGR_WARN("Patch offset {} + size {} exceeds page size",
-                          offset, payload.size());
+  SlottedPage slotted_page = SlottedPage::from_page(page);
+  if (!slotted_page.apply_slot_payload(offset, payload.data(), static_cast<uint32_t>(payload.size()))) {
+    LOG_RECOVERY_MGR_WARN("Failed to apply slot payload at slot {} (size {}) on page {}",
+                          offset, payload.size(), page->get_page_id());
     return false;
   }
-  std::memcpy(page->get_data() + offset, payload.data(), payload.size());
   return true;
 }
 

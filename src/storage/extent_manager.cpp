@@ -145,7 +145,7 @@ lsn_t ExtentManager::log_extent_change(LogRecordType type, uint64_t txn_id, page
 }
 
 void ExtentManager::advance_gam_cursor(page_id_t next_gam_id) {
-  LOG_INFO("Moving to next GAM Page in the chain. Current page ID {} chainID {} Next page ID {} chainID {}",
+  LOG_STORAGE_DEBUG("Moving to next GAM Page in the chain. Current page ID {} chainID {} Next page ID {} chainID {}",
        current_gam_page_id_, current_gam_chain_index_, next_gam_id, current_gam_chain_index_ + 1);
   current_gam_page_id_ = next_gam_id;
   current_gam_chain_index_++;
@@ -304,7 +304,7 @@ std::tuple<page_id_t, page_id_t, uint16_t> ExtentManager::allocate_extent_in_gam
   size_t hint = gam_page->first_free_bit_hint;
   if (hint >= GAM_MAX_BITS) {
 	// Safety: reset invalid hint
-	LOG_STORAGE_WARN("GamPage free page hint greater than {}", GAM_MAX_BITS);
+	LOG_STORAGE_DEBUG("GamPage free page hint greater than {}", GAM_MAX_BITS);
 	hint = 0;
   }
 
@@ -327,9 +327,9 @@ std::tuple<page_id_t, page_id_t, uint16_t> ExtentManager::allocate_extent_in_gam
 }
 
 void ExtentManager::print_database_header(const DatabaseHeader *header) {
-  LOG_STORAGE_INFO("******* Database Header *********");
-  LOG_STORAGE_INFO("Signature: {}, Version: {}, Page size: {}", header->signature, header->version, header->page_size);
-  LOG_STORAGE_INFO("GAM PageID : {}, System tables PageID: {}", header->gam_page_id, header->sys_tables_iam_page);
+  LOG_STORAGE_DEBUG("******* Database Header *********");
+  LOG_STORAGE_DEBUG("Signature: {}, Version: {}, Page size: {}", header->signature, header->version, header->page_size);
+  LOG_STORAGE_DEBUG("GAM PageID : {}, System tables PageID: {}", header->gam_page_id, header->sys_tables_iam_page);
 }
 
 }

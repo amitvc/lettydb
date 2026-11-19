@@ -560,4 +560,28 @@ TEST_F(LogManagerTest, FindLatestSegmentWithGappedIds) {
   EXPECT_EQ(latest->second, WAL_SIGNATURE_SIZE + 512);
 }
 
+TEST_F(LogManagerTest, ExactSegmentBoundaryRecordRollsOverWithoutWrappingOffset) {
+  static constexpr uint32_t EXACT_FIT_SEGMENT_SIZE =
+      static_cast<uint32_t>(WAL_SIGNATURE_SIZE + 3 * sizeof(LogRecordHeader));
+  LogManager log_mgr(test_prefix_, EXACT_FIT_SEGMENT_SIZE, 60000);
+
+  std::vector<lsn_t> lsns;
+  for (uint64_t i = 1; i <= 8; ++i) {
+    LogRecord rec{};
+    ASSERT_TRUE(build_transaction_record(LogRecordType::BEGIN, i, rec));
+    lsn_t lsn = log_mgr.append_record(rec);
+    ASSERT_NE(lsn, INVALID_LSN);
+    lsns.push_back(lsn);
+  }
+  ASSERT_TRUE(log_mgr.flush_to_lsn(lsns.back()));
+
+  EXPECT_EQ(log_mgr.get_current_segment_id(), 2u);
+  std::vector<LogRecord> all_records = log_mgr.read_records();
+  ASSERT_EQ(all_records.size(), 8u);
+  for (size_t i = 0; i < all_records.size(); ++i) {
+    EXPECT_EQ(all_records[i].header.lsn, lsns[i]);
+    EXPECT_EQ(all_records[i].header.tran_id, i + 1);
+  }
+}
+
 }  // namespace letty

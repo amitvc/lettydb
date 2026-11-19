@@ -494,8 +494,8 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 
 	uint32_t computed_checksum = compute_crc32(bytes.data() + sizeof(uint32_t), bytes.size() - sizeof(uint32_t));
 	if (computed_checksum != stored_checksum) {
-	  LOG_WAL_ERROR("LogRecord checksum mismatch: expected {}, got {}",
-					stored_checksum, computed_checksum);
+	  LOG_WAL_ERROR("LogRecord checksum mismatch: expected {}, got {}. Record type {}",
+					stored_checksum, computed_checksum, raw_type);
 	  return false;
 	}
 

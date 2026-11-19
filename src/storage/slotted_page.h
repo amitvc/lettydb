@@ -242,6 +242,20 @@ class SlottedPage {
   void set_page_lsn(lsn_t lsn);
 
   /**
+   * @brief Applies a WAL slot payload during Redo or Undo.
+   *
+   * When tuple_size is 0, deletes the tuple at slot_id. When tuple_size > 0,
+   * places the tuple bytes at the exact slot_id, growing the slot directory
+   * if needed.
+   *
+   * @param slot_id Target slot index.
+   * @param tuple_data Pointer to tuple bytes (may be nullptr when tuple_size is 0).
+   * @param tuple_size Size of tuple in bytes (0 to delete the slot).
+   * @return true if applied, false if the tuple does not fit in the page.
+   */
+  bool apply_slot_payload(uint16_t slot_id, const Byte* tuple_data, uint32_t tuple_size);
+
+  /**
    * @brief Convenience helper to create a SlottedPage view from a Page pointer.
    */
   static SlottedPage from_page(Page* page);
@@ -255,6 +269,7 @@ class SlottedPage {
 
  private:
   void store_header();
+  void repack_tuples_preserving_slots(uint16_t excluded_slot_id);
   static size_t slot_data_offset(uint16_t slot_id);
 
   Byte* data_;

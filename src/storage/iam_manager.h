@@ -5,6 +5,7 @@
 #include "extent_manager.h"
 #include "log_manager.h"
 #include "transaction/transaction_manager.h"
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -91,6 +92,7 @@ class IamManager {
   // extent is scanned forward, then the full IAM chain. Updated whenever a
   // page with space is found or a new extent is allocated.
   std::unordered_map<page_id_t, page_id_t> table_page_hints_;
+  mutable std::mutex latch_;
 
 
   /** Check the cached hint page for space. Returns page ID or INVALID_PAGE_ID. */

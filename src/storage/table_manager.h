@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <mutex>
 #include <string>
 #include "buffer/buffer_pool_manager.h"
 #include "iam_manager.h"
@@ -195,6 +197,13 @@ class TableManager {
   CatalogManager& catalog_manager_;
   LogManager& log_manager_;
   TransactionManager& txn_manager_;
+
+  static constexpr size_t NUM_TABLE_LATCHES = 64;
+  mutable std::array<std::mutex, NUM_TABLE_LATCHES> table_latches_;
+
+  std::mutex& get_table_latch(page_id_t iam_page_id) const {
+    return table_latches_[static_cast<size_t>(iam_page_id) % NUM_TABLE_LATCHES];
+  }
 
   /**
    * @brief Returns a page that can accept `needed_space` bytes, allocating a

@@ -10,7 +10,6 @@
 #include "transaction/transaction_manager.h"
 #include "common/logger.h"
 #include "common/db_exception.h"
-#include "page_utils.h"
 
 namespace letty {
 
@@ -38,6 +37,7 @@ std::string CheckpointManager::checkpoint_marker_path() const {
 }
 
 bool CheckpointManager::should_checkpoint() const {
+  std::lock_guard<std::mutex> lock(latch_);
   auto elapsed = std::chrono::steady_clock::now() - last_checkpoint_time_;
   bool time_trigger = elapsed >= checkpoint_interval_;
 
@@ -49,7 +49,8 @@ bool CheckpointManager::should_checkpoint() const {
 }
 
 bool CheckpointManager::run_checkpoint() {
-  LOG_STORAGE_INFO("Starting checkpoint");
+  std::lock_guard<std::mutex> lock(latch_);
+  LOG_STORAGE_DEBUG("Starting checkpoint");
 
   LogRecord begin_checkpoint{};
   if (!build_transaction_record(LogRecordType::BEGIN_CHECKPOINT, INVALID_TXN_ID, begin_checkpoint)) {
@@ -111,7 +112,7 @@ bool CheckpointManager::run_checkpoint() {
   last_checkpoint_time_ = std::chrono::steady_clock::now();
   last_checkpoint_lsn_ = begin_checkpoint_lsn;
 
-  LOG_STORAGE_INFO("Checkpoint completed at LSN {}", begin_checkpoint_lsn);
+  LOG_STORAGE_DEBUG("Checkpoint completed at LSN {}", begin_checkpoint_lsn);
   return true;
 }
 
@@ -166,13 +167,13 @@ lsn_t CheckpointManager::read_checkpoint_marker() const {
   close(fd);
 
   if (bytes_read != static_cast<ssize_t>(buffer.size())) {
-    LOG_STORAGE_WARN("Checkpoint marker file {} is corrupt or incomplete", path);
+    LOG_STORAGE_DEBUG("Checkpoint marker file {} is corrupt or incomplete", path);
     return INVALID_LSN;
   }
 
   CheckpointMarker marker{};
   if (!deserialize_checkpoint_marker(buffer, marker)) {
-    LOG_STORAGE_WARN("Failed to deserialize checkpoint marker file {}", path);
+    LOG_STORAGE_DEBUG("Failed to deserialize checkpoint marker file {}", path);
     return INVALID_LSN;
   }
 

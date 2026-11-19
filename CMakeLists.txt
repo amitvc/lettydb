@@ -28,13 +28,7 @@ FetchContent_Declare(
     GIT_TAG v3.11.3
     GIT_SHALLOW TRUE
 )
-FetchContent_Declare(
-    tabulate
-    GIT_REPOSITORY https://github.com/p-ranav/tabulate.git
-    GIT_TAG v1.5
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(spdlog replxx json tabulate)
+FetchContent_MakeAvailable(spdlog replxx json)
 
 file(GLOB_RECURSE DB_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 file(GLOB_RECURSE DB_HEADERS CONFIGURE_DEPENDS "src/*.h")
@@ -43,7 +37,7 @@ file(GLOB_RECURSE DB_HEADERS CONFIGURE_DEPENDS "src/*.h")
 list(REMOVE_ITEM DB_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
 add_library(lettydb ${DB_SOURCES} ${DB_HEADERS})
-target_link_libraries(lettydb spdlog::spdlog replxx::replxx nlohmann_json::nlohmann_json tabulate::tabulate)
+target_link_libraries(lettydb spdlog::spdlog replxx::replxx nlohmann_json::nlohmann_json)
 
 # Create executable
 add_executable(lettydb_cli src/main.cpp)

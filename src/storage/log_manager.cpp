@@ -120,7 +120,7 @@ int LogManager::create_segment_file(uint32_t segment_id) {
                           " (" + std::strerror(err) + ")");
   }
 
-  LOG_STORAGE_INFO("Created WAL segment file {}", path);
+  LOG_STORAGE_DEBUG("Created WAL segment file {}", path);
   return fd;
 }
 
@@ -142,7 +142,7 @@ int LogManager::open_segment_file(uint32_t segment_id) {
                       "FATAL: Invalid or corrupt WAL header in segment file: " + path);
   }
 
-  LOG_STORAGE_INFO("Opened existing WAL segment file {}", path);
+  LOG_STORAGE_DEBUG("Opened existing WAL segment file {}", path);
   return fd;
 }
 
@@ -198,7 +198,8 @@ lsn_t LogManager::append_record(LogRecord& record) {
     return INVALID_LSN;
   }
 
-  if (calculate_file_offset_from_lsn(next_lsn_) + record_size > segment_size_) {
+  if (segment_id_from_lsn(next_lsn_) != current_segment_id_ ||
+      calculate_file_offset_from_lsn(next_lsn_) + record_size > segment_size_) {
     if (!rollover_to_next_segment()) {
       return INVALID_LSN;
     }
@@ -222,6 +223,13 @@ lsn_t LogManager::append_record(LogRecord& record) {
   // Move the cursor to current wal log record + next_lsn_. That new position is the next lsn.
   next_lsn_ += bytes.size();
 
+  if (segment_id_from_lsn(next_lsn_) != current_segment_id_) {
+    if (!rollover_to_next_segment()) {
+      return INVALID_LSN;
+    }
+    return assigned_lsn;
+  }
+
   auto elapsed = std::chrono::steady_clock::now() - last_flush_time_;
   if (elapsed >= flush_interval_) {
     if (!flush_buffer_to_disk()) {
@@ -236,7 +244,7 @@ bool LogManager::flush_to_lsn(lsn_t target_lsn) {
   std::lock_guard<std::mutex> lock(latch_);
 
   if (target_lsn == INVALID_LSN || target_lsn < flushed_lsn_) {
-	LOG_WAL_INFO("Last flushed lsn {} is greater than target lsn {}", flushed_lsn_, target_lsn);
+	LOG_WAL_DEBUG("Last flushed lsn {} is greater than target lsn {}", flushed_lsn_, target_lsn);
     return true;
   }
   return flush_buffer_to_disk();

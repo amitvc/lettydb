@@ -16,7 +16,6 @@
 #include <unistd.h>  // for isatty()
 #include <nlohmann/json.hpp>
 #include <spdlog/fmt/fmt.h>
-#include <tabulate/table.hpp>
 
 namespace letty {
 
@@ -32,19 +31,67 @@ static std::string val_to_str(const Value& val) {
     }, val);
 }
 
-static void apply_unicode_borders(tabulate::Table& t) {
-    t.format()
-      .corner_top_left("┌").corner_top_right("┐")
-      .corner_bottom_left("└").corner_bottom_right("┘")
-      .border_top("─").border_bottom("─")
-      .border_left("│").border_right("│")
-      .column_separator("│");
-    if (t.size() > 0) {
-        t[0].format()
-          .border_bottom("─")
-          .corner_bottom_left("├")
-          .corner_bottom_right("┤");
+static void print_box_border(const std::vector<size_t>& widths,
+                             const char* left,
+                             const char* mid,
+                             const char* right) {
+    std::string line;
+    line.reserve(widths.size() * 16);
+    line += left;
+    for (size_t i = 0; i < widths.size(); ++i) {
+        if (i > 0) line += mid;
+        for (size_t j = 0; j < widths[i] + 2; ++j) {
+            line += "─";
+        }
     }
+    line += right;
+    line += '\n';
+    std::fwrite(line.data(), 1, line.size(), stdout);
+}
+
+static void print_box_row(const std::vector<std::string>& cells,
+                          const std::vector<size_t>& widths,
+                          const std::vector<bool>& right_align = {}) {
+    std::string line;
+    line.reserve(widths.size() * 16);
+    line += "│";
+    for (size_t i = 0; i < widths.size(); ++i) {
+        const std::string& cell = (i < cells.size()) ? cells[i] : "";
+        bool align_right = (i < right_align.size()) && right_align[i];
+        size_t pad = (widths[i] > cell.size()) ? (widths[i] - cell.size()) : 0;
+        line += ' ';
+        if (align_right) {
+            line.append(pad, ' ');
+            line += cell;
+        } else {
+            line += cell;
+            line.append(pad, ' ');
+        }
+        line += " │";
+    }
+    line += '\n';
+    std::fwrite(line.data(), 1, line.size(), stdout);
+}
+
+static void print_small_table(const std::vector<std::string>& headers,
+                              const std::vector<std::vector<std::string>>& rows,
+                              const std::vector<bool>& right_align = {}) {
+    std::vector<size_t> widths(headers.size(), 0);
+    for (size_t i = 0; i < headers.size(); ++i) {
+        widths[i] = headers[i].size();
+    }
+    for (const auto& row : rows) {
+        for (size_t i = 0; i < headers.size() && i < row.size(); ++i) {
+            widths[i] = std::max(widths[i], row[i].size());
+        }
+    }
+    print_box_border(widths, "┌", "┬", "┐");
+    print_box_row(headers, widths);
+    print_box_border(widths, "├", "┼", "┤");
+    for (const auto& row : rows) {
+        print_box_row(row, widths, right_align);
+    }
+    print_box_border(widths, "└", "┴", "┘");
 }
 
 
@@ -309,8 +356,7 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                     }
 
                     if (json.contains("decoded_tuples") && !json["decoded_tuples"].empty()) {
-                        tabulate::Table t;
-                        t.add_row({"Slot", "Offset", "Values"});
+                        std::vector<std::vector<std::string>> table_rows;
                         for (const auto& tup : json["decoded_tuples"]) {
                             std::string vals_str;
                             const auto& vals = tup["values"];
@@ -323,34 +369,26 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                                 else
                                     vals_str += vals[i].dump();
                             }
-                            t.add_row({
+                            table_rows.push_back({
                                 fmt::format("{}", tup["slot"].get<int>()),
                                 fmt::format("{}", tup["offset"].get<int>()),
                                 vals_str
                             });
                         }
-                        apply_unicode_borders(t);
-                        t.column(0).format().font_align(tabulate::FontAlign::right);
-                        t.column(1).format().font_align(tabulate::FontAlign::right);
                         fmt::print("\n");
-                        std::cout << t << "\n";
+                        print_small_table({"Slot", "Offset", "Values"}, table_rows, {true, true, false});
 
                     } else if (json.contains("slots") && !json["slots"].empty()) {
-                        tabulate::Table t;
-                        t.add_row({"Slot", "Offset", "Length"});
+                        std::vector<std::vector<std::string>> table_rows;
                         for (const auto& s : json["slots"]) {
-                            t.add_row({
+                            table_rows.push_back({
                                 fmt::format("{}", s["index"].get<int>()),
                                 fmt::format("{}", s["offset"].get<int>()),
                                 fmt::format("{}", s["length"].get<int>())
                             });
                         }
-                        apply_unicode_borders(t);
-                        t.column(0).format().font_align(tabulate::FontAlign::right);
-                        t.column(1).format().font_align(tabulate::FontAlign::right);
-                        t.column(2).format().font_align(tabulate::FontAlign::right);
                         fmt::print("\n  Slots (no schema — pass owner table to decode tuples):\n");
-                        std::cout << t << "\n";
+                        print_small_table({"Slot", "Offset", "Length"}, table_rows, {true, true, true});
                     }
 
                     // Hex dump: 4 lines × 16 bytes with offset prefix
@@ -390,23 +428,20 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                         fmt::print("  IAM page {}\n", node["page_id"].get<int>());
 
                         if (node.contains("extents") && !node["extents"].empty()) {
-                            tabulate::Table t;
-                            t.add_row({"Extent", "Allocated Pages", "Reserved"});
+                            std::vector<std::vector<std::string>> table_rows;
                             for (const auto& ext : node["extents"]) {
                                 int eid        = ext.get<int>();
                                 int page_start = eid * EXTENT_SIZE;
                                 int page_end   = page_start + EXTENT_SIZE - 1;
                                 ++total_extents;
                                 total_data_pages += EXTENT_SIZE;
-                                t.add_row({
+                                table_rows.push_back({
                                     fmt::format("{}", eid),
                                     fmt::format("{} \u2013 {}", page_start, page_end),
                                     fmt::format("{} pages", EXTENT_SIZE)
                                 });
                             }
-                            apply_unicode_borders(t);
-                            t.column(0).format().font_align(tabulate::FontAlign::right);
-                            std::cout << t << "\n";
+                            print_small_table({"Extent", "Allocated Pages", "Reserved"}, table_rows, {true, false, false});
                         }
                     }
                     fmt::print("  Total: {} IAM page(s), {} extent(s), {} allocated data page(s)\n\n",
@@ -441,12 +476,6 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
             return;
         }
 
-        if (db_engine_->get_checkpoint_manager().should_checkpoint()) {
-            if (!db_engine_->get_checkpoint_manager().run_checkpoint()) {
-                fmt::print(stderr, "Warning: Checkpoint failed\n");
-            }
-        }
-
         if (!result.rows.empty() || !result.column_names.empty()) {
             if (!quiet) {
                 PrintResultTable(result.column_names, result.rows);
@@ -473,23 +502,34 @@ void LettyCli::PrintResultTable(const std::vector<std::string>& column_names,
                                  const std::vector<Tuple>& rows) {
     if (column_names.empty()) return;
 
-    tabulate::Table t;
-
-    tabulate::Table::Row_t header;
-    for (const auto& col : column_names)
-        header.push_back(col);
-    t.add_row(header);
-
-    for (const auto& row : rows) {
-        tabulate::Table::Row_t data_row;
-        for (size_t i = 0; i < column_names.size(); ++i)
-            data_row.push_back(i < row.size() ? val_to_str(row.get_value(i)) : "");
-        t.add_row(data_row);
+    const size_t num_cols = column_names.size();
+    std::vector<size_t> widths(num_cols, 0);
+    for (size_t c = 0; c < num_cols; ++c) {
+        widths[c] = column_names[c].size();
     }
 
-    t[0].format().font_style({tabulate::FontStyle::bold});
-    apply_unicode_borders(t);
-    std::cout << t << "\n";
+    const size_t sample_count = std::min<size_t>(rows.size(), 500);
+    for (size_t r = 0; r < sample_count; ++r) {
+        const auto& row = rows[r];
+        for (size_t c = 0; c < num_cols && c < row.size(); ++c) {
+            widths[c] = std::max(widths[c], val_to_str(row.get_value(c)).size());
+        }
+    }
+
+    print_box_border(widths, "┌", "┬", "┐");
+    print_box_row(column_names, widths);
+    print_box_border(widths, "├", "┼", "┤");
+
+    std::vector<std::string> cells(num_cols);
+    for (const auto& row : rows) {
+        for (size_t c = 0; c < num_cols; ++c) {
+            cells[c] = (c < row.size()) ? val_to_str(row.get_value(c)) : "";
+        }
+        print_box_row(cells, widths);
+    }
+
+    print_box_border(widths, "└", "┴", "┘");
+    std::fflush(stdout);
 }
 
 } // namespace letty

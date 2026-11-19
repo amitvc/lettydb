@@ -14,7 +14,7 @@ namespace letty {
   static constexpr char DB_SIGNATURE[] = "LETTYDB";
   static constexpr char WAL_SIGNATURE[] = "LETTYWAL";
   static constexpr size_t WAL_SIGNATURE_SIZE = 8;
-  static constexpr uint32_t DEFAULT_WAL_SEGMENT_SIZE = 10 * 1024 * 1024;
+  static constexpr uint32_t DEFAULT_WAL_SEGMENT_SIZE = 100 * 1024 * 1024;
   static constexpr uint32_t DEFAULT_WAL_FLUSH_INTERVAL_MS = 5;
 
   // Use a type alias for page IDs for clarity and future flexibility.

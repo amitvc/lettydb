@@ -259,7 +259,7 @@ bool BufferPoolManager::flush_all_pages() {
   }
 
   if (flushed_count > 0) {
-    LOG_BPM_INFO("Flushed {} dirty pages", flushed_count);
+    LOG_BPM_DEBUG("Flushed {} dirty pages", flushed_count);
   }
   if (failed_count > 0) {
     LOG_BPM_ERROR("Failed to flush {} dirty page(s)", failed_count);

@@ -26,6 +26,7 @@ std::optional<uint16_t> TableManager::insert_row(const std::string& table_name, 
 }
 
 std::optional<uint16_t> TableManager::insert_row(const TableMetadata& meta, const Tuple& tuple, uint64_t txn_id) {
+  std::lock_guard<std::mutex> table_lock(get_table_latch(meta.iam_page_id));
   Byte serialized_tuple[PAGE_SIZE];
   uint32_t data_size = tuple.serialize(meta.schema, serialized_tuple, PAGE_SIZE);
   if (data_size == 0) {
@@ -75,7 +76,7 @@ uint32_t TableManager::insert_rows(const std::string& table_name, const std::vec
 
   uint32_t inserted_cnt = 0;
   for (const Tuple& tuple : tuples) {
-    if (insert_row(meta->get().name, tuple, txn_id).has_value()) {
+    if (insert_row(meta->get(), tuple, txn_id).has_value()) {
       ++inserted_cnt;
     }
   }
@@ -99,6 +100,7 @@ bool TableManager::delete_row(const std::string& table_name, page_id_t page_id, 
 }
 
 bool TableManager::delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id, uint64_t txn_id) {
+  std::lock_guard<std::mutex> table_lock(get_table_latch(meta.iam_page_id));
   PageGuard guard = buffer_pool_.fetch_page_guard(page_id);
   if (!guard) {
     LOG_STORAGE_ERROR("Failed to fetch page {} for delete on table '{}'", page_id, meta.name);
@@ -259,7 +261,7 @@ void TableManager::survey_pages(page_id_t iam_head, const std::string& table_nam
 	iam_page_id = iam_page->next_page_id;
   }
 
-  LOG_STORAGE_INFO("Surveyed {} data pages for table '{}'", pages.size(), table_name);
+  LOG_STORAGE_DEBUG("Surveyed {} data pages for table '{}'", pages.size(), table_name);
 }
 
 int TableManager::migrate_tuples(std::vector<PageStats>& pages) {
@@ -366,7 +368,7 @@ page_id_t TableManager::acquire_page_for_insert(page_id_t iam_head, uint32_t nee
     throw DbException(DbErrorCode::Internal, "Failed to allocate extent for table");
   }
 
-  LOG_STORAGE_INFO("Materializing empty SlottedPages for new extent starting at page {} for table IAM page {}",
+  LOG_STORAGE_DEBUG("Materializing empty SlottedPages for new extent starting at page {} for table IAM page {}",
                    extent_start, iam_head);
   for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
     page_id_t new_page_id = extent_start + offset;

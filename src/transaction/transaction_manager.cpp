@@ -37,7 +37,7 @@ uint64_t TransactionManager::begin() {
   Transaction txn{txn_id, TransactionStatus::Active, begin_lsn, begin_lsn};
   transactions_.emplace(txn_id, txn);
 
-  LOG_TXN_INFO("Transaction {} started with LSN {}", txn_id, begin_lsn);
+  LOG_TXN_DEBUG("Transaction {} started with LSN {}", txn_id, begin_lsn);
   return txn_id;
 }
 
@@ -79,7 +79,7 @@ bool TransactionManager::commit(uint64_t txn_id) {
 
   transactions_.erase(it);
 
-  LOG_TXN_INFO("Transaction {} committed at LSN {}", txn_id, commit_lsn);
+  LOG_TXN_DEBUG("Transaction {} committed at LSN {}", txn_id, commit_lsn);
   return true;
 }
 
@@ -127,7 +127,7 @@ bool TransactionManager::abort(uint64_t txn_id) {
 
   transactions_.erase(it);
 
-  LOG_TXN_INFO("Transaction {} aborted at LSN {}", txn_id, abort_lsn);
+  LOG_TXN_DEBUG("Transaction {} aborted at LSN {}", txn_id, abort_lsn);
   return true;
 }
 

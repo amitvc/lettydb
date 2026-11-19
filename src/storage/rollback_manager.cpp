@@ -93,6 +93,9 @@ bool RollbackManager::undo_record(txn_id tran_id, const LogRecord& record, lsn_t
   // the page undone but its page_lsn still pointing at the original
   // (now-undone) record, which a later redo pass would re-apply.
   PageGuard page_guard = bpm_.fetch_page_guard(clr.page_id);
+  if (!page_guard) {
+    page_guard = bpm_.allocate_page_guard(clr.page_id);
+  }
   Page* page = page_guard.get_page();
   if (!page) {
     LOG_RECOVERY_MGR_ERROR("Undo could not fetch page {} for txn {}", clr.page_id, tran_id);
@@ -128,12 +131,16 @@ void RollbackManager::rollback_transaction(txn_id tran_id, lsn_t last_lsn) {
 
 int RollbackManager::undo_transactions(const std::unordered_map<txn_id, lsn_t>& active_transactions) {
   if (active_transactions.empty()) {
+    LOG_RECOVERY_MGR_INFO("Skipping Undo phase: no loser transactions in ATT");
     return 0;
   }
 
+  LOG_RECOVERY_MGR_INFO("Starting Undo phase for {} loser transaction(s)", active_transactions.size());
   std::unordered_map<txn_id, lsn_t> next_lsn_to_undo = active_transactions;
   std::unordered_map<txn_id, lsn_t> last_written_lsn = active_transactions;
   int pages_undone = 0;
+  int clrs_skipped = 0;
+  int txns_resolved = 0;
 
   while (!next_lsn_to_undo.empty()) {
     txn_id current_txn = INVALID_TXN_ID;
@@ -156,6 +163,8 @@ int RollbackManager::undo_transactions(const std::unordered_map<txn_id, lsn_t>& 
     if (record.header.type == LogRecordType::BEGIN) {
       write_end_record(current_txn, last_written_lsn[current_txn]);
       next_lsn_to_undo.erase(current_txn);
+      txns_resolved++;
+      LOG_RECOVERY_MGR_INFO("Undo completed rollback of txn {} at BEGIN LSN {}", current_txn, current_lsn);
       continue;
     }
 
@@ -164,6 +173,9 @@ int RollbackManager::undo_transactions(const std::unordered_map<txn_id, lsn_t>& 
     if (record.header.type == LogRecordType::COMPENSATION) {
       CompensationPatch clr_patch{};
       if (deserialize_compensation_patch(record.payload, clr_patch)) {
+        clrs_skipped++;
+        LOG_RECOVERY_MGR_DEBUG("Undo skipping CLR at LSN {} for txn {} -> jumping to undo_next_lsn {}",
+                               current_lsn, current_txn, clr_patch.undo_next_lsn);
         next_lsn_to_undo[current_txn] = clr_patch.undo_next_lsn;
       } else {
         LOG_RECOVERY_MGR_ERROR("Failed to deserialize COMPENSATION patch during undo_transactions");
@@ -181,6 +193,9 @@ int RollbackManager::undo_transactions(const std::unordered_map<txn_id, lsn_t>& 
     next_lsn_to_undo[current_txn] = record.header.prev_lsn;
   }
 
+  LOG_RECOVERY_MGR_INFO(
+      "Undo phase complete: reversed={} updates, skipped_clrs={}, resolved_txns={}",
+      pages_undone, clrs_skipped, txns_resolved);
   return pages_undone;
 }
 

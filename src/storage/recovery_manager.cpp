@@ -10,6 +10,7 @@
 #include "storage/log_record.h"
 #include "storage/log_apply.h"
 #include "storage/rollback_manager.h"
+#include "storage/slotted_page.h"
 #include "common/logger.h"
 
 
@@ -70,6 +71,8 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
   }
 
   result.scan_start_lsn = scan_start_lsn;
+  LOG_RECOVERY_MGR_INFO("Starting ARIES Analysis from LSN {} (checkpoint_lsn={})",
+                        scan_start_lsn, checkpoint_lsn);
 
   if (checkpoint_lsn != INVALID_LSN) {
 	bool is_checkpoint = false;
@@ -88,6 +91,9 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
 		  record.header.type == LogRecordType::END_CHECKPOINT) {
 		assert(record.header.tran_id == INVALID_TXN_ID);
 		apply_checkpoint_snapshot(record, result.active_transactions, result.dirty_page_table);
+		LOG_RECOVERY_MGR_INFO(
+		    "Applied END_CHECKPOINT snapshot at LSN {}: seeded DPT={} pages, ATT={} active txns",
+		    record.header.lsn, result.dirty_page_table.size(), result.active_transactions.size());
 		break;
 	  }
 	}
@@ -105,8 +111,18 @@ AnalysisResult RecoveryManager::analyze_from(lsn_t checkpoint_lsn) {
 	}
   }
   result.min_rec_lsn = min_rec_lsn;
-  redo(result);
-  rollback_manager_.undo_transactions(result.active_transactions);
+  LOG_RECOVERY_MGR_INFO(
+      "Analysis scan finished: scanned={} records (LSN {} -> {}), min_rec_lsn={}, DPT={} pages, ATT={} loser txns",
+      records.size(), scan_start_lsn, result.last_log_lsn, result.min_rec_lsn,
+      result.dirty_page_table.size(), result.active_transactions.size());
+  result.records_redone = redo(result);
+  result.records_undone = rollback_manager_.undo_transactions(result.active_transactions);
+  LOG_RECOVERY_MGR_INFO(
+      "Recovery complete: DPT={} dirty pages, ATT={} loser txns, redone={} records, undone={} records",
+      result.dirty_page_table.size(),
+      result.active_transactions.size(),
+      result.records_redone,
+      result.records_undone);
   return result;
 }
 
@@ -240,7 +256,31 @@ page_id_t RecoveryManager::extract_page_id(const LogRecord& record) const {
   return INVALID_PAGE_ID;
 }
 
-bool RecoveryManager::redo_record(const LogRecord& record, Page* page) const {
+void RecoveryManager::materialize_data_extent(uint32_t extent_id) {
+  page_id_t extent_start = static_cast<page_id_t>(extent_id * EXTENT_SIZE);
+  page_id_t file_pages = bpm_.get_file_size_in_pages();
+  for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
+    page_id_t data_page_id = extent_start + offset;
+    if (data_page_id >= file_pages) {
+      PageGuard data_guard = bpm_.allocate_page_guard(data_page_id);
+      if (data_guard) {
+        SlottedPage::init(reinterpret_cast<Byte*>(data_guard.get_data()));
+        data_guard.mark_dirty();
+      }
+      continue;
+    }
+    PageGuard data_guard = bpm_.fetch_page_guard(data_page_id);
+    if (!data_guard) {
+      data_guard = bpm_.allocate_page_guard(data_page_id);
+      if (data_guard) {
+        SlottedPage::init(reinterpret_cast<Byte*>(data_guard.get_data()));
+        data_guard.mark_dirty();
+      }
+    }
+  }
+}
+
+bool RecoveryManager::redo_record(const LogRecord& record, Page* page) {
   switch (record.header.type) {
     case LogRecordType::PAGE_UPDATE: {
       PagePatch patch{};
@@ -275,8 +315,14 @@ bool RecoveryManager::redo_record(const LogRecord& record, Page* page) const {
         LOG_RECOVERY_MGR_ERROR("Failed to deserialize IAM patch");
         return false;
       }
-      return apply_iam_extent(page, patch.extent_id,
-                              record.header.type == LogRecordType::IAM_ADD_EXTENT);
+      bool is_add = (record.header.type == LogRecordType::IAM_ADD_EXTENT);
+      if (!apply_iam_extent(page, patch.extent_id, is_add)) {
+        return false;
+      }
+      if (is_add) {
+        materialize_data_extent(patch.extent_id);
+      }
+      return true;
     }
     default:
       return false;
@@ -285,13 +331,15 @@ bool RecoveryManager::redo_record(const LogRecord& record, Page* page) const {
 
 int RecoveryManager::redo(const AnalysisResult &analysis) {
   if (analysis.min_rec_lsn == INVALID_LSN) {
-	LOG_RECOVERY_MGR_WARN("Can't continue the redo phase since min_rec_lsn is invalid");
+	LOG_RECOVERY_MGR_INFO("Skipping Redo phase: min_rec_lsn is INVALID_LSN (no dirty pages)");
 	return 0;
   }
 
-
   std::vector<LogRecord> records = log_manager_.read_records_from(analysis.min_rec_lsn);
   int pages_redone = 0;
+  int skipped_not_in_dpt = 0;
+  int skipped_up_to_date = 0;
+  int materialized_pages = 0;
 
   for (const auto &record : records) {
     page_id_t page_id = extract_page_id(record);
@@ -299,20 +347,36 @@ int RecoveryManager::redo(const AnalysisResult &analysis) {
       continue;
     }
 
-    if (analysis.dirty_page_table.find(page_id) == analysis.dirty_page_table.end()) {
+    auto dpt_it = analysis.dirty_page_table.find(page_id);
+    if (dpt_it == analysis.dirty_page_table.end() || record.header.lsn < dpt_it->second) {
+      skipped_not_in_dpt++;
+      LOG_RECOVERY_MGR_DEBUG("Redo skipping LSN {} for page {}: not dirty at this LSN",
+                             record.header.lsn, page_id);
       continue;
     }
 
-    PageGuard page_guard = bpm_.fetch_page_guard(page_id);
+    bool beyond_eof = (page_id >= bpm_.get_file_size_in_pages());
+    PageGuard page_guard = beyond_eof
+                               ? bpm_.allocate_page_guard(page_id)
+                               : bpm_.fetch_page_guard(page_id);
+    if (!page_guard) {
+      page_guard = bpm_.allocate_page_guard(page_id);
+      beyond_eof = true;
+    }
     Page* page = page_guard.get_page();
     if (!page) {
-	  // TODO log warning here
+      LOG_RECOVERY_MGR_WARN("Redo could not fetch or allocate page {}", page_id);
       continue;
+    }
+    if (beyond_eof) {
+      materialized_pages++;
     }
 
 	// If the page's LSN is greater than log records lsn then this log record has already been proceesed. Nothing to do here.
     if (page->get_page_lsn() >= record.header.lsn) {
-	  // TODO log info here
+      skipped_up_to_date++;
+      LOG_RECOVERY_MGR_DEBUG("Skipping page {} because page_lsn {} >= record_lsn {}",
+                             page_id, page->get_page_lsn(), record.header.lsn);
       continue;
     }
 
@@ -325,6 +389,10 @@ int RecoveryManager::redo(const AnalysisResult &analysis) {
     pages_redone++;
   }
 
+  LOG_RECOVERY_MGR_INFO(
+      "Redo phase complete: scanned={} records from min_rec_lsn={}, applied={}, skipped_already_on_disk={}, skipped_clean_dpt={}, materialized_new_pages={}",
+      records.size(), analysis.min_rec_lsn, pages_redone, skipped_up_to_date,
+      skipped_not_in_dpt, materialized_pages);
   return pages_redone;
 }
 
