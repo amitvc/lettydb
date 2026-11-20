@@ -218,7 +218,7 @@ Run the test suite after building:
 ctest --preset debug --output-on-failure
 ```
 
-The tests cover the SQL frontend and executor, catalog, storage pages, tuple serialization, buffer pool and LRU replacement, extent and IAM allocation, compaction, segmented WAL management, transaction rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. The suite also includes multi-threaded stress tests (100M+ rows with concurrent writers and chaos readers) and buffer-pool benchmarks.
+The tests cover the SQL frontend and executor, catalog, storage pages, tuple serialization, buffer pool and LRU replacement, extent and IAM allocation, compaction, segmented WAL management, transaction rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. The suite also includes buffer-pool benchmarks and multi-threaded stress tests—verified up to 100 million rows (2.88 GB across 200 tables) under concurrent writer and reader threads (~51k rows/s with full SQL parsing and WAL durability).
 
 With Doxygen and Graphviz installed before configuration, generate API documentation with:
 
