@@ -11,12 +11,12 @@
 
 namespace letty {
 
-static_assert(sizeof(SlottedPageHeader) == 20,
-              "SlottedPageHeader must be exactly 20 bytes on disk");
+static_assert(sizeof(SlotDirectoryHeader) == 4,
+              "SlotDirectoryHeader must be exactly 4 bytes on disk");
 static_assert(sizeof(Slot) == 4, "Slot must be exactly 4 bytes on disk");
 
 SlottedPage SlottedPage::from_page(Page* page) {
-  return SlottedPage(reinterpret_cast<Byte*>(page->get_data()));
+  return SlottedPage(reinterpret_cast<Byte*>(page->get_body()));
 }
 
 SlottedPage::SlottedPage(Byte* buffer)
@@ -25,14 +25,11 @@ SlottedPage::SlottedPage(Byte* buffer)
 }
 
 SlottedPage SlottedPage::init(Byte* buffer) {
-  std::memset(buffer, 0, PAGE_SIZE);
+  std::memset(buffer, 0, PAGE_BODY_SIZE);
 
-  SlottedPageHeader header{};
-  header.free_space_pointer = PAGE_SIZE;
+  SlotDirectoryHeader header{};
+  header.free_space_pointer = PAGE_BODY_SIZE;
   header.num_slots = 0;
-  header.next_page_id = INVALID_PAGE_ID;
-  header.prev_page_id = INVALID_PAGE_ID;
-
   store_header_to_bytes(buffer, header);
   return SlottedPage(buffer);
 }
@@ -42,11 +39,11 @@ void SlottedPage::store_header() {
 }
 
 size_t SlottedPage::slot_data_offset(uint16_t slot_id) {
-  return sizeof(SlottedPageHeader) + (slot_id * sizeof(Slot));
+  return sizeof(SlotDirectoryHeader) + (slot_id * sizeof(Slot));
 }
 
 size_t SlottedPage::get_free_space() const {
-  size_t headers_size = sizeof(SlottedPageHeader) + (header_.num_slots * sizeof(Slot));
+  size_t headers_size = sizeof(SlotDirectoryHeader) + (header_.num_slots * sizeof(Slot));
   if (headers_size > header_.free_space_pointer) {
     return 0;
   }
@@ -102,14 +99,15 @@ bool SlottedPage::compact() {
     }
   }
 
-  SlottedPage::init(data_);
-  SlottedPage fresh(data_);
+  std::memset(data_, 0, PAGE_BODY_SIZE);
+  header_.num_slots = 0;
+  header_.free_space_pointer = PAGE_BODY_SIZE;
+  store_header();
 
   for (const auto& t : live_tuples) {
-    fresh.insert_tuple(t.data(), static_cast<uint32_t>(t.size()));
+    insert_tuple(t.data(), static_cast<uint32_t>(t.size()));
   }
 
-  header_ = fresh.header_;
   return true;
 }
 
@@ -160,7 +158,7 @@ const Byte* SlottedPage::get_tuple(uint16_t slot_id, uint32_t* size) const {
     return nullptr;
   }
 
-  assert(slot->offset + slot->length <= PAGE_SIZE);
+  assert(slot->offset + slot->length <= PAGE_BODY_SIZE);
 
   if (size) *size = slot->length;
   return data_ + slot->offset;
@@ -186,11 +184,6 @@ bool SlottedPage::delete_tuple(uint16_t slot_id) {
   return true;
 }
 
-void SlottedPage::set_page_lsn(lsn_t lsn) {
-  header_.page_lsn = lsn;
-  store_header();
-}
-
 void SlottedPage::repack_tuples_preserving_slots(uint16_t excluded_slot_id) {
   std::vector< std::pair<uint16_t, std::vector<Byte>> > live_slots;
   for (uint16_t i = 0; i < header_.num_slots; ++i) {
@@ -205,7 +198,7 @@ void SlottedPage::repack_tuples_preserving_slots(uint16_t excluded_slot_id) {
     }
   }
 
-  header_.free_space_pointer = PAGE_SIZE;
+  header_.free_space_pointer = PAGE_BODY_SIZE;
   for (const auto& entry : live_slots) {
     uint16_t slot_idx = entry.first;
     const std::vector<Byte>& tuple_bytes = entry.second;
@@ -218,9 +211,7 @@ void SlottedPage::repack_tuples_preserving_slots(uint16_t excluded_slot_id) {
 
 bool SlottedPage::apply_slot_payload(uint16_t slot_id, const Byte* tuple_data, uint32_t tuple_size) {
   if (header_.free_space_pointer == 0 && header_.num_slots == 0) {
-    header_.free_space_pointer = PAGE_SIZE;
-    header_.next_page_id = INVALID_PAGE_ID;
-    header_.prev_page_id = INVALID_PAGE_ID;
+    header_.free_space_pointer = PAGE_BODY_SIZE;
   }
 
   if (tuple_size == 0) {
@@ -235,7 +226,7 @@ bool SlottedPage::apply_slot_payload(uint16_t slot_id, const Byte* tuple_data, u
   }
 
   uint16_t required_slots = (slot_id >= header_.num_slots) ? static_cast<uint16_t>(slot_id + 1) : header_.num_slots;
-  size_t required_header_bytes = sizeof(SlottedPageHeader) + (required_slots * sizeof(Slot));
+  size_t required_header_bytes = sizeof(SlotDirectoryHeader) + (required_slots * sizeof(Slot));
 
   if (required_header_bytes + tuple_size > header_.free_space_pointer) {
     repack_tuples_preserving_slots(slot_id);

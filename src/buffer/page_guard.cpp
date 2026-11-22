@@ -66,6 +66,16 @@ const char* PageGuard::get_data() const {
   return page_->get_data();
 }
 
+char* PageGuard::get_body() {
+  assert(page_ != nullptr);
+  return page_->get_body();
+}
+
+const char* PageGuard::get_body() const {
+  assert(page_ != nullptr);
+  return page_->get_body();
+}
+
 void PageGuard::mark_dirty() {
   is_dirty_ = true;
 }

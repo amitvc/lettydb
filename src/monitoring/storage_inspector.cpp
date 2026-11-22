@@ -334,7 +334,7 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
     j["hex"] = bytes_to_hex(raw_guard.get_data(), PAGE_SIZE);
     
     // Attempt to decode structure based on what it handles.
-    auto slotted_page_hdr = load_page_layout<SlottedPageHeader>(raw_guard);
+    auto slotted_page_hdr = load_page_layout<SlotDirectoryHeader>(raw_guard);
     
     bool looks_like_slotted = (slotted_page_hdr.num_slots < 4096 && slotted_page_hdr.free_space_pointer <= PAGE_SIZE);
     
@@ -369,7 +369,7 @@ std::string StorageInspector::get_page_detail(page_id_t page_id, const std::stri
         }
         
         for(uint16_t i=0; i<slotted_page_hdr.num_slots; ++i) {
-             size_t slot_offset = sizeof(SlottedPageHeader) + (i * sizeof(Slot));
+             size_t slot_offset = sizeof(SlotDirectoryHeader) + (i * sizeof(Slot));
              if (slot_offset + sizeof(Slot) <= PAGE_SIZE) {
                  auto slot = load_page_layout<Slot>(raw_guard, slot_offset);
                  slots.push_back({

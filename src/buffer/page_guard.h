@@ -69,6 +69,12 @@ class PageGuard {
   /** @brief Returns a read-only pointer to the 4 KB page buffer. */
   const char* get_data() const;
 
+  /** @brief Returns a mutable pointer to the page body (after PageHeader). */
+  char* get_body();
+
+  /** @brief Returns a read-only pointer to the page body (after PageHeader). */
+  const char* get_body() const;
+
   /** @brief Marks the guard as dirty so `unpin_page(page_id, true)` is called on release. */
   void mark_dirty();
 
