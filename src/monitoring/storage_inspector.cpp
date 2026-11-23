@@ -170,7 +170,7 @@ std::string StorageInspector::get_page_map() {
     page_id_t sys_cols_iam = INVALID_PAGE_ID;
 
     {
-        PageGuard db_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+        PageGuard db_header_guard = buffer_pool_.fetch_page_guard(DATABASE_HEADER_PAGE_ID);
         if (db_header_guard) {
             auto db_header_page = load_page_layout<DatabaseHeader>(db_header_guard);
             sys_tables_iam = db_header_page.sys_tables_iam_page;

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "config.h"
+#include "storage_def.h"
 
 namespace letty {
 
@@ -15,10 +16,8 @@ namespace letty {
 enum class LogRecordType : uint16_t {
   BEGIN,
   PAGE_UPDATE,
-  ALLOCATE_EXTENT,
-  DEALLOCATE_EXTENT,
-  IAM_ADD_EXTENT,
-  IAM_REMOVE_EXTENT,
+  DB_METADATA_UPDATE,
+  PAGE_HEADER_UPDATE,
   COMMIT,
   ABORT,
   COMPENSATION,
@@ -83,26 +82,26 @@ static constexpr auto PAGE_PATCH_HEADER_SIZE = 10; // page_id + offset + before_
 
 /**
  * @enum CompensationKind
- * @brief What a CLR restores. BytePatch is a slotted-page byte image; the rest
- * are logical inverses re-applied against the current page at redo time, so
- * they compose even when transactions interleave on the same GAM/IAM page.
+ * @brief Identifies how a CLR's payload restores a page during undo/redo.
+ *
+ * - BytePatch: restores slotted-page tuple bytes at `offset` (slot id).
+ * - DbMetadataRestore: restores mutable DatabaseMetadata fields on Page 0.
+ * - PageHeaderRestore: restores mutable PageHeader fields (preserving page_lsn).
  */
 enum class CompensationKind : uint8_t {
-  BytePatch,        // restore `payload` bytes at `offset` (slotted page undo)
-  GamSetBit,        // set bit `param` in GAM page   (undo of DEALLOCATE_EXTENT)
-  GamClearBit,      // clear bit `param` in GAM page (undo of ALLOCATE_EXTENT)
-  IamAddExtent,     // add extent `param` to IAM page      (undo of IAM_REMOVE_EXTENT)
-  IamRemoveExtent,  // remove extent `param` from IAM page (undo of IAM_ADD_EXTENT)
+  BytePatch,
+  DbMetadataRestore,
+  PageHeaderRestore
 };
 
 /**
  * @struct CompensationPatch
  * @brief Builder input for a COMPENSATION record. Logs undoing one update.
  *
- * kind selects the restoration: BytePatch applies payload bytes at offset;
- * the logical kinds re-apply an inverse op (set/clear a GAM bit, add/remove an
- * IAM extent) identified by param. A CLR is redo-only and never gets undone
- * itself, which keeps rollback from recursing and guarantees it terminates.
+ * `kind` selects how `payload` is applied to `page_id` (slotted-page slot
+ * restoration via BytePatch, Page 0 metadata via DbMetadataRestore, or page
+ * header fields via PageHeaderRestore). A CLR is redo-only and never gets
+ * undone itself, which keeps rollback from recursing and guarantees it terminates.
  *
  * undo_next_lsn is the important field. It's the prev_lsn of the record
  * being compensated for, i.e. where undo_transactions picks up next. If we crash
@@ -115,34 +114,12 @@ enum class CompensationKind : uint8_t {
 struct CompensationPatch {
   page_id_t page_id;
   CompensationKind kind = CompensationKind::BytePatch;
-  uint16_t offset = 0;          // BytePatch only
-  uint32_t param = 0;           // bit_index (GAM) or extent_id (IAM) for logical kinds
+  uint16_t offset = 0;          // BytePatch only (slot id)
   lsn_t undo_next_lsn;          // CRITICAL: next log record to undo (copied from target's PrevLSN)
-  ByteBuffer payload;           // BytePatch only
+  ByteBuffer payload;           // BytePatch, DbMetadataRestore, or PageHeaderRestore
 };
 
-static constexpr auto COMPENSATION_PATCH_HEADER_SIZE = 21; // page_id(4) + kind(1) + offset(2) + param(4) + undo_next_lsn(8) + payload_size(2)
-
-
-/**
- * @brief
- * LogRecord to capture changes done to an GAM page
- */
-struct GamPatch {
-  page_id_t gam_page_id;
-  uint16_t bit_index;
-};
-static constexpr auto EXTENT_PATCH_SIZE = 6; // page_id_t + uint16_t
-
-/**
- * @brief
- * LogRecord to capture changes done to an IAM page
- */
-struct IamPatch {
-  page_id_t iam_page_id;
-  uint32_t extent_id;
-};
-static constexpr auto IAM_PATCH_SIZE = 8; // page_id_t + uint32_t
+static constexpr auto COMPENSATION_PATCH_HEADER_SIZE = 17; // page_id(4) + kind(1) + offset(2) + undo_next_lsn(8) + payload_size(2)
 
 /**
  * @struct CheckpointPatch
@@ -165,6 +142,34 @@ struct CheckpointPatch {
 static constexpr auto CHECKPOINT_PATCH_HEADER_SIZE = 8; // dirty_pages_count + active_txns_count
 static constexpr auto DIRTY_PAGE_ENTRY_SIZE = 12;  // page_id_t + lsn_t
 static constexpr auto ACTIVE_TXN_ENTRY_SIZE = 16;  // txn_id + lsn_t
+
+static constexpr auto DB_METADATA_STATE_SIZE = 12; // free_head(4) + page_count(4) + table_count(2) + next_table_id(2)
+
+/**
+ * @struct DbMetadataPatch
+ * @brief LogRecord payload representing changes in DatabaseMetadata (Page 0).
+ */
+struct DbMetadataPatch {
+  DbMetadataState before;
+  DbMetadataState after;
+};
+static constexpr auto DB_METADATA_PATCH_SIZE = DB_METADATA_STATE_SIZE * 2; // 24 bytes
+
+/**
+ * @struct PageHeaderPatch
+ * @brief LogRecord payload representing changes to a page's PageHeader.
+ *
+ * Captures mutable fields of PageHeader (next_page_id, prev_page_id, table_id,
+ * page_type, status) before and after mutation. page_lsn is managed by ARIES
+ * redo/undo and is not serialized in this patch.
+ */
+struct PageHeaderPatch {
+  page_id_t page_id;
+  PageHeader before;
+  PageHeader after;
+};
+static constexpr auto PAGE_HEADER_MUTABLE_SIZE = 12; // next(4) + prev(4) + table_id(2) + type(1) + status(1)
+static constexpr auto PAGE_HEADER_PATCH_SIZE = 4 + (PAGE_HEADER_MUTABLE_SIZE * 2); // page_id(4) + before(12) + after(12) = 28 bytes
 
 /**
  * @struct CheckpointMarker
@@ -195,32 +200,27 @@ static constexpr const char CHECKPOINT_MARKER_SIGNATURE[] = "CHECK_POINT_MARKER"
 
 bool serialize_page_patch(const PagePatch &payload, ByteBuffer &out);
 bool deserialize_page_patch(const ByteBuffer &bytes, PagePatch &out);
-bool serialize_extent_patch(const GamPatch &payload, ByteBuffer &out);
-bool deserialize_extent_patch(const ByteBuffer &bytes, GamPatch &out);
-bool serialize_iam_patch(const IamPatch &payload, ByteBuffer &out);
-bool deserialize_iam_patch(const ByteBuffer &bytes, IamPatch &out);
-
+bool serialize_db_metadata_state(const DbMetadataState &state, ByteBuffer &out, size_t offset = 0);
+bool deserialize_db_metadata_state(const ByteBuffer &bytes, DbMetadataState &out, size_t offset = 0);
+bool serialize_db_metadata_patch(const DbMetadataPatch &patch, ByteBuffer &out);
+bool deserialize_db_metadata_patch(const ByteBuffer &bytes, DbMetadataPatch &out);
+bool serialize_page_header(const PageHeader &header, ByteBuffer &out, size_t offset = 0);
+bool deserialize_page_header(const ByteBuffer &bytes, PageHeader &out, size_t offset = 0);
+bool serialize_page_header_patch(const PageHeaderPatch &patch, ByteBuffer &out);
+bool deserialize_page_header_patch(const ByteBuffer &bytes, PageHeaderPatch &out);
 bool serialize_compensation_patch(const CompensationPatch &compensation_patch, ByteBuffer &out);
 bool deserialize_compensation_patch(const ByteBuffer &bytes, CompensationPatch& compensation_patch);
 bool serialize_checkpoint_patch(const CheckpointPatch &patch, ByteBuffer &out);
 bool deserialize_checkpoint_patch(const ByteBuffer &bytes, CheckpointPatch &out);
 
-/**
- * @brief Serializes a CheckpointMarker to a 20-byte buffer with CRC32 checksum.
- */
 bool serialize_checkpoint_marker(const CheckpointMarker &marker, ByteBuffer &out);
 
-/**
- * @brief Deserializes a 20-byte buffer into a CheckpointMarker, verifying CRC32.
- * @return true if checksum is valid, false otherwise (marker not modified).
- */
 bool deserialize_checkpoint_marker(const ByteBuffer &bytes, CheckpointMarker &out);
 bool serialize_log_record(const LogRecord &record, ByteBuffer &out);
 bool deserialize_log_record(const ByteBuffer &bytes, LogRecord &out);
 bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &out);
+bool build_db_metadata_record(txn_id tran_id, const DbMetadataPatch &patch, LogRecord &out);
+bool build_page_header_record(txn_id tran_id, const PageHeaderPatch &patch, LogRecord &out);
 bool build_compensation_patch_record(txn_id tran_id, const CompensationPatch &patch, LogRecord &out);
 bool build_transaction_record(LogRecordType type, txn_id tran_id, LogRecord &out);
-
-bool build_extent_record(LogRecordType type, txn_id tran_id, const GamPatch &patch, LogRecord &out);
-bool build_iam_extent_record(LogRecordType type, txn_id tran_id, const IamPatch &patch, LogRecord &out);
 }

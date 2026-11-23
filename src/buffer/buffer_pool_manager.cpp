@@ -21,6 +21,7 @@ BufferPoolManager::BufferPoolManager(IDiskManager& disk_manager, size_t pool_siz
 	throw std::invalid_argument("PageReplacer cannot be null");
   }
 
+  // Align frames to PAGE_SIZE boundaries for cache-line alignment and future Direct I/O (O_DIRECT/F_NOCACHE) compatibility.
   page_data_buffer_ = static_cast<char*>(std::aligned_alloc(PAGE_SIZE, pool_size_ * PAGE_SIZE));
   LOG_BPM_DEBUG("Allocating {} bytes of memory to load disk pages into the RAM", (pool_size_ * PAGE_SIZE));
   if (page_data_buffer_ == nullptr) {
@@ -218,6 +219,25 @@ bool BufferPoolManager::flush_page_internal(Page& page) {
   dirty_page_table_.erase(page.get_page_id());
   ++flushes_;
   return true;
+}
+
+void BufferPoolManager::mark_page_dirty(page_id_t page_id) {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    pages_[it->second].set_dirty(true);
+  }
+}
+
+bool BufferPoolManager::is_page_dirty(page_id_t page_id) const {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    return false;
+  }
+  return pages_[it->second].is_dirty();
 }
 
 void BufferPoolManager::force_flush() {

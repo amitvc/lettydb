@@ -267,7 +267,7 @@ template <> inline DatabaseMetadata load_page_body<DatabaseMetadata>(Page* page)
   value.next_table_id = read_le16(cursor);
   cursor += sizeof(uint16_t);
 
-  value.total_pages = read_le32(cursor);
+  value.page_count = read_le32(cursor);
   cursor += sizeof(uint32_t);
 
   value.free_page_list_head_page = static_cast<page_id_t>(read_le32(cursor));
@@ -299,7 +299,7 @@ template <> inline void store_page_body<DatabaseMetadata>(Page* page, const Data
   write_le16(cursor, value.next_table_id);
   cursor += sizeof(uint16_t);
 
-  write_le32(cursor, value.total_pages);
+  write_le32(cursor, value.page_count);
   cursor += sizeof(uint32_t);
 
   write_le32(cursor, static_cast<uint32_t>(value.free_page_list_head_page));

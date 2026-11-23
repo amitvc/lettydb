@@ -66,7 +66,7 @@ TEST_F(ExtentManagerTest, TestInitialization) {
 
   // Check if Header page is initialized correctly
   char header_buffer[PAGE_SIZE];
-  disk_manager->read_page(HEADER_PAGE_ID, header_buffer);
+  disk_manager->read_page(DATABASE_HEADER_PAGE_ID, header_buffer);
   DatabaseHeader header{};
   std::memcpy(&header, header_buffer, sizeof(DatabaseHeader));
   EXPECT_EQ(std::string(header.signature), DB_SIGNATURE);

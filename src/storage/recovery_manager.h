@@ -23,14 +23,16 @@ struct patch_traits<PagePatch> {
   static page_id_t get_page_id(const PagePatch& p) { return p.page_id; }
 };
 
-template <>
-struct patch_traits<GamPatch> {
-  static page_id_t get_page_id(const GamPatch& p) { return p.gam_page_id; }
+template <> struct patch_traits<DbMetadataPatch> {
+  static page_id_t get_page_id(const DbMetadataPatch& p) {
+	return DATABASE_HEADER_PAGE_ID; // Database header page is always page = 0.
+  }
 };
 
-template <>
-struct patch_traits<IamPatch> {
-  static page_id_t get_page_id(const IamPatch& p) { return p.iam_page_id; }
+template <> struct patch_traits<PageHeaderPatch> {
+  static page_id_t get_page_id(const PageHeaderPatch& p) {
+	return p.page_id;
+  }
 };
 
 template <>
@@ -113,7 +115,6 @@ class RecoveryManager {
                       Deserializer deserializer);
 
   page_id_t extract_page_id(const LogRecord& record) const;
-  void materialize_data_extent(uint32_t extent_id);
   bool redo_record(const LogRecord& record, Page* page);
   int redo(const AnalysisResult& analysis);
 };

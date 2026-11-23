@@ -8,7 +8,7 @@ namespace letty {
 constexpr uint32_t SYS_TABLES_TABLE_OID = 1;
 constexpr uint32_t SYS_COLUMNS_TABLE_OID = 2;
 
-constexpr  uint32_t SYS_TABLES_COLUMN_COUNT = 4;
+constexpr uint32_t SYS_TABLES_COLUMN_COUNT = 6;
 constexpr  uint32_t SYS_COLUMNS_COLUMN_COUNT = 5;
 
 constexpr const char* SYS_TABLES_NAME = "sys_tables";

@@ -291,34 +291,41 @@ namespace letty {
     EXPECT_FALSE(serialize_log_record(bad, bytes));
   }
 
-  TEST(LogRecordTest, SerializeGamPatch) {
-	GamPatch original{};
-	original.gam_page_id = 20;
-	original.bit_index = 100;
+
+  TEST(LogRecordTest, SerializeDbMetadataPatch) {
+
+
+	DbMetadataState before_st;
+	DbMetadataState after_st;
+	before_st.page_count = 10;
+	before_st.free_page_list_head_page = 100;
+	before_st.next_table_id = 1;
+	before_st.table_count = 1;
+
+  	after_st.page_count = 11;
+  	after_st.free_page_list_head_page = 102;
+  	after_st.next_table_id = 2;
+  	after_st.table_count = 3;
+
+  	DbMetadataPatch original {before_st, after_st};
 
 	std::vector<Byte> bytes;
-	ASSERT_TRUE(serialize_extent_patch(original, bytes));
+	ASSERT_TRUE(serialize_db_metadata_patch(original, bytes));
 
-  	GamPatch decoded{};
-	ASSERT_TRUE(deserialize_extent_patch(bytes, decoded));
+  	EXPECT_EQ(bytes.size(), sizeof(DbMetadataPatch));
 
-	EXPECT_EQ(decoded.gam_page_id, original.gam_page_id);
-	EXPECT_EQ(decoded.bit_index, original.bit_index);
-  }
+  	DbMetadataPatch decoded{};
+	ASSERT_TRUE(deserialize_db_metadata_patch(bytes, decoded));
 
-  TEST(LogRecordTest, SerializeIamPatch) {
-	IamPatch original{};
-	original.iam_page_id = 20;
-	original.extent_id = 1024;
-
-	std::vector<Byte> bytes;
-	ASSERT_TRUE(serialize_iam_patch(original, bytes));
-
-  	IamPatch decoded{};
-	ASSERT_TRUE(deserialize_iam_patch(bytes, decoded));
-
-	EXPECT_EQ(decoded.iam_page_id, original.iam_page_id);
-	EXPECT_EQ(decoded.extent_id, original.extent_id);
+	EXPECT_EQ(decoded.after.table_count, original.after.table_count);
+  	EXPECT_EQ(decoded.after.next_table_id, original.after.next_table_id);
+  	EXPECT_EQ(decoded.after.free_page_list_head_page, original.after.free_page_list_head_page);
+  	EXPECT_EQ(decoded.after.page_count, original.after.page_count);
+	EXPECT_EQ(decoded.before.table_count, original.before.table_count);
+	EXPECT_EQ(decoded.before.next_table_id, original.before.next_table_id);
+	EXPECT_EQ(decoded.before.free_page_list_head_page, original.before.free_page_list_head_page);
+	EXPECT_EQ(decoded.before.page_count, original.before.page_count);
+  	EXPECT_EQ(bytes.size(), sizeof(DbMetadataPatch));
   }
 
   TEST(LogRecordTest, SerializeCheckpointPatchBasicRoundTrip) {

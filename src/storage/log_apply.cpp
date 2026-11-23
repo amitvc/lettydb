@@ -21,26 +21,31 @@ bool apply_payload_to_page(Page* page, uint16_t offset, const ByteBuffer& payloa
   return true;
 }
 
-bool apply_gam_bit(Page* page, uint16_t bit_index, bool set_bit) {
-  GAMPage gam = load_page_layout<GAMPage>(page);
-  Bitmap bitmap(gam.bitmap, GAM_MAX_BITS);
-  if (set_bit) {
-    bitmap.set(bit_index);
-  } else {
-    bitmap.clear(bit_index);
-  }
-  store_page_layout(page, gam);
+bool apply_db_metadata_state(Page* page, const DbMetadataState& state) {
+  DatabaseMetadata meta = load_page_body<DatabaseMetadata>(page);
+  meta.free_page_list_head_page = state.free_page_list_head_page;
+  meta.page_count = state.page_count;
+  meta.table_count = state.table_count;
+  meta.next_table_id = state.next_table_id;
+  store_page_body<DatabaseMetadata>(page, meta);
   return true;
 }
 
-bool apply_iam_extent(Page* page, uint32_t extent_id, bool add) {
-  IAMPage iam = load_page_layout<IAMPage>(page);
-  if (add) {
-    iam.add_extent(extent_id);
-  } else {
-    iam.remove_extent(extent_id);
+bool apply_page_header_patch(Page* page, const PageHeader& header) {
+  lsn_t existing_lsn = page->get_page_lsn();
+  page->set_next_page_id(header.next_page_id);
+  page->set_prev_page_id(header.prev_page_id);
+  page->set_table_id(header.table_id);
+  page->set_page_type(header.page_type);
+  page->set_status(header.status);
+  page->set_page_lsn(existing_lsn);
+
+  if (header.page_type == PageType::DATA && header.status == PageStatus::ACTIVE) {
+    SlotDirectoryHeader slot_dir = load_header_from_bytes(reinterpret_cast<const Byte*>(page->get_body()));
+    if (slot_dir.num_slots == 0 && slot_dir.free_space_pointer == 0) {
+      SlottedPage::init(reinterpret_cast<Byte*>(page->get_body()));
+    }
   }
-  store_page_layout(page, iam);
   return true;
 }
 
@@ -48,14 +53,20 @@ bool apply_compensation(Page* page, const CompensationPatch& clr) {
   switch (clr.kind) {
     case CompensationKind::BytePatch:
       return apply_payload_to_page(page, clr.offset, clr.payload);
-    case CompensationKind::GamSetBit:
-      return apply_gam_bit(page, static_cast<uint16_t>(clr.param), true);
-    case CompensationKind::GamClearBit:
-      return apply_gam_bit(page, static_cast<uint16_t>(clr.param), false);
-    case CompensationKind::IamAddExtent:
-      return apply_iam_extent(page, clr.param, true);
-    case CompensationKind::IamRemoveExtent:
-      return apply_iam_extent(page, clr.param, false);
+    case CompensationKind::DbMetadataRestore: {
+      DbMetadataState state{};
+      if (!deserialize_db_metadata_state(clr.payload, state)) {
+        return false;
+      }
+      return apply_db_metadata_state(page, state);
+    }
+    case CompensationKind::PageHeaderRestore: {
+      PageHeader header{};
+      if (!deserialize_page_header(clr.payload, header)) {
+        return false;
+      }
+      return apply_page_header_patch(page, header);
+    }
   }
   return false;
 }

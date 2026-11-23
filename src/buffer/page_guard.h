@@ -75,10 +75,10 @@ class PageGuard {
   /** @brief Returns a read-only pointer to the page body (after PageHeader). */
   const char* get_body() const;
 
-  /** @brief Marks the guard as dirty so `unpin_page(page_id, true)` is called on release. */
+  /** @brief Marks the managed page as dirty in the BufferPoolManager immediately. */
   void mark_dirty();
 
-  /** @brief Returns true if `mark_dirty()` has been called on this guard. */
+  /** @brief Returns true if the managed page is currently marked dirty in the BufferPoolManager. */
   bool is_dirty() const;
 
   /** @brief Returns the underlying mutable Page pointer. */
@@ -90,7 +90,6 @@ class PageGuard {
  private:
   BufferPoolManager* bpm_{nullptr};
   Page* page_{nullptr};
-  bool is_dirty_{false};
 };
 
 }

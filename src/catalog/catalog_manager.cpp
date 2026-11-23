@@ -12,7 +12,7 @@ CatalogManager::CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_m
     : buffer_pool_(buffer_pool), iam_manager_(iam_manager), txn_manager_(txn_manager) {}
 
 void CatalogManager::init() {
-  auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, HEADER_PAGE_ID);
+  auto db_header = load_page_value<DatabaseHeader>(buffer_pool_, DATABASE_HEADER_PAGE_ID);
   if (!db_header) {
     throw DbException(DbErrorCode::IOError, "failed to fetch database header page during catalog initialization");
   }
@@ -57,7 +57,7 @@ void CatalogManager::load_all_tables() {
 }
 
 void CatalogManager::bootstrap() {
-    PageGuard db_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    PageGuard db_header_guard = buffer_pool_.fetch_page_guard(DATABASE_HEADER_PAGE_ID);
     if (!db_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page during catalog bootstrap");
     }
@@ -110,7 +110,7 @@ void CatalogManager::bootstrap() {
 }
 
 uint32_t CatalogManager::get_next_table_id() {
-    PageGuard raw_header_guard = buffer_pool_.fetch_page_guard(HEADER_PAGE_ID);
+    PageGuard raw_header_guard = buffer_pool_.fetch_page_guard(DATABASE_HEADER_PAGE_ID);
     if (!raw_header_guard) {
         throw DbException(DbErrorCode::IOError, "failed to fetch header page for table_id allocation");
     }

@@ -170,6 +170,19 @@ class BufferPoolManager {
   PageGuard allocate_page_guard(page_id_t page_id);
 
   /**
+   * @brief Marks a cached page as dirty under the buffer pool latch.
+   * @param page_id The page ID to mark dirty.
+   */
+  void mark_page_dirty(page_id_t page_id);
+
+  /**
+   * @brief Returns whether a cached page is currently marked dirty.
+   * @param page_id The page ID to inspect.
+   * @return true if cached and dirty, false otherwise.
+   */
+  bool is_page_dirty(page_id_t page_id) const;
+
+  /**
    * @brief Write every dirty page to disk immediately, without evicting.
    *
    * Iterates all frames, writes each dirty page to disk, and clears its dirty

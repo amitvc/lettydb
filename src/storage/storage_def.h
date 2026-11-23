@@ -101,8 +101,8 @@ static constexpr size_t PAGE_BODY_SIZE = DEFAULT_PAGE_SIZE - PAGE_HEADER_SIZE;
  *  | next_table_id (uint16_t, 2 bytes)                            |
  *  |   - Next available table OID (user tables start at 100)      |
  *  +--------------------------------------------------------------+ 17
- *  | total_pages (uint32_t, 4 bytes)                              |
- *  |   - High-water mark for total pages allocated in the file    |
+ *  | page_count  (uint32_t, 4 bytes)                              |
+ *  |   - Tracks the total number of pages allocated for the db    |
  *  +--------------------------------------------------------------+ 21
  *  | free_page_list_head_page (page_id_t, 4 bytes)                |
  *  |   - Head of the free page list (INVALID_PAGE_ID if empty)    |
@@ -121,10 +121,11 @@ struct DatabaseMetadata {
   uint32_t page_size = DEFAULT_PAGE_SIZE;
   uint16_t table_count = 0;
   uint16_t next_table_id = 100;
-  uint32_t total_pages = 1;
+  uint32_t page_count = 1;
   page_id_t free_page_list_head_page = INVALID_PAGE_ID;
-  page_id_t sys_tables_first_page = INVALID_PAGE_ID;
-  page_id_t sys_columns_first_page = INVALID_PAGE_ID;
+  // This convention is enforced in code. Page 1 & 2 are dedicated to Table catalog.
+  page_id_t sys_tables_first_page = 1;
+  page_id_t sys_columns_first_page = 2;
 
   DatabaseMetadata() {
     std::memset(signature, 0, sizeof(signature));
@@ -132,6 +133,17 @@ struct DatabaseMetadata {
   }
 };
 #pragma pack(pop)
+
+/**
+ * @struct DbMetadataState
+ * @brief Sub-structure holding the mutable fields of DatabaseMetadata.
+ */
+struct DbMetadataState {
+  page_id_t free_page_list_head_page = INVALID_PAGE_ID;
+  uint32_t page_count = 1;
+  uint16_t table_count = 0;
+  uint16_t next_table_id = 100;
+};
 
 static_assert(sizeof(DatabaseMetadata) == 33,
               "DatabaseMetadata must be exactly 33 bytes on disk");
@@ -155,10 +167,10 @@ inline DatabaseMetadata make_database_metadata() {
   meta.page_size = DEFAULT_PAGE_SIZE;
   meta.table_count = 0;
   meta.next_table_id = 100;
-  meta.total_pages = 1;
+  meta.page_count = 1;
   meta.free_page_list_head_page = INVALID_PAGE_ID;
-  meta.sys_tables_first_page = INVALID_PAGE_ID;
-  meta.sys_columns_first_page = INVALID_PAGE_ID;
+  meta.sys_tables_first_page = 1;
+  meta.sys_columns_first_page = 2;
   return meta;
 }
 }

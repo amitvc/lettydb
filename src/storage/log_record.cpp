@@ -14,10 +14,8 @@ namespace letty {
 	switch (static_cast<LogRecordType>(raw_type)) {
 	  case LogRecordType::BEGIN:
 	  case LogRecordType::PAGE_UPDATE:
-	  case LogRecordType::ALLOCATE_EXTENT:
-	  case LogRecordType::DEALLOCATE_EXTENT:
-	  case LogRecordType::IAM_ADD_EXTENT:
-	  case LogRecordType::IAM_REMOVE_EXTENT:
+	  case LogRecordType::DB_METADATA_UPDATE:
+	  case LogRecordType::PAGE_HEADER_UPDATE:
 	  case LogRecordType::COMMIT:
 	  case LogRecordType::ABORT:
 	  case LogRecordType::COMPENSATION:
@@ -104,6 +102,118 @@ namespace letty {
 	return true;
   }
 
+  bool serialize_db_metadata_state(const DbMetadataState &state, ByteBuffer &out, size_t offset) {
+	if (offset + DB_METADATA_STATE_SIZE > out.size()) {
+	  out.resize(offset + DB_METADATA_STATE_SIZE);
+	}
+	auto cursor = offset;
+	write_le32(out.data() + cursor, static_cast<uint32_t>(state.free_page_list_head_page));
+	cursor += sizeof(uint32_t);
+	write_le32(out.data() + cursor, state.page_count);
+	cursor += sizeof(uint32_t);
+	write_le16(out.data() + cursor, state.table_count);
+	cursor += sizeof(uint16_t);
+	write_le16(out.data() + cursor, state.next_table_id);
+	return true;
+  }
+
+  bool deserialize_db_metadata_state(const ByteBuffer &bytes, DbMetadataState &out, size_t offset) {
+	if (offset + DB_METADATA_STATE_SIZE > bytes.size()) {
+	  LOG_WAL_ERROR("Bytes too short to deserialize DbMetadataState");
+	  return false;
+	}
+	auto cursor = offset;
+	out.free_page_list_head_page = static_cast<page_id_t>(read_le32(bytes.data() + cursor));
+	cursor += sizeof(uint32_t);
+	out.page_count = read_le32(bytes.data() + cursor);
+	cursor += sizeof(uint32_t);
+	out.table_count = read_le16(bytes.data() + cursor);
+	cursor += sizeof(uint16_t);
+	out.next_table_id = read_le16(bytes.data() + cursor);
+	return true;
+  }
+
+  bool serialize_db_metadata_patch(const DbMetadataPatch &patch, ByteBuffer &out) {
+	out.resize(DB_METADATA_PATCH_SIZE);
+	serialize_db_metadata_state(patch.before, out, 0);
+	serialize_db_metadata_state(patch.after, out, DB_METADATA_STATE_SIZE);
+	return true;
+  }
+
+  bool deserialize_db_metadata_patch(const ByteBuffer &bytes, DbMetadataPatch &out) {
+	if (bytes.size() != DB_METADATA_PATCH_SIZE) {
+	  LOG_WAL_ERROR("DbMetadataPatch size mismatch: expected {}, got {}", DB_METADATA_PATCH_SIZE, bytes.size());
+	  return false;
+	}
+	if (!deserialize_db_metadata_state(bytes, out.before, 0) ||
+	    !deserialize_db_metadata_state(bytes, out.after, DB_METADATA_STATE_SIZE)) {
+	  return false;
+	}
+	return true;
+  }
+
+  bool serialize_page_header(const PageHeader &header, ByteBuffer &out, size_t offset) {
+	if (offset + PAGE_HEADER_MUTABLE_SIZE > out.size()) {
+	  out.resize(offset + PAGE_HEADER_MUTABLE_SIZE);
+	}
+	Byte *cursor = out.data() + offset;
+
+	write_le32(cursor, static_cast<uint32_t>(header.next_page_id));
+	cursor += sizeof(uint32_t);
+	write_le32(cursor, static_cast<uint32_t>(header.prev_page_id));
+	cursor += sizeof(uint32_t);
+	write_le16(cursor, header.table_id);
+	cursor += sizeof(uint16_t);
+	*cursor = static_cast<Byte>(header.page_type);
+	cursor += sizeof(uint8_t);
+	*cursor = static_cast<Byte>(header.status);
+	return true;
+  }
+
+  bool deserialize_page_header(const ByteBuffer &bytes, PageHeader &header, size_t offset) {
+	if (offset + PAGE_HEADER_MUTABLE_SIZE > bytes.size()) {
+	  LOG_WAL_ERROR("Bytes too short to deserialize PageHeader fields");
+	  return false;
+	}
+	const Byte *cursor = bytes.data() + offset;
+	header.next_page_id = static_cast<page_id_t>(read_le32(cursor));
+	cursor += sizeof(uint32_t);
+	header.prev_page_id = static_cast<page_id_t>(read_le32(cursor));
+	cursor += sizeof(uint32_t);
+	header.table_id = read_le16(cursor);
+	cursor += sizeof(uint16_t);
+	header.page_type = static_cast<PageType>(*cursor);
+	cursor += sizeof(uint8_t);
+	header.status = static_cast<PageStatus>(*cursor);
+	return true;
+  }
+
+  bool serialize_page_header_patch(const PageHeaderPatch &patch, ByteBuffer &out) {
+	if (patch.page_id == INVALID_PAGE_ID) {
+	  LOG_WAL_ERROR("Page id cannot be invalid in PageHeaderPatch");
+	  return false;
+	}
+	out.resize(PAGE_HEADER_PATCH_SIZE);
+	write_le32(out.data(), static_cast<uint32_t>(patch.page_id));
+
+	serialize_page_header(patch.before, out, sizeof(uint32_t));
+	serialize_page_header(patch.after, out, sizeof(uint32_t) + PAGE_HEADER_MUTABLE_SIZE);
+	return true;
+  }
+
+  bool deserialize_page_header_patch(const ByteBuffer &bytes, PageHeaderPatch &out) {
+	if (bytes.size() != PAGE_HEADER_PATCH_SIZE) {
+	  LOG_WAL_ERROR("PageHeaderPatch size mismatch: expected {}, got {}", PAGE_HEADER_PATCH_SIZE, bytes.size());
+	  return false;
+	}
+	out.page_id = static_cast<page_id_t>(read_le32(bytes.data()));
+	if (!deserialize_page_header(bytes, out.before, sizeof(uint32_t)) ||
+	    !deserialize_page_header(bytes, out.after, sizeof(uint32_t) + PAGE_HEADER_MUTABLE_SIZE)) {
+	  return false;
+	}
+	return true;
+  }
+
   bool serialize_compensation_patch(const CompensationPatch &compensation_patch, std::vector<Byte> &out) {
 	if (compensation_patch.page_id == INVALID_PAGE_ID) {
 	  LOG_WAL_ERROR("Page id cannot be invalid");
@@ -115,30 +225,28 @@ namespace letty {
 	  return false;
 	}
 
-	if (compensation_patch.offset + compensation_patch.payload.size() > PAGE_SIZE) {
+	if (compensation_patch.offset + compensation_patch.payload.size() > DEFAULT_PAGE_SIZE) {
 	  return false;
 	}
 
 	size_t total_size = COMPENSATION_PATCH_HEADER_SIZE + compensation_patch.payload.size();
 	out.resize(total_size);
 
-	auto cursor = 0;
-	write_le32(out.data() + cursor, static_cast<uint32_t>(compensation_patch.page_id));
+	Byte* cursor = out.data();
+	write_le32(cursor, static_cast<uint32_t>(compensation_patch.page_id));
 	cursor += sizeof(uint32_t);
-	out.data()[cursor] = static_cast<Byte>(compensation_patch.kind);
+	*cursor = static_cast<Byte>(compensation_patch.kind);
 	cursor += sizeof(Byte);
-	write_le16(out.data() + cursor, compensation_patch.offset);
+	write_le16(cursor, compensation_patch.offset);
 	cursor += sizeof(uint16_t);
-	write_le32(out.data() + cursor, compensation_patch.param);
-	cursor += sizeof(uint32_t);
 
-	write_le64(out.data() + cursor, static_cast<uint64_t>(compensation_patch.undo_next_lsn));
+	write_le64(cursor, static_cast<uint64_t>(compensation_patch.undo_next_lsn));
 	cursor += sizeof(uint64_t);
 
-	write_le16(out.data() + cursor, static_cast<uint16_t>(compensation_patch.payload.size()));
+	write_le16(cursor, static_cast<uint16_t>(compensation_patch.payload.size()));
 	cursor += sizeof(uint16_t);
 
-	std::memcpy(out.data() + cursor, compensation_patch.payload.data(), compensation_patch.payload.size());
+	std::memcpy(cursor, compensation_patch.payload.data(), compensation_patch.payload.size());
 	return true;
   }
 
@@ -148,18 +256,16 @@ namespace letty {
 	  return false;
 	}
 
-	auto cursor = 0;
-	auto page_id = static_cast<page_id_t>(read_le32(bytes.data()));
+	const Byte* cursor = bytes.data();
+	auto page_id = static_cast<page_id_t>(read_le32(cursor));
 	cursor += sizeof(uint32_t);
-	auto kind = static_cast<CompensationKind>(bytes[cursor]);
+	auto kind = static_cast<CompensationKind>(*cursor);
 	cursor += sizeof(Byte);
-	uint16_t offset = read_le16(bytes.data() + cursor);
+	uint16_t offset = read_le16(cursor);
 	cursor += sizeof(uint16_t);
-	uint32_t param = read_le32(bytes.data() + cursor);
-	cursor += sizeof(uint32_t);
-	auto undo_next_lsn = static_cast<lsn_t>(read_le64(bytes.data() + cursor));
+	auto undo_next_lsn = static_cast<lsn_t>(read_le64(cursor));
 	cursor += sizeof(uint64_t);
-	uint16_t payload_size = read_le16(bytes.data() + cursor);
+	uint16_t payload_size = read_le16(cursor);
 	cursor += sizeof(uint16_t);
 
 	if (page_id == INVALID_PAGE_ID) {
@@ -167,7 +273,7 @@ namespace letty {
 	  return false;
 	}
 
-	if (static_cast<uint8_t>(kind) > static_cast<uint8_t>(CompensationKind::IamRemoveExtent)) {
+	if (static_cast<uint8_t>(kind) > static_cast<uint8_t>(CompensationKind::PageHeaderRestore)) {
 	  LOG_WAL_ERROR("Decoded CompensationKind {} is out of range", static_cast<uint8_t>(kind));
 	  return false;
 	}
@@ -180,100 +286,12 @@ namespace letty {
 	compensation_patch.page_id = page_id;
 	compensation_patch.kind = kind;
 	compensation_patch.offset = offset;
-	compensation_patch.param = param;
 	compensation_patch.undo_next_lsn = undo_next_lsn;
 	compensation_patch.payload.assign(bytes.begin() + COMPENSATION_PATCH_HEADER_SIZE,
 									   bytes.begin() + COMPENSATION_PATCH_HEADER_SIZE + payload_size);
 
 	return true;
   }
-
-  bool serialize_extent_patch(const GamPatch &payload, ByteBuffer &out) {
-	if (payload.gam_page_id == INVALID_PAGE_ID) {
-	  LOG_WAL_ERROR("Gam Page id cannot be invalid {} ", payload.gam_page_id);
-	  return false;
-	}
-
-	if (payload.bit_index >= GAM_MAX_BITS) {
-	  LOG_WAL_ERROR("bit_index {} out of range for GAM bitmap", payload.bit_index);
-	  return false;
-	}
-	size_t total_size = EXTENT_PATCH_SIZE;
-	out.resize(total_size);
-	auto cursor = 0;
-	write_le32(out.data() + cursor, static_cast<uint32_t>(payload.gam_page_id));
-	cursor += sizeof(uint32_t);
-	write_le16(out.data() + cursor, static_cast<uint16_t>(payload.bit_index));
-	cursor += sizeof(uint16_t);
-  	return true;
-  }
-
-
-  bool deserialize_extent_patch(const ByteBuffer &bytes, GamPatch &out) {
-	if (bytes.size() != EXTENT_PATCH_SIZE) {
-	  LOG_WAL_ERROR("GamPatch payload must be exactly {} bytes, got {}", EXTENT_PATCH_SIZE, bytes.size());
-	  return false;
-	}
-
-	auto cursor = 0;
-	auto gam_page_id = static_cast<page_id_t>(read_le32(bytes.data() + cursor));
-	cursor += sizeof(uint32_t);
-	uint16_t bit_index = read_le16(bytes.data() + cursor);
-	cursor += sizeof(uint16_t);
-
-	if (gam_page_id == INVALID_PAGE_ID) {
-	  LOG_WAL_ERROR("Decoded GAM page id is invalid");
-	  return false;
-	}
-
-	if (bit_index >= GAM_MAX_BITS) {
-	  LOG_WAL_ERROR("Decoded bit_index {} out of range for GAM bitmap", bit_index);
-	  return false;
-	}
-
-	out.gam_page_id = gam_page_id;
-	out.bit_index = bit_index;
-	return true;
-  }
-
-  bool serialize_iam_patch(const IamPatch &payload, ByteBuffer &out) {
-	if (payload.iam_page_id == INVALID_PAGE_ID) {
-	  LOG_WAL_ERROR("IAM page id cannot be invalid");
-	  return false;
-	}
-
-	size_t total_size = IAM_PATCH_SIZE;
-	out.resize(total_size);
-	auto cursor = 0;
-	write_le32(out.data() + cursor, static_cast<uint32_t>(payload.iam_page_id));
-	cursor += sizeof(uint32_t);
-	write_le32(out.data() + cursor, payload.extent_id);
-	cursor += sizeof(uint32_t);
-	return true;
-  }
-
-  bool deserialize_iam_patch(const ByteBuffer &bytes, IamPatch &out) {
-	if (bytes.size() != IAM_PATCH_SIZE) {
-	  LOG_WAL_ERROR("IamPatch payload must be exactly {} bytes, got {}", IAM_PATCH_SIZE, bytes.size());
-	  return false;
-	}
-
-	auto cursor = 0;
-	auto iam_page_id = static_cast<page_id_t>(read_le32(bytes.data() + cursor));
-	cursor += sizeof(uint32_t);
-	uint32_t extent_id = read_le32(bytes.data() + cursor);
-	cursor += sizeof(uint32_t);
-
-	if (iam_page_id == INVALID_PAGE_ID) {
-	  LOG_WAL_ERROR("Decoded IAM page id is invalid");
-	  return false;
-	}
-
-	out.iam_page_id = iam_page_id;
-	out.extent_id = extent_id;
-	return true;
-  }
-
 
 bool serialize_checkpoint_patch(const CheckpointPatch &patch, ByteBuffer &out) {
   size_t total_size = CHECKPOINT_PATCH_HEADER_SIZE +
@@ -509,10 +527,41 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 	return true;
   }
 
+  bool build_db_metadata_record(txn_id tran_id, const DbMetadataPatch &patch, LogRecord &out) {
+	ByteBuffer payload;
+	if (!serialize_db_metadata_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize db metadata patch");
+	  return false;
+	}
+	out.header.type = LogRecordType::DB_METADATA_UPDATE;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
+	return true;
+  }
+
+  bool build_page_header_record(txn_id tran_id, const PageHeaderPatch &patch, LogRecord &out) {
+	ByteBuffer payload;
+	if (!serialize_page_header_patch(patch, payload)) {
+	  LOG_WAL_ERROR("Could not serialize page header patch");
+	  return false;
+	}
+	out.header.type = LogRecordType::PAGE_HEADER_UPDATE;
+	out.header.lsn = 0;
+	out.header.prev_lsn = 0;
+	out.header.tran_id = tran_id;
+	out.header.payload_size = static_cast<uint32_t>(payload.size());
+	out.header.checksum = 0;
+	out.payload = std::move(payload);
+	return true;
+  }
+
   bool build_transaction_record(LogRecordType type, txn_id tran_id, LogRecord &out) {
 	if (type == LogRecordType::PAGE_UPDATE || type == LogRecordType::COMPENSATION ||
-		type == LogRecordType::ALLOCATE_EXTENT || type == LogRecordType::DEALLOCATE_EXTENT ||
-		type == LogRecordType::IAM_ADD_EXTENT || type == LogRecordType::IAM_REMOVE_EXTENT) {
+	    type == LogRecordType::DB_METADATA_UPDATE || type == LogRecordType::PAGE_HEADER_UPDATE) {
 	  LOG_WAL_ERROR("{} is not a transaction record. Aborting writing wal record for it",
 					static_cast<uint16_t>(type));
 	  return false;
@@ -524,49 +573,6 @@ bool build_page_patch_record(txn_id tran_id, const PagePatch &patch, LogRecord &
 	out.header.payload_size = 0;
 	out.header.checksum = 0;
 	out.payload.clear();
-	return true;
-  }
-
-  bool build_extent_record(LogRecordType type, txn_id tran_id, const GamPatch &patch, LogRecord &out) {
-	if (type != LogRecordType::ALLOCATE_EXTENT && type != LogRecordType::DEALLOCATE_EXTENT) {
-	  LOG_WAL_ERROR("{} is not a valid extent record type", static_cast<uint16_t>(type));
-	  return false;
-	}
-
-	ByteBuffer payload(EXTENT_PATCH_SIZE);
-	if (!serialize_extent_patch(patch, payload)) {
-	  LOG_WAL_ERROR("Could not serialize gam patch record");
-	  return false;
-	}
-	out.header.type = type;
-	out.header.lsn = 0;
-	out.header.prev_lsn = 0;
-	out.header.tran_id = tran_id;
-	out.header.payload_size = static_cast<uint32_t>(payload.size());
-	out.header.checksum = 0;
-	out.payload = std::move(payload);
-	return true;
-  }
-
-  bool build_iam_extent_record(LogRecordType type, txn_id tran_id, const IamPatch &patch, LogRecord &out) {
-	if (type != LogRecordType::IAM_ADD_EXTENT && type != LogRecordType::IAM_REMOVE_EXTENT) {
-	  LOG_WAL_ERROR("{} is not a valid IAM extent record type", static_cast<uint16_t>(type));
-	  return false;
-	}
-
-	ByteBuffer payload(IAM_PATCH_SIZE);
-	if (!serialize_iam_patch(patch, payload)) {
-	  LOG_WAL_ERROR("Could not serialize iam patch record");
-	  return false;
-	}
-
-	out.header.type = type;
-	out.header.lsn = 0;
-	out.header.prev_lsn = 0;
-	out.header.tran_id = tran_id;
-	out.header.payload_size = static_cast<uint32_t>(payload.size());
-	out.header.checksum = 0;
-	out.payload = std::move(payload);
 	return true;
   }
 }
