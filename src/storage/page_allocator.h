@@ -12,6 +12,33 @@
 #include "transaction/transaction_manager.h"
 
 namespace letty {
+  /**
+   * @class PageAllocator
+   * @brief Manages single-page allocations, deallocations, and doubly-linked table chains.
+   *
+   * PageAllocator is the authoritative manager of page lifecycle and on-disk page linking.
+   *
+   * 1. **Page Allocation & Freelist**:
+   *    - Reuses deallocated pages via an on-disk intrusive LIFO freelist rooted at Page 0
+   *      (`DatabaseMetadata::free_page_list_head_page`).
+   *    - When the freelist is empty, extends the database file by incrementing
+   *      `DatabaseMetadata::page_count`.
+   *
+   * 2. **Table Chains**:
+   *    - Manages intrusive doubly-linked chains (`PageHeader::next_page_id` and
+   *      `PageHeader::prev_page_id`) for table heap storage.
+   *    - Provides atomic linking (`link_page`), unlinking (`unlink_page`), and
+   *      bulk deallocation (`free_page_chain`).
+   *
+   * 3. **WAL & Recovery**:
+   *    - Every modification to Page 0 (Database header page) metadata is logged via `LogRecordType::DB_METADATA_UPDATE`.
+   *    - Every modification to a page's `PageHeader` is logged via `LogRecordType::PAGE_HEADER_UPDATE`.
+   *    - Both operations are fully recoverable under ARIES (supporting redo and undo CLRs).
+   *
+   * 4. **Locking Strategy & Thread Safety**:
+   *    - Serializes all internal operations using `std::mutex lock_`.
+   *    - All page data access is routed exclusively through `BufferPoolManager` using `PageGuard`.
+   */
   class PageAllocator {
 
    public:

@@ -33,14 +33,11 @@ bool apply_db_metadata_state(Page* page, const DbMetadataState& state) {
 
 bool apply_page_header_patch(Page* page, const PageHeader& header) {
   lsn_t existing_lsn = page->get_page_lsn();
-  page->set_next_page_id(header.next_page_id);
-  page->set_prev_page_id(header.prev_page_id);
-  page->set_table_id(header.table_id);
-  page->set_page_type(header.page_type);
-  page->set_status(header.status);
-  page->set_page_lsn(existing_lsn);
+  PageHeader page_header = header;
+  page_header.page_lsn = existing_lsn;
+  page->set_header(page_header);
 
-  if (header.page_type == PageType::DATA && header.status == PageStatus::ACTIVE) {
+  if (header.page_type == PageType::DATA) {
     SlotDirectoryHeader slot_dir = load_header_from_bytes(reinterpret_cast<const Byte*>(page->get_body()));
     if (slot_dir.num_slots == 0 && slot_dir.free_space_pointer == 0) {
       SlottedPage::init(reinterpret_cast<Byte*>(page->get_body()));

@@ -157,18 +157,6 @@ class Page {
     set_header(header);
   }
 
-  /** @brief Returns the PageStatus from PageHeader. */
-  PageStatus get_status() const {
-    return get_header().status;
-  }
-
-  /** @brief Sets the PageStatus in PageHeader. */
-  void set_status(PageStatus status) {
-    PageHeader header = get_header();
-    header.status = status;
-    set_header(header);
-  }
-
  private:
   // Only BPM can modify the Page metadata since all modifiers functions are kept private.
   friend class BufferPoolManager;

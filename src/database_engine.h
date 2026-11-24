@@ -11,8 +11,7 @@ namespace letty {
 // Forward declarations
 class DiskManager;
 class BufferPoolManager;
-class ExtentManager;
-class IamManager;
+class PageAllocator;
 class CatalogManager;
 class TableManager;
 class Executor;
@@ -27,7 +26,7 @@ class RollbackManager;
  * @brief Owns all database components and manages their lifecycle.
  *
  * Constructs the full component chain in the correct dependency order:
- *   DiskManager -> BufferPoolManager -> ExtentManager -> IamManager
+ *   DiskManager -> BufferPoolManager -> PageAllocator
  *     -> CatalogManager -> TableManager -> Executor -> StorageInspector
  *
  * Higher-level consumers (CLI, tests) take a DatabaseEngine
@@ -55,8 +54,7 @@ class DatabaseEngine {
   std::unique_ptr<RollbackManager> rollback_manager_;
   std::unique_ptr<TransactionManager> txn_manager_;
   std::unique_ptr<CheckpointManager> checkpoint_manager_;
-  std::unique_ptr<ExtentManager> extent_manager_;
-  std::unique_ptr<IamManager> iam_manager_;
+  std::unique_ptr<PageAllocator> page_allocator_;
   std::unique_ptr<CatalogManager> catalog_manager_;
   std::unique_ptr<TableManager> table_manager_;
   std::unique_ptr<Executor> executor_;

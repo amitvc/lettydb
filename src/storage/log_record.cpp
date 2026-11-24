@@ -166,7 +166,7 @@ namespace letty {
 	cursor += sizeof(uint16_t);
 	*cursor = static_cast<Byte>(header.page_type);
 	cursor += sizeof(uint8_t);
-	*cursor = static_cast<Byte>(header.status);
+	*cursor = static_cast<Byte>(header.reserved);
 	return true;
   }
 
@@ -184,7 +184,7 @@ namespace letty {
 	cursor += sizeof(uint16_t);
 	header.page_type = static_cast<PageType>(*cursor);
 	cursor += sizeof(uint8_t);
-	header.status = static_cast<PageStatus>(*cursor);
+	header.reserved = static_cast<uint8_t>(*cursor);
 	return true;
   }
 

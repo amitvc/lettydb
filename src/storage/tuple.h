@@ -14,7 +14,10 @@ namespace letty {
  * @brief Variant type representing a column value.
  * 
  * Supports all data types defined in DataType enum:
+ * - TINYINT: int8_t
+ * - SMALLINT: int16_t
  * - INTEGER: int32_t
+ * - BIGINT: int64_t
  * - DOUBLE: double
  * - VARCHAR: std::string
  * - BOOLEAN: bool
@@ -23,7 +26,10 @@ namespace letty {
  */
 using Value = std::variant<
     std::monostate,  // NULL value
+    int8_t,          // TINYINT
+    int16_t,         // SMALLINT
     int32_t,         // INTEGER
+    int64_t,         // BIGINT
     double,          // DOUBLE
     std::string,     // VARCHAR, DATE, TIMESTAMP
     bool             // BOOLEAN

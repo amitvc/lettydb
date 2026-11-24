@@ -1,6 +1,5 @@
 #pragma once
 
-#include <optional>
 
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/page_guard.h"
@@ -12,12 +11,12 @@ namespace letty {
  * @class TableScanner
  * @brief Streams raw tuple bytes from a table without materializing all rows.
  *
- * TableScanner walks the table's IAM chain, extents, pages, and slots. It keeps
+ * TableScanner walks the table's  data pages using the first page in the link as the starting point. It keeps
  * at most one data page pinned at a time and unpins it before moving forward.
  */
 class TableScanner {
  public:
-  TableScanner(BufferPoolManager& buffer_pool, page_id_t iam_head);
+  TableScanner(BufferPoolManager& buffer_pool, page_id_t first_page_id);
   ~TableScanner();
 
   TableScanner(const TableScanner&) = delete;
@@ -59,15 +58,11 @@ class TableScanner {
   uint16_t current_slot_id() const;
 
  private:
-  bool load_next_iam_page();
   bool move_to_next_page();
   void release_current_page();
 
   BufferPoolManager& buffer_pool_;
-  page_id_t next_iam_page_id_;
-  std::optional<IAMPage> current_iam_page_;
-  uint16_t current_extent_index_ = 0;
-  int current_page_offset_ = 0;
+  page_id_t next_page_id_;
   uint16_t current_slot_ = 0;
   uint16_t last_found_slot_ = 0;
   page_id_t current_page_id_ = INVALID_PAGE_ID;

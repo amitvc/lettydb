@@ -45,7 +45,10 @@ class Column {
    */
   static constexpr uint16_t fixed_length_of(DataType type) {
 	 switch (type) {
+	   case DataType::TINYINT:   return 1;
+	   case DataType::SMALLINT:  return 2;
 	   case DataType::INTEGER:   return 4;
+	   case DataType::BIGINT:    return 8;
 	   case DataType::DOUBLE:    return 8;
 	   case DataType::BOOLEAN:   return 1;
 	   case DataType::DATE:      return 10;

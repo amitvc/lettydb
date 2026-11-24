@@ -257,11 +257,10 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 auto json = nlohmann::json::parse(db_engine_->get_inspector().get_summary());
 
                 int    total_pages   = json["total_pages"].get<int>();
-                int    logical_pages = json.value("logical_pages", total_pages);
-                int    alloc_extents = json["allocated_extents"].get<int>();
-                int    file_extents  = json["extent_manager"]["file_extents"].get<int>();
-                int    logical_extents = json["extent_manager"].value("logical_extents", file_extents);
-                int    gam_capacity  = json["extent_manager"]["total_extents"].get<int>();
+                int    used_pages    = json["used_pages"].get<int>();
+                int    free_pages    = json["free_pages"].get<int>();
+                int    table_count   = json["table_count"].get<int>();
+                int    free_head     = json["free_list_head"].get<int>();
                 double pct_full      = json["percent_full"].get<double>();
                 int    pool_size     = json["bpm"]["pool_size"].get<int>();
                 double hit_ratio     = json["bpm"]["hit_ratio"].get<double>();
@@ -274,61 +273,47 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                 fmt::print("│        Database Summary         │\n");
                 fmt::print("└─────────────────────────────────┘\n");
                 fmt::print("  Physical Size : {} pages ({} KB)\n", total_pages, total_pages * 4);
-                if (logical_pages != total_pages) {
-                    fmt::print("  Logical Size  : {} pages ({} KB)\n", logical_pages, logical_pages * 4);
-                }
+                fmt::print("  Table Count   : {}\n", table_count);
 
-                fmt::print("\n  Extents\n");
-                fmt::print("  ├─ Physical   : {}\n", file_extents);
-                if (logical_extents != file_extents) {
-                    fmt::print("  ├─ Logical    : {}\n", logical_extents);
-                }
-                fmt::print("  ├─ Allocated : {}\n", alloc_extents);
-                int    free_extents  = json["extent_manager"]["free_extents"].get<int>();
-                fmt::print("  ├─ GAM free  : {}\n", free_extents);
-                fmt::print("  ├─ Alloc map : {:.1f}%\n", pct_full);
-                fmt::print("  └─ GAM cap   : {} extents\n", gam_capacity);
+                fmt::print("\n  Pages\n");
+                fmt::print("  ├─ Used       : {}\n", used_pages);
+                fmt::print("  ├─ Free       : {}\n", free_pages);
+                fmt::print("  ├─ Freelist   : page {}\n", free_head == -1 ? "INVALID" : std::to_string(free_head));
+                fmt::print("  └─ Space Used : {:.1f}%\n", pct_full);
 
                 fmt::print("\n  Buffer Pool ({} pages)\n", pool_size);
-                fmt::print("  ├─ Hit ratio : {:.1f}%\n", hit_ratio);
-                fmt::print("  ├─ Hits      : {}\n", hits);
-                fmt::print("  ├─ Misses    : {}\n", misses);
-                fmt::print("  ├─ Evictions : {}\n", evictions);
+                fmt::print("  ├─ Hit ratio  : {:.1f}%\n", hit_ratio);
+                fmt::print("  ├─ Hits       : {}\n", hits);
+                fmt::print("  ├─ Misses     : {}\n", misses);
+                fmt::print("  ├─ Evictions  : {}\n", evictions);
                 fmt::print("  └─ Dirty evict: {}\n\n", dirty_evict);
 
-            } else if (type == "GAM") {
-                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_gam());
+            } else if (type == "FREELIST" || type == "FREE") {
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_freelist());
 
                 fmt::print("\n┌─────────────────────────────────┐\n");
-                fmt::print("│   Global Allocation Map (GAM)   │\n");
+                fmt::print("│       Free Page List (LIFO)     │\n");
                 fmt::print("└─────────────────────────────────┘\n");
-                fmt::print("  Legend: █ = allocated   ░ = free\n\n");
 
-                for (const auto& gam_node : json) {
-                    const auto& alloc = gam_node["allocation"];
-                    int total   = static_cast<int>(alloc.size());
-                    int n_alloc = 0;
-                    for (const auto& bit : alloc)
-                        if (bit.get<int>() == 1) ++n_alloc;
+                if (json.contains("error")) {
+                    fmt::print("  Error: {}\n\n", json["error"].get<std::string>());
+                } else {
+                    int head = json["head_page_id"].get<int>();
+                    int count = json["count"].get<int>();
+                    fmt::print("  Head Page ID : {}\n", head == -1 ? "INVALID" : std::to_string(head));
+                    fmt::print("  Free Count   : {} pages\n", count);
 
-                    fmt::print("  GAM page {}  ({} extents, {} allocated)\n",
-                               gam_node["page_id"].get<int>(), total, n_alloc);
-
-                    // Ruler: label every 8 extents
-                    fmt::print("  ");
-                    for (int i = 0; i < total; ++i) {
-                        if (i % 8 == 0) {
-                            std::string lbl = fmt::format("{}", i);
-                            fmt::print("{}", lbl);
-                            int pad = 8 - static_cast<int>(lbl.size());
-                            if (pad > 0 && (i + pad) < total)
-                                fmt::print("{}", std::string(pad, ' '));
+                    if (count > 0) {
+                        fmt::print("  Chain        : ");
+                        const auto& pages = json["pages"];
+                        for (size_t i = 0; i < pages.size(); ++i) {
+                            if (i > 0) fmt::print(" -> ");
+                            fmt::print("{}", pages[i].get<int>());
                         }
+                        fmt::print(" -> INVALID\n\n");
+                    } else {
+                        fmt::print("  Chain        : empty\n\n");
                     }
-                    fmt::print("\n  ");
-                    for (int i = 0; i < total; ++i)
-                        fmt::print("{}", alloc[i].get<int>() == 1 ? "█" : "░");
-                    fmt::print("\n\n");
                 }
 
             } else if (type == "PAGE") {
@@ -410,42 +395,46 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
                     return;
                 }
                 std::string table = parts[2];
-                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_iam_chain(table));
+                auto json = nlohmann::json::parse(db_engine_->get_inspector().get_table_chain(table));
 
                 fmt::print("\n┌─────────────────────────────────┐\n");
-                fmt::print("│  IAM Chain: {:<20}│\n", table);
+                fmt::print("│  Table Chain: {:<18}│\n", table);
                 fmt::print("└─────────────────────────────────┘\n");
 
-                if (json.is_object() || json.empty()) {
-                    fmt::print("  Table not found or no IAM chain.\n\n");
+                if (json.contains("error")) {
+                    fmt::print("  Error: {}\n\n", json["error"].get<std::string>());
                 } else {
-                    int total_iam_pages  = 0;
-                    int total_extents    = 0;
-                    int total_data_pages = 0;
+                    int tid = json["table_id"].get<int>();
+                    int first_pid = json["first_page_id"].get<int>();
+                    int last_pid = json["last_page_id"].get<int>();
+                    const auto& pages = json["pages"];
 
-                    for (const auto& node : json) {
-                        ++total_iam_pages;
-                        fmt::print("  IAM page {}\n", node["page_id"].get<int>());
+                    fmt::print("  Table ID       : {}\n", tid);
+                    fmt::print("  First Page ID  : {}\n", first_pid == -1 ? "INVALID" : std::to_string(first_pid));
+                    fmt::print("  Last Page ID   : {}\n", last_pid == -1 ? "INVALID" : std::to_string(last_pid));
+                    fmt::print("  Total Pages    : {}\n\n", pages.size());
 
-                        if (node.contains("extents") && !node["extents"].empty()) {
-                            std::vector<std::vector<std::string>> table_rows;
-                            for (const auto& ext : node["extents"]) {
-                                int eid        = ext.get<int>();
-                                int page_start = eid * EXTENT_SIZE;
-                                int page_end   = page_start + EXTENT_SIZE - 1;
-                                ++total_extents;
-                                total_data_pages += EXTENT_SIZE;
-                                table_rows.push_back({
-                                    fmt::format("{}", eid),
-                                    fmt::format("{} \u2013 {}", page_start, page_end),
-                                    fmt::format("{} pages", EXTENT_SIZE)
-                                });
-                            }
-                            print_small_table({"Extent", "Allocated Pages", "Reserved"}, table_rows, {true, false, false});
+                    if (!pages.empty()) {
+                        std::vector<std::vector<std::string>> table_rows;
+                        for (const auto& p : pages) {
+                            int pid = p["page_id"].get<int>();
+                            int prev = p["prev_page_id"].get<int>();
+                            int next = p["next_page_id"].get<int>();
+                            int slots = p["num_slots"].get<int>();
+                            int free_space = p["free_space"].get<int>();
+
+                            table_rows.push_back({
+                                fmt::format("{}", pid),
+                                prev == -1 ? "-" : fmt::format("{}", prev),
+                                next == -1 ? "-" : fmt::format("{}", next),
+                                fmt::format("{}", slots),
+                                fmt::format("{} B", free_space)
+                            });
                         }
+                        print_small_table({"Page ID", "Prev Page", "Next Page", "Slots", "Free Space"},
+                                          table_rows, {true, true, true, true, true});
                     }
-                    fmt::print("  Total: {} IAM page(s), {} extent(s), {} allocated data page(s)\n\n",
-                               total_iam_pages, total_extents, total_data_pages);
+                    fmt::print("\n");
                 }
 
             } else {
@@ -485,7 +474,6 @@ void LettyCli::ProcessCommand(const std::string& input, bool quiet) {
             auto& s = *result.compaction_stats;
             fmt::print("Compaction complete:\n");
             fmt::print("  Tuples migrated:  {}\n", s.tuples_migrated);
-            fmt::print("  Extents freed:    {}\n", s.extents_freed);
             fmt::print("  Pages reclaimed:  {}\n", s.pages_freed);
         } else if (!quiet && result.affected_rows > 0) {
             fmt::print("OK, {} row(s) affected\n", result.affected_rows);

@@ -1,476 +1,363 @@
-#include "storage/config.h"
-#include "storage_inspector.h"
-#include "storage/storage_def.h"
-#include "storage/slotted_page.h"
-#include "storage/tuple.h"
-#include "storage/page_utils.h"
-#include <algorithm>
-#include <sstream>
+#include "monitoring/storage_inspector.h"
+
 #include <iomanip>
-#include <iostream>
+#include <sstream>
 #include <vector>
+
+#include "storage/config.h"
+#include "storage/page_utils.h"
+#include "storage/slotted_page.h"
+#include "storage/storage_def.h"
+#include "storage/tuple.h"
 
 namespace letty {
 
-StorageInspector::StorageInspector(BufferPoolManager& bpm, ExtentManager& em,
-                                   IamManager& iam, CatalogManager& cm)
-    : buffer_pool_(bpm), extent_manager_(em),
-      iam_manager_(iam), catalog_manager_(cm) {}
+StorageInspector::StorageInspector(BufferPoolManager& bpm, CatalogManager& cm)
+    : buffer_pool_(bpm), catalog_manager_(cm) {}
 
-std::string StorageInspector::get_summary() {
-    nlohmann::json j;
-    
-    page_id_t physical_pages = buffer_pool_.get_file_size_in_pages();
-    j["total_pages"] = physical_pages;
-    j["physical_pages"] = physical_pages;
-    
-    uint32_t allocated_extents = 0;
-    uint32_t total_extents = 0;
-    uint32_t highest_allocated_extent = 0;
-    bool has_allocated_extent = false;
-    
-    page_id_t curr_gam = FIRST_GAM_PAGE_ID;
-    while (curr_gam != INVALID_PAGE_ID) {
-        PageGuard guard = buffer_pool_.fetch_page_guard(curr_gam);
-        if (guard.is_valid()) {
-            auto gam_page = load_page_layout<GAMPage>(guard);
-
-            Bitmap bitmap(gam_page.bitmap, GAM_BITMAP_ARRAY_SIZE * 8);
-            
-            for (size_t i = 0; i < bitmap.get_size_in_bits(); ++i) {
-                if (bitmap.is_set(i)) {
-                    allocated_extents++;
-                    highest_allocated_extent = total_extents + static_cast<uint32_t>(i);
-                    has_allocated_extent = true;
-                }
-            }
-
-            total_extents += (GAM_BITMAP_ARRAY_SIZE * 8);
-            curr_gam = gam_page.next_page_id;
-        } else {
-            break; 
-        }
-    }
-    
-    j["allocated_extents"] = allocated_extents;
-    uint32_t physical_extents = (physical_pages + EXTENT_SIZE - 1) / EXTENT_SIZE;
-    uint32_t logical_extents = has_allocated_extent ? highest_allocated_extent + 1 : physical_extents;
-    logical_extents = std::max(logical_extents, physical_extents);
-    page_id_t logical_pages = static_cast<page_id_t>(logical_extents * EXTENT_SIZE);
-    j["logical_pages"] = logical_pages;
-    j["percent_full"] = logical_extents > 0 ? (100.0 * allocated_extents / logical_extents) : 0.0;
-    
-    j["extent_manager"] = {
-        {"total_extents", total_extents},
-        {"file_extents", physical_extents},
-        {"logical_extents", logical_extents},
-        {"used_extents", allocated_extents},
-        {"free_extents", total_extents > allocated_extents ? total_extents - allocated_extents : 0}
-    };
-    
-    // Cache stats
-    auto stats = buffer_pool_.get_cache_stats();
-    j["bpm"] = {
-        {"pool_size", buffer_pool_.get_pool_size()},
-        {"hits", stats.hits},
-        {"misses", stats.misses},
-        {"evictions", stats.evictions},
-        {"dirty_evictions", stats.dirty_evictions},
-        {"hit_ratio", stats.hit_ratio()}
-    };
-    
-    return j.dump();
-}
-
-std::string StorageInspector::get_gam() {
-    nlohmann::json result = nlohmann::json::array();
-    
-    page_id_t curr_gam = FIRST_GAM_PAGE_ID;
-    page_id_t physical_pages = buffer_pool_.get_file_size_in_pages();
-    int gam_idx = 0;
-
-    // We also want to know who owns these extents to color them.
-    // This is expensive (scan all IAMs), but useful.
-    // For now, get_gam just returns the bitmap status (ALLOCATED/FREE).
-    // The frontend can combine this with get_page_map info or we can do it here.
-    // Let's just return the bitmap status first.
-
-    while (curr_gam != INVALID_PAGE_ID) {
-        PageGuard guard = buffer_pool_.fetch_page_guard(curr_gam);
-        if (!guard) break;
-
-        auto gam_page = load_page_layout<GAMPage>(guard);
-        Bitmap bitmap(gam_page.bitmap, GAM_BITMAP_ARRAY_SIZE * 8);
-        
-        std::vector<int> allocation;
-        size_t physical_extents = (physical_pages + EXTENT_SIZE - 1) / EXTENT_SIZE;
-        size_t logical_extents = physical_extents;
-        for (size_t i = 0; i < bitmap.get_size_in_bits(); ++i) {
-            if (bitmap.is_set(i)) {
-                logical_extents = std::max(logical_extents, i + 1);
-            }
-        }
-
-        size_t limit = std::min(static_cast<size_t>(bitmap.get_size_in_bits()), logical_extents);
-        
-        for (size_t i = 0; i < limit; ++i) {
-            allocation.push_back(bitmap.is_set(i) ? 1 : 0);
-        }
-
-        nlohmann::json gam_node;
-        gam_node["page_id"] = curr_gam;
-        gam_node["index"] = gam_idx++;
-        gam_node["allocation"] = allocation; // Arrays of 0/1
-        result.push_back(gam_node);
-
-        curr_gam = gam_page.next_page_id;
-    }
-    
-    return result.dump();
-}
-
-std::string StorageInspector::get_page_map() {
-    page_id_t num_pages = buffer_pool_.get_file_size_in_pages();
-    
-    // structure: {id, type, owner, object_name}
-    std::vector<nlohmann::json> map(num_pages);
-    for(page_id_t i=0; i<num_pages; ++i) {
-        map[i] = {
-            {"id", i},
-            {"type", "UNKNOWN"}, 
-            {"owner", "free"},
-            {"info", ""}
-        };
-    }
-
-    // Header
-    if (num_pages > 0) {
-        map[0]["type"] = "HEADER";
-        map[0]["owner"] = "system";
-        map[0]["info"] = "Database Header";
-    }
-
-    // GAM pages
-    page_id_t curr_gam = FIRST_GAM_PAGE_ID;
-    while (curr_gam != INVALID_PAGE_ID && curr_gam < num_pages) {
-         map[curr_gam]["type"] = "GAM";
-         map[curr_gam]["owner"] = "system";
-         map[curr_gam]["info"] = "Global Allocation Map";
-         
-         PageGuard p_guard = buffer_pool_.fetch_page_guard(curr_gam);
-         if (p_guard) {
-             auto gam_page = load_page_layout<GAMPage>(p_guard);
-             curr_gam = gam_page.next_page_id;
-         } else {
-             break;
-         }
-    }
-
-    page_id_t sys_tables_iam = INVALID_PAGE_ID;
-    page_id_t sys_cols_iam = INVALID_PAGE_ID;
-
-    {
-        PageGuard db_header_guard = buffer_pool_.fetch_page_guard(DATABASE_HEADER_PAGE_ID);
-        if (db_header_guard) {
-            auto db_header_page = load_page_layout<DatabaseHeader>(db_header_guard);
-            sys_tables_iam = db_header_page.sys_tables_iam_page;
-            sys_cols_iam = db_header_page.sys_columns_iam_page;
-        }
-    }
-
-    // Helper to walk IAM chain and mark pages
-    auto mark_table_pages = [&](page_id_t iam_head, const std::string& name) {
-        if (iam_head == INVALID_PAGE_ID) return;
-
-        // Mark the IAM pages themselves
-        page_id_t curr_iam = iam_head;
-        while(curr_iam != INVALID_PAGE_ID && curr_iam < num_pages) {
-             map[curr_iam]["type"] = "IAM";
-             map[curr_iam]["owner"] = name;
-             map[curr_iam]["info"] = "IAM Page";
-
-             // Unused pages of the IAM extent are reserved for chain growth.
-             // Later chain pages override this with type IAM as the walk continues.
-             page_id_t iam_extent_start = (curr_iam / EXTENT_SIZE) * EXTENT_SIZE;
-             for(int i=0; i<EXTENT_SIZE; ++i) {
-                 page_id_t pid = iam_extent_start + i;
-                 if (pid < num_pages && map[pid]["type"] == "UNKNOWN") {
-                     map[pid]["type"] = "IAM_RESERVED";
-                     map[pid]["owner"] = name;
-                 }
-             }
-             
-             PageGuard raw_guard = buffer_pool_.fetch_page_guard(curr_iam);
-             if (!raw_guard) break;
-             
-             auto iam_page = load_page_layout<IAMPage>(raw_guard);
-             
-             // Mark all extents owned by this IAM page
-             for(uint16_t i=0; i<iam_page.extent_count; ++i) {
-                 uint32_t extent_id = iam_page.extent_ids[i];
-                 page_id_t start_page = extent_id * EXTENT_SIZE;
-                 for(int k=0; k<EXTENT_SIZE; ++k) {
-                     page_id_t pid = start_page + k;
-                     if(pid < num_pages) {
-                         map[pid]["type"] = "DATA";
-                         map[pid]["owner"] = name;
-                     }
-                 }
-             }
-             
-             curr_iam = iam_page.next_page_id;
-        }
-    };
-
-    // System tables
-    mark_table_pages(sys_tables_iam, SYS_TABLES_NAME);
-    mark_table_pages(sys_cols_iam, SYS_COLUMNS_NAME);
-
-    // User tables
-    // Need to read sys_tables to find them.
-    // We can use the catalog manager directly if it exposes a way to list tables,
-    // or we can scan sys_tables physically.
-    // Since CatalogManager doesn't have "list_tables", let's scan physically using our new power.
-    // Actually, scanning sys_tables physically is hard because we need to parse tuples.
-    // EXCEPT! We already marked sys_tables pages.
-    // Let's rely on CatalogManager::get_table() if we knew the names.
-    // But we don't know the names.
-    // Wait, CatalogManager::table_cache_ might have them if they were accessed? No, likely empty on start.
-    
-    // We MUST scan sys_tables to act as a proper inspector.
-    // sys_tables is a normal heap table.
-    // Iterate its IAM chain -> extents -> pages.
-    // For each page, interpret as SlottedPage.
-    // For each slot, deserialize Tuple.
-    // Extract table name and iam_page_id (IAM head).
-    
-    auto process_sys_tables = [&](page_id_t iam_head) {
-        if (iam_head == INVALID_PAGE_ID) return;
-        
-        // Define sys_tables schema specifically for deserialization
-        // Schema: {oid: INT, name: VARCHAR, iam_page_id: INT, column_count: INT}
-        Schema st_schema({
-            Column("oid", DataType::INTEGER, 4, 0),
-            Column("name", DataType::VARCHAR, 32, 4),
-            Column("iam_page_id", DataType::INTEGER, 4, 36),
-            Column("column_count", DataType::INTEGER, 4, 40)
-        });
-
-        page_id_t curr_iam = iam_head;
-        while (curr_iam != INVALID_PAGE_ID && curr_iam < num_pages) {
-            PageGuard raw_guard = buffer_pool_.fetch_page_guard(curr_iam);
-            if (!raw_guard) break;
-            auto iam_page = load_page_layout<IAMPage>(raw_guard);
-            
-            // For each extent in sys_tables
-            for (uint16_t i=0; i < iam_page.extent_count; ++i) {
-                uint32_t extent_id = iam_page.extent_ids[i];
-                page_id_t start_page = extent_id * EXTENT_SIZE;
-                 for(int k=0; k<EXTENT_SIZE; ++k) {
-                     page_id_t pid = start_page + k;
-                     if (pid >= num_pages) continue;
-                     
-                     // Read data page
-                     PageGuard p_guard = buffer_pool_.fetch_page_guard(pid);
-                     if(p_guard) {
-                         SlottedPage sp = SlottedPage::from_page(p_guard);
-                         for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
-                             uint32_t tuple_size;
-                             const Byte* tuple_ptr = sp.get_tuple(slot, &tuple_size);
-                             if (!tuple_ptr) continue;
-                             try {
-                                 Tuple t = Tuple::deserialize(st_schema, tuple_ptr, tuple_size);
-                                 if (t.size() >= 3) {
-                                     std::string tname = std::get<std::string>(t.get_value(1));
-                                     int32_t first_pg_int = std::get<int32_t>(t.get_value(2));
-                                     page_id_t t_iam = static_cast<page_id_t>(first_pg_int);
-
-                                     if (tname != SYS_TABLES_NAME && tname != SYS_COLUMNS_NAME) {
-                                         mark_table_pages(t_iam, tname);
-                                     }
-                                 }
-                             } catch(...) {
-                                 // Invalid tuple or schema mismatch, skip
-                             }
-                         }
-                     }
-                 }
-            }
-            curr_iam = iam_page.next_page_id;
-        }
-    };
-    
-    process_sys_tables(sys_tables_iam);
-
-    // Final pass: Mark free pages (those still UNKNOWN) as FREE if they are in a FREE extent in GAM?
-    // Or just leave them as UNKNOWN (which implies unallocated).
-    // Actually, if we didn't mark them, they aren't in any IAM or Metadata pool or GAM.
-    // So they are effectively free (or 'leaked' if we have a bug).
-    // We can check GAM to confirm.
-    
-    // For visualization, turn "UNKNOWN" into "FREE".
-    for(auto& node : map) {
-        if (node["type"] == "UNKNOWN") {
-            node["type"] = "FREE";
-            node["owner"] = "free";
-        }
-    }
-
-    nlohmann::json j_array = map;
-    return j_array.dump();
-}
-
-std::string StorageInspector::get_page_detail(page_id_t page_id, const std::string& owner) {
-    nlohmann::json j;
-    j["id"] = page_id;
-    
-    PageGuard raw_guard = buffer_pool_.fetch_page_guard(page_id);
-    if (!raw_guard) {
-        j["error"] = "Failed to fetch page";
-        return j.dump();
-    }
-    
-    // Hex dump
-    j["hex"] = bytes_to_hex(raw_guard.get_data(), PAGE_SIZE);
-    
-    // Attempt to decode structure based on what it handles.
-    auto slotted_page_hdr = load_page_layout<SlotDirectoryHeader>(raw_guard);
-    
-    bool looks_like_slotted = (slotted_page_hdr.num_slots < 4096 && slotted_page_hdr.free_space_pointer <= PAGE_SIZE);
-    
-    if (looks_like_slotted) {
-        j["header"] = {
-            {"num_slots", slotted_page_hdr.num_slots},
-            {"free_space_ptr", slotted_page_hdr.free_space_pointer},
-            {"lsn", slotted_page_hdr.page_lsn}
-        };
-        
-        nlohmann::json slots = nlohmann::json::array();
-        nlohmann::json decoded_tuples = nlohmann::json::array();
-        
-        // Resolve schema if owner is provided and valid
-        Schema schema;
-        bool has_schema = false;
-
-        if (!owner.empty() && owner != "free" && owner != "system") {
-            if (owner == SYS_TABLES_NAME) {
-                schema = CatalogManager::sys_tables_schema();
-                has_schema = true;
-            } else if (owner == SYS_COLUMNS_NAME) {
-                schema = CatalogManager::sys_columns_schema();
-                has_schema = true;
-            } else {
-                auto table_meta = catalog_manager_.get_table(owner);
-                if (table_meta.has_value()) {
-                    schema = table_meta->get().schema;
-                    has_schema = true;
-                }
-            }
-        }
-        
-        for(uint16_t i=0; i<slotted_page_hdr.num_slots; ++i) {
-             size_t slot_offset = sizeof(SlotDirectoryHeader) + (i * sizeof(Slot));
-             if (slot_offset + sizeof(Slot) <= PAGE_SIZE) {
-                 auto slot = load_page_layout<Slot>(raw_guard, slot_offset);
-                 slots.push_back({
-                     {"index", i},
-                     {"offset", slot.offset},
-                     {"length", slot.length}
-                 });
-                 
-                 // Try to decode tuple
-                 if (has_schema && slot.length > 0) {
-                     uint32_t offset = slot.offset;
-                     if (offset < PAGE_SIZE && offset + slot.length <= PAGE_SIZE) {
-                         try {
-                             Tuple t = Tuple::deserialize(schema, reinterpret_cast<const Byte*>(raw_guard.get_data()) + offset, slot.length);
-                             
-                             nlohmann::json val_arr = nlohmann::json::array();
-                             for(size_t k=0; k<t.size(); ++k) {
-                                  const auto& val = t.get_value(k);
-                                  std::visit([&](auto&& arg) {
-                                      using T = std::decay_t<decltype(arg)>;
-                                      if constexpr (std::is_same_v<T, std::monostate>) {
-                                          val_arr.push_back(nullptr);
-                                      } else {
-                                          val_arr.push_back(arg);
-                                      }
-                                  }, val);
-                             }
-                             decoded_tuples.push_back({
-                                 {"slot", i},
-                                 {"offset", offset},
-                                 {"values", val_arr}
-                             });
-                         } catch(...) {
-                             // decoding failed
-                         }
-                     }
-                 }
-             }
-        }
-        j["slots"] = slots;
-        j["decoded_tuples"] = decoded_tuples;
-    }
-
-    // Special handling for GAM page
-    if (page_id == FIRST_GAM_PAGE_ID) { // Or other GAMs in chain
-         // TODO: Decode GAM fields
-         j["type_hint"] = "GAM";
-    }
-
-    return j.dump();
-}
-
-std::string StorageInspector::get_iam_chain(const std::string& table_name) {
-    auto meta = catalog_manager_.get_table(table_name);
-    if (!meta.has_value()) return "{}";
-
-    nlohmann::json chain = nlohmann::json::array();
-
-    page_id_t curr = meta->get().iam_page_id;
-    while(curr != INVALID_PAGE_ID) {
-        PageGuard p_guard = buffer_pool_.fetch_page_guard(curr);
-        if(!p_guard) break;
-
-        auto iam = load_page_layout<IAMPage>(p_guard);
-        nlohmann::json node;
-        node["page_id"] = curr;
-        node["extent_count"] = iam.extent_count;
-        
-        std::vector<uint32_t> exts;
-        for(int i=0; i<iam.extent_count; ++i) exts.push_back(iam.extent_ids[i]);
-        node["extents"] = exts;
-        
-        chain.push_back(node);
-        curr = iam.next_page_id;
-    }
-    
-    return chain.dump();
-}
-
-std::string StorageInspector::get_catalog() {
-    // Just dump sys_tables
-    return get_iam_chain(SYS_TABLES_NAME);
+std::string StorageInspector::page_type_to_string(PageType type) {
+  switch (type) {
+    case PageType::DATABASE_HEADER: return "DATABASE_HEADER";
+    case PageType::DATA:            return "DATA";
+    case PageType::INDEX:           return "INDEX";
+    case PageType::FREE:            return "FREE";
+    default:                        return "INVALID";
+  }
 }
 
 std::string StorageInspector::bytes_to_hex(const char* data, uint32_t size) {
-    std::ostringstream oss;
-    oss << std::hex << std::setfill('0');
-    // Group by 16 bytes
-    for (uint32_t i = 0; i < size; ++i) {
-        oss << std::setw(2) << (static_cast<unsigned int>(data[i]) & 0xFF) << " ";
-        if ((i + 1) % 16 == 0) oss << "\n";
+  std::ostringstream oss;
+  for (uint32_t i = 0; i < size; ++i) {
+    if (i > 0 && i % 16 == 0) {
+      oss << "\n";
+    } else if (i > 0) {
+      oss << " ";
     }
-    return oss.str();
+    oss << std::hex << std::setw(2) << std::setfill('0')
+        << static_cast<int>(static_cast<unsigned char>(data[i]));
+  }
+  return oss.str();
 }
 
-nlohmann::json StorageInspector::slotted_page_to_json(page_id_t id, const char* data) {
-    return {};
+nlohmann::json StorageInspector::value_to_json(const Value& val) {
+  if (std::holds_alternative<std::monostate>(val)) {
+    return nullptr;
+  }
+  if (std::holds_alternative<int8_t>(val)) {
+    return static_cast<int>(std::get<int8_t>(val));
+  }
+  if (std::holds_alternative<int16_t>(val)) {
+    return std::get<int16_t>(val);
+  }
+  if (std::holds_alternative<int32_t>(val)) {
+    return std::get<int32_t>(val);
+  }
+  if (std::holds_alternative<int64_t>(val)) {
+    return std::get<int64_t>(val);
+  }
+  if (std::holds_alternative<double>(val)) {
+    return std::get<double>(val);
+  }
+  if (std::holds_alternative<bool>(val)) {
+    return std::get<bool>(val);
+  }
+  if (std::holds_alternative<std::string>(val)) {
+    return std::get<std::string>(val);
+  }
+  return nullptr;
 }
 
-std::string StorageInspector::resolve_page_owner(page_id_t page_id) {
-    return "unknown";
+std::string StorageInspector::get_summary() {
+  nlohmann::json j;
+
+  auto db_meta = load_page_body_value<DatabaseMetadata>(buffer_pool_, DATABASE_HEADER_PAGE_ID);
+  uint32_t total_pages = db_meta ? db_meta->page_count : static_cast<uint32_t>(buffer_pool_.get_file_size_in_pages());
+  uint32_t free_pages = 0;
+
+  if (db_meta) {
+    page_id_t curr = db_meta->free_page_list_head_page;
+    while (curr != INVALID_PAGE_ID && free_pages < total_pages) {
+      auto header = load_page_value<PageHeader>(buffer_pool_, curr);
+      if (!header) {
+        break;
+      }
+      ++free_pages;
+      curr = header->next_page_id;
+    }
+  }
+
+  uint32_t used_pages = total_pages > free_pages ? total_pages - free_pages : 0;
+
+  j["total_pages"] = total_pages;
+  j["used_pages"] = used_pages;
+  j["free_pages"] = free_pages;
+  j["table_count"] = db_meta ? db_meta->table_count : 0;
+  j["free_list_head"] = db_meta ? db_meta->free_page_list_head_page : INVALID_PAGE_ID;
+  j["percent_full"] = total_pages > 0 ? (100.0 * used_pages / total_pages) : 0.0;
+
+  auto stats = buffer_pool_.get_cache_stats();
+  j["bpm"] = {
+      {"pool_size", buffer_pool_.get_pool_size()},
+      {"hits", stats.hits},
+      {"misses", stats.misses},
+      {"evictions", stats.evictions},
+      {"dirty_evictions", stats.dirty_evictions},
+      {"hit_ratio", stats.hit_ratio()}
+  };
+
+  return j.dump();
 }
 
-} // namespace letty
+std::string StorageInspector::get_freelist() {
+  nlohmann::json j;
+  nlohmann::json pages = nlohmann::json::array();
+
+  auto db_meta = load_page_body_value<DatabaseMetadata>(buffer_pool_, DATABASE_HEADER_PAGE_ID);
+  if (!db_meta) {
+    j["error"] = "Failed to load database metadata";
+    return j.dump();
+  }
+
+  page_id_t curr = db_meta->free_page_list_head_page;
+  uint32_t visited = 0;
+  while (curr != INVALID_PAGE_ID && visited < db_meta->page_count) {
+    pages.push_back(curr);
+    auto header = load_page_value<PageHeader>(buffer_pool_, curr);
+    if (!header) {
+      break;
+    }
+    curr = header->next_page_id;
+    ++visited;
+  }
+
+  j["head_page_id"] = db_meta->free_page_list_head_page;
+  j["count"] = pages.size();
+  j["pages"] = pages;
+  return j.dump();
+}
+
+std::string StorageInspector::get_page_map() {
+  nlohmann::json result = nlohmann::json::array();
+
+  auto db_meta = load_page_body_value<DatabaseMetadata>(buffer_pool_, DATABASE_HEADER_PAGE_ID);
+  uint32_t page_count = db_meta ? db_meta->page_count : static_cast<uint32_t>(buffer_pool_.get_file_size_in_pages());
+
+  for (uint32_t pid = 0; pid < page_count; ++pid) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(static_cast<page_id_t>(pid));
+    if (!guard) {
+      continue;
+    }
+
+    PageHeader header = load_page_layout<PageHeader>(guard);
+    nlohmann::json entry;
+    entry["page_id"] = pid;
+    entry["type"] = page_type_to_string(header.page_type);
+    entry["table_id"] = header.table_id;
+    entry["owner"] = resolve_page_owner(header.table_id);
+    entry["prev_page_id"] = header.prev_page_id;
+    entry["next_page_id"] = header.next_page_id;
+    entry["lsn"] = header.page_lsn;
+
+    if (header.page_type == PageType::DATA) {
+      SlottedPage sp = SlottedPage::from_page(guard);
+      entry["num_slots"] = sp.get_num_slots();
+      entry["free_space"] = sp.get_free_space();
+    }
+
+    result.push_back(entry);
+  }
+
+  return result.dump();
+}
+
+nlohmann::json StorageInspector::slotted_page_to_json(page_id_t id, const PageGuard& guard, const std::string& owner) {
+  nlohmann::json j;
+  PageHeader page_header = load_page_layout<PageHeader>(guard);
+  SlottedPage sp = SlottedPage::from_page(const_cast<PageGuard&>(guard));
+  SlotDirectoryHeader dir_header = load_header_from_bytes(reinterpret_cast<const Byte*>(guard.get_body()));
+
+  j["page_id"] = id;
+  j["header"] = {
+      {"num_slots", dir_header.num_slots},
+      {"free_space_ptr", dir_header.free_space_pointer},
+      {"free_space", sp.get_free_space()},
+      {"lsn", page_header.page_lsn}
+  };
+
+  nlohmann::json slots = nlohmann::json::array();
+  for (uint16_t i = 0; i < sp.get_num_slots(); ++i) {
+    auto slot = sp.get_slot(i);
+    if (!slot) {
+      continue;
+    }
+    slots.push_back({
+        {"index", i},
+        {"offset", slot->offset},
+        {"length", slot->length}
+    });
+  }
+  j["slots"] = slots;
+
+  std::optional<Schema> schema;
+  if (!owner.empty()) {
+    if (owner == SYS_TABLES_NAME) {
+      schema = CatalogManager::sys_tables_schema();
+    } else if (owner == SYS_COLUMNS_NAME) {
+      schema = CatalogManager::sys_columns_schema();
+    } else if (auto meta = catalog_manager_.get_table(owner); meta.has_value()) {
+      schema = meta->get().schema;
+    }
+  }
+
+  if (schema.has_value()) {
+    nlohmann::json decoded = nlohmann::json::array();
+    for (uint16_t i = 0; i < sp.get_num_slots(); ++i) {
+      uint32_t sz = 0;
+      const Byte* raw = sp.get_tuple(i, &sz);
+      if (!raw) {
+        continue;
+      }
+      auto slot = sp.get_slot(i);
+      Tuple t = Tuple::deserialize(*schema, raw, sz);
+      nlohmann::json vals = nlohmann::json::array();
+      for (size_t c = 0; c < t.size(); ++c) {
+        vals.push_back(value_to_json(t.get_value(c)));
+      }
+      decoded.push_back({
+          {"slot", i},
+          {"offset", slot ? slot->offset : 0},
+          {"values", vals}
+      });
+    }
+    j["decoded_tuples"] = decoded;
+  }
+
+  return j;
+}
+
+std::string StorageInspector::get_page_detail(page_id_t page_id, const std::string& owner) {
+  PageGuard guard = buffer_pool_.fetch_page_guard(page_id);
+  if (!guard) {
+    return nlohmann::json{{"error", "Failed to fetch page " + std::to_string(page_id)}}.dump();
+  }
+
+  PageHeader header = load_page_layout<PageHeader>(guard);
+  std::string resolved_owner = owner.empty() ? resolve_page_owner(header.table_id) : owner;
+
+  nlohmann::json j;
+  if (header.page_type == PageType::DATA) {
+    j = slotted_page_to_json(page_id, guard, resolved_owner);
+  } else {
+    j["page_id"] = page_id;
+  }
+
+  j["page_header"] = {
+      {"type", page_type_to_string(header.page_type)},
+      {"table_id", header.table_id},
+      {"lsn", header.page_lsn},
+      {"prev_page_id", header.prev_page_id},
+      {"next_page_id", header.next_page_id}
+  };
+  j["owner"] = resolved_owner;
+
+  if (header.page_type == PageType::DATABASE_HEADER) {
+    DatabaseMetadata meta = load_page_body<DatabaseMetadata>(guard);
+    j["database_metadata"] = {
+        {"version", meta.version},
+        {"page_size", meta.page_size},
+        {"table_count", meta.table_count},
+        {"next_table_id", meta.next_table_id},
+        {"page_count", meta.page_count},
+        {"free_page_list_head_page", meta.free_page_list_head_page},
+        {"sys_tables_first_page", meta.sys_tables_first_page},
+        {"sys_columns_first_page", meta.sys_columns_first_page}
+    };
+  }
+
+  j["hex"] = bytes_to_hex(guard.get_data(), 64);
+  return j.dump();
+}
+
+std::string StorageInspector::get_table_chain(const std::string& table_name) {
+  auto meta = catalog_manager_.get_table(table_name);
+  if (!meta) {
+    return nlohmann::json{{"error", "Table not found: " + table_name}}.dump();
+  }
+
+  nlohmann::json pages = nlohmann::json::array();
+  page_id_t curr = meta->get().first_page_id;
+  while (curr != INVALID_PAGE_ID) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(curr);
+    if (!guard) {
+      break;
+    }
+
+    PageHeader header = load_page_layout<PageHeader>(guard);
+    SlottedPage sp = SlottedPage::from_page(guard);
+    pages.push_back({
+        {"page_id", curr},
+        {"prev_page_id", header.prev_page_id},
+        {"next_page_id", header.next_page_id},
+        {"num_slots", sp.get_num_slots()},
+        {"free_space", sp.get_free_space()}
+    });
+    curr = header.next_page_id;
+  }
+
+  nlohmann::json result;
+  result["table_name"] = meta->get().name;
+  result["table_id"] = meta->get().table_id;
+  result["first_page_id"] = meta->get().first_page_id;
+  result["last_page_id"] = meta->get().last_page_id;
+  result["pages"] = pages;
+  return result.dump();
+}
+
+std::string StorageInspector::get_catalog() {
+  return get_table_chain(SYS_TABLES_NAME);
+}
+
+std::string StorageInspector::resolve_page_owner(uint16_t table_id) {
+  if (table_id == 0) {
+    return "";
+  }
+  if (table_id == SYS_TABLES_TABLE_OID) {
+    return SYS_TABLES_NAME;
+  }
+  if (table_id == SYS_COLUMNS_TABLE_OID) {
+    return SYS_COLUMNS_NAME;
+  }
+
+  auto db_meta = load_page_body_value<DatabaseMetadata>(buffer_pool_, DATABASE_HEADER_PAGE_ID);
+  if (!db_meta) {
+    return "";
+  }
+
+  Schema st_schema = CatalogManager::sys_tables_schema();
+  page_id_t curr = db_meta->sys_tables_first_page;
+  while (curr != INVALID_PAGE_ID) {
+    PageGuard guard = buffer_pool_.fetch_page_guard(curr);
+    if (!guard) {
+      break;
+    }
+    SlottedPage sp = SlottedPage::from_page(guard);
+    for (uint16_t slot = 0; slot < sp.get_num_slots(); ++slot) {
+      uint32_t sz = 0;
+      const Byte* raw = sp.get_tuple(slot, &sz);
+      if (!raw) {
+        continue;
+      }
+      Tuple t = Tuple::deserialize(st_schema, raw, sz);
+      uint32_t oid = static_cast<uint32_t>(std::get<int32_t>(t.get_value(0)));
+      if (oid == table_id) {
+        return std::get<std::string>(t.get_value(1));
+      }
+    }
+    PageHeader header = load_page_layout<PageHeader>(guard);
+    curr = header.next_page_id;
+  }
+
+  return "";
+}
+
+}

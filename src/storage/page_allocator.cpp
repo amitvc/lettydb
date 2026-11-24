@@ -10,6 +10,7 @@
 #include "common/logger.h"
 #include "storage/log_record.h"
 #include "storage/page_utils.h"
+#include "storage/slotted_page.h"
 
 namespace letty {
 
@@ -68,11 +69,15 @@ page_id_t PageAllocator::allocate_page(uint16_t table_id, PageType type, txn_id 
   PageHeader target_modified_header{};
   target_modified_header.table_id = table_id;
   target_modified_header.page_type = type;
-  target_modified_header.status = PageStatus::ACTIVE;
 
   if (!apply_page_header_update(target_page_guard, target_page_id,
                                 target_current_header, target_modified_header, tran_id)) {
     return INVALID_PAGE_ID;
+  }
+
+  if (type == PageType::DATA) {
+    SlottedPage::init(reinterpret_cast<Byte*>(target_page_guard.get_body()));
+    target_page_guard.mark_dirty();
   }
 
   return target_page_id;
@@ -108,7 +113,6 @@ bool PageAllocator::free_page_locked(page_id_t page_id, txn_id tran_id) {
   PageHeader target_modified_header{};
   target_modified_header.table_id = 0;
   target_modified_header.page_type = PageType::FREE;
-  target_modified_header.status = PageStatus::DELETED;
   target_modified_header.next_page_id = old_head;
   target_modified_header.prev_page_id = INVALID_PAGE_ID;
 
@@ -302,7 +306,6 @@ void PageAllocator::initialize_new_db() {
   page_header.prev_page_id = INVALID_PAGE_ID;
   page_header.table_id = 0;
   page_header.page_type = PageType::DATABASE_HEADER;
-  page_header.status = PageStatus::ACTIVE;
   store_page_layout(header_guard, page_header);
 
   DatabaseMetadata metadata = make_database_metadata();

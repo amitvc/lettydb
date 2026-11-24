@@ -96,7 +96,7 @@ inline PageHeader load_page_header_from_bytes(const Byte* data) {
   value.page_type = static_cast<PageType>(*cursor);
   cursor += sizeof(uint8_t);
 
-  value.status = static_cast<PageStatus>(*cursor);
+  value.reserved = static_cast<uint8_t>(*cursor);
   return value;
 }
 
@@ -117,7 +117,7 @@ inline void store_page_header_to_bytes(Byte* data, const PageHeader& value) {
   *cursor = static_cast<Byte>(value.page_type);
   cursor += sizeof(uint8_t);
 
-  *cursor = static_cast<Byte>(value.status);
+  *cursor = static_cast<Byte>(value.reserved);
 }
 
 inline SlotDirectoryHeader load_header_from_bytes(const Byte* data) {

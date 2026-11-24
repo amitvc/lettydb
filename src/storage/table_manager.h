@@ -1,25 +1,24 @@
 #pragma once
 
-#include <array>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include "buffer/buffer_pool_manager.h"
-#include "iam_manager.h"
 #include "log_manager.h"
 #include "table_scanner.h"
 #include "transaction/transaction_manager.h"
 #include "tuple.h"
 #include "catalog/catalog_manager.h"
+#include "page_allocator.h"
 
 namespace letty {
 
 /**
  * @struct CompactionStats
- * @brief Statistics returned by TableManager::compact_extents().
+ * @brief Statistics returned by TableManager::compact_table().
  */
 struct CompactionStats {
   uint32_t tuples_migrated = 0;
-  uint32_t extents_freed = 0;
   uint32_t pages_freed = 0;
 };
 
@@ -28,7 +27,7 @@ struct CompactionStats {
  * @brief Manages data operations on user tables.
  *
  * TableManager provides a high-level interface for inserting and scanning
- * table data. It uses CatalogManager to get table metadata, IamManager
+ * table data. It uses CatalogManager to get table metadata, PageAllocator
  * to find pages with space, and BufferPoolManager for page I/O.
  *
  * All page access goes through BufferPoolManager. No direct DiskManager calls.
@@ -45,8 +44,9 @@ struct CompactionStats {
  */
 class TableManager {
  public:
-  TableManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, CatalogManager& catalog_manager,
-               LogManager& log_manager, TransactionManager& txn_manager);
+  TableManager(BufferPoolManager& buffer_pool, CatalogManager& catalog_manager,
+               LogManager& log_manager, TransactionManager& txn_manager,
+			   PageAllocator& page_allocator);
 
   /**
    * @brief Inserts a row into a table.
@@ -121,47 +121,34 @@ class TableManager {
    */
   bool delete_row(const TableMetadata& meta, page_id_t page_id, uint16_t slot_id, uint64_t txn_id);
 
-  /**
-   * @brief Moves live tuples between pages to empty entire extents, then
-   *        deallocates them back to the GAM.
-   *
-   * Walks the IAM chain and collects per-page statistics (live tuple count,
-   * free space), then migrates tuples from sparse pages into denser ones.
-   * Surviving pages are defragmented in-place. When all 8 pages in an extent
-   * become empty, the extent is removed from the IAM chain and deallocated.
-   *
-   * @param meta The table's metadata (schema + IAM page).
-   * @return Stats about the compaction (tuples migrated, extents freed).
-   */
-  CompactionStats compact_extents(const TableMetadata& meta);
 
   /**
    * @brief Starts the process of table compaction.
-   * @param meta
+   * @param tbl_meta_data
    * @return Stats about the compaction (tuples migrated, extents freed).
    */
-  CompactionStats compact_table(const TableMetadata& meta);
+  CompactionStats compact_table(const TableMetadata& tbl_meta_data);
 
  private:
+  /**
+   * In memory structure that tracks
+   * how many slots are occupied for a given page.
+   */
   struct PageStats {
-    page_id_t id;
+    page_id_t page_id;
     uint16_t live_count;
     uint32_t free_space;
   };
 
   /**
    * @brief Collects per-page live tuple count and free space across the
-   *        table's IAM chain without keeping any data page pinned.
+   *        table's page chain without keeping any data page pinned.
    *
-   * Walks the IAM chain, fetches each data page, counts slots with
-   * length > 0, and records free_space. The caller sorts the resulting
-   * vector before calling migrate_tuples().
-   *
-   * @param iam_head The IAM head page for the table.
+   * @param first_page_id The first data page ID for the table.
    * @param table_name The table name (for log messages).
    * @param[out] pages Appended with one PageStats entry per data page.
    */
-  void survey_pages(page_id_t iam_head, const std::string& table_name, std::vector<PageStats>& pages);
+  void survey_pages(page_id_t first_page_id, const std::string& table_name, std::vector<PageStats>& pages);
 
   /**
    * @brief Moves live tuples from sparse pages into denser pages.
@@ -179,37 +166,34 @@ class TableManager {
   int migrate_tuples(std::vector<PageStats>& pages);
 
   /**
-   * @brief Walks the IAM chain and deallocates extents where all 8 pages
-   *        are empty.
+   * @brief Walks the table's page chain, unlinking and freeing empty pages
+   *        while retaining at least one page for the table.
    *
-   * For each extent, checks is_empty() on every page. When all 8 report
-   * empty, calls IamManager::remove_extent_from_iam() followed by
-   * ExtentManager::deallocate_extent().
-   *
-   * @param iam_head The IAM head page for the table.
-   * @param txn_id Transaction the underlying extent deallocations are logged under.
-   * @return Number of extents freed.
+   * @param tbl_meta_data The table's metadata.
+   * @param txn_id Transaction the underlying page deallocations are logged under.
+   * @return Number of pages freed.
    */
-  int free_empty_extents(page_id_t iam_head, uint64_t txn_id);
+  int free_empty_pages(const TableMetadata& tbl_meta_data, uint64_t txn_id);
 
   BufferPoolManager& buffer_pool_;
-  IamManager& iam_manager_;
   CatalogManager& catalog_manager_;
   LogManager& log_manager_;
   TransactionManager& txn_manager_;
+  PageAllocator& page_allocator_;
 
-  static constexpr size_t NUM_TABLE_LATCHES = 64;
-  mutable std::array<std::mutex, NUM_TABLE_LATCHES> table_latches_;
+  mutable std::mutex latches_map_mutex_;
+  mutable std::unordered_map<uint32_t, std::mutex> table_latches_;
 
-  std::mutex& get_table_latch(page_id_t iam_page_id) const {
-    return table_latches_[static_cast<size_t>(iam_page_id) % NUM_TABLE_LATCHES];
+  std::mutex& get_table_latch(uint32_t table_id) const {
+    std::lock_guard<std::mutex> map_lock(latches_map_mutex_);
+    return table_latches_[table_id];
   }
 
   /**
-   * @brief Returns a page that can accept `needed_space` bytes, allocating a
-   *        new extent (and initializing it as a SlottedPage) if none exists.
+   * @brief Returns a page that can accept `needed_space` bytes, allocating and
+   *        linking a new page if the current tail page is full.
    */
-  page_id_t acquire_page_for_insert(page_id_t iam_head, uint32_t needed_space, uint64_t txn_id);
+  page_id_t acquire_page_for_insert(const TableMetadata& meta, uint32_t needed_space, uint64_t txn_id);
 
 };
 

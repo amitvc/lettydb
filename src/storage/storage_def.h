@@ -45,11 +45,6 @@ enum class PageType : uint8_t {
   FREE            = 4,
 };
 
-enum class PageStatus : uint8_t {
-  ACTIVE  = 0,
-  DELETED = 1,
-};
-
 // Disable compiler-inserted alignment padding so struct layouts match
 // their on-disk byte offsets exactly.
 // See: https://learn.microsoft.com/en-us/cpp/preprocessor/pack
@@ -60,7 +55,7 @@ struct PageHeader {
   page_id_t prev_page_id = INVALID_PAGE_ID;
   uint16_t table_id = 0;
   PageType page_type = PageType::INVALID;
-  PageStatus status = PageStatus::DELETED;
+  uint8_t reserved = 0;
 };
 
 static_assert(sizeof(PageHeader) == 20,

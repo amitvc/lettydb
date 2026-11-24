@@ -8,8 +8,8 @@
 
 namespace letty {
 
-TableScanner::TableScanner(BufferPoolManager& buffer_pool, page_id_t iam_head)
-    : buffer_pool_(buffer_pool), next_iam_page_id_(iam_head) {}
+TableScanner::TableScanner(BufferPoolManager& buffer_pool, page_id_t first_page_id)
+    : buffer_pool_(buffer_pool), next_page_id_(first_page_id){}
 
 TableScanner::~TableScanner() = default;
 
@@ -18,13 +18,9 @@ bool TableScanner::next() {
   current_tuple_size_ = 0;
 
   while (true) {
-    if (!current_iam_page_ && !load_next_iam_page()) {
-      return false;
-    }
 
     if (!current_page_guard_ && !move_to_next_page()) {
-      current_iam_page_.reset();
-      continue;
+      return false;
     }
 
     SlottedPage slotted_page = SlottedPage::from_page(current_page_guard_);
@@ -37,7 +33,6 @@ bool TableScanner::next() {
         return true;
       }
     }
-
     release_current_page();
   }
 }
@@ -50,45 +45,22 @@ uint32_t TableScanner::get_tuple_size() const {
   return current_tuple_size_;
 }
 
-bool TableScanner::load_next_iam_page() {
-  if (next_iam_page_id_ == INVALID_PAGE_ID) {
-    return false;
-  }
-
-  current_iam_page_ = load_page_value<IAMPage>(buffer_pool_, next_iam_page_id_);
-  if (!current_iam_page_) {
-    throw DbException(DbErrorCode::IOError, "failed to fetch IAM page " + std::to_string(next_iam_page_id_));
-  }
-
-  next_iam_page_id_ = current_iam_page_->next_page_id;
-  current_extent_index_ = 0;
-  current_page_offset_ = 0;
-  return true;
-}
 
 bool TableScanner::move_to_next_page() {
-  while (current_iam_page_) {
-    while (current_extent_index_ < current_iam_page_->extent_count) {
-      while (current_page_offset_ < EXTENT_SIZE) {
-        uint32_t extent_id = current_iam_page_->extent_ids[current_extent_index_];
-        current_page_id_ = static_cast<page_id_t>(extent_id * EXTENT_SIZE + current_page_offset_);
-        current_page_guard_ = buffer_pool_.fetch_page_guard(current_page_id_);
-        ++current_page_offset_;
-
-        if (current_page_guard_) {
-          current_slot_ = 0;
-          return true;
-        }
-      }
-
-      ++current_extent_index_;
-      current_page_offset_ = 0;
-    }
-
+  if (next_page_id_ == INVALID_PAGE_ID) {
     return false;
   }
 
-  return false;
+  current_page_id_ = next_page_id_;
+  current_page_guard_ = buffer_pool_.fetch_page_guard(current_page_id_);
+  if (!current_page_guard_) {
+    throw DbException(DbErrorCode::IOError, "failed to fetch table page " + std::to_string(current_page_id_));
+  }
+
+  PageHeader header = load_page_layout<PageHeader>(current_page_guard_);
+  next_page_id_ = header.next_page_id;
+  current_slot_ = 0;
+  return true;
 }
 
 void TableScanner::release_current_page() {

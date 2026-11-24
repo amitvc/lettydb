@@ -340,4 +340,43 @@ TEST_F(TupleTest, RoundTrip_TimestampField_PreservesValue) {
   EXPECT_EQ(std::get<std::string>(restored.get_value(0)), ts);
 }
 
+TEST_F(TupleTest, RoundTrip_TinyIntField_PreservesValue) {
+  Schema schema({Column("status", DataType::TINYINT, 1, 0)});
+  int8_t val = 42;
+  Tuple original(std::vector<Value>{val});
+
+  Byte buf[64] = {};
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
+  Tuple restored = Tuple::deserialize(schema, buf, out_size);
+
+  ASSERT_EQ(restored.size(), 1u);
+  EXPECT_EQ(std::get<int8_t>(restored.get_value(0)), val);
+}
+
+TEST_F(TupleTest, RoundTrip_SmallIntField_PreservesValue) {
+  Schema schema({Column("val", DataType::SMALLINT, 2, 0)});
+  int16_t val = 12345;
+  Tuple original(std::vector<Value>{val});
+
+  Byte buf[64] = {};
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
+  Tuple restored = Tuple::deserialize(schema, buf, out_size);
+
+  ASSERT_EQ(restored.size(), 1u);
+  EXPECT_EQ(std::get<int16_t>(restored.get_value(0)), val);
+}
+
+TEST_F(TupleTest, RoundTrip_BigIntField_PreservesValue) {
+  Schema schema({Column("big", DataType::BIGINT, 8, 0)});
+  int64_t val = 987654321012345LL;
+  Tuple original(std::vector<Value>{val});
+
+  Byte buf[64] = {};
+  uint32_t out_size = original.serialize(schema, buf, sizeof(buf));
+  Tuple restored = Tuple::deserialize(schema, buf, out_size);
+
+  ASSERT_EQ(restored.size(), 1u);
+  EXPECT_EQ(std::get<int64_t>(restored.get_value(0)), val);
+}
+
 }  // namespace letty
