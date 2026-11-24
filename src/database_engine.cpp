@@ -7,8 +7,7 @@
 #include "storage/checkpoint_manager.h"
 #include "storage/recovery_manager.h"
 #include "storage/rollback_manager.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
+#include "storage/page_allocator.h"
 #include "catalog/catalog_manager.h"
 #include "storage/table_manager.h"
 #include "sql/executor.h"
@@ -32,20 +31,23 @@ DatabaseEngine::DatabaseEngine(const std::string& db_path) {
   RecoveryManager recovery_manager(db_path, *log_manager_, *buffer_pool_, *rollback_manager_);
   recovery_manager.analyze();
 
-  extent_manager_ = std::make_unique<ExtentManager>(*buffer_pool_, *log_manager_, *txn_manager_);
-  iam_manager_ = std::make_unique<IamManager>(*buffer_pool_, *extent_manager_, *log_manager_, *txn_manager_);
-  catalog_manager_ = std::make_unique<CatalogManager>(*buffer_pool_, *iam_manager_, *txn_manager_);
+  page_allocator_ = std::make_unique<PageAllocator>(*buffer_pool_, *log_manager_, *txn_manager_);
+  catalog_manager_ = std::make_unique<CatalogManager>(*buffer_pool_, *page_allocator_, *txn_manager_);
   catalog_manager_->init();
 
   buffer_pool_->flush_all_pages();
   checkpoint_manager_->run_checkpoint();
-  table_manager_ = std::make_unique<TableManager>(*buffer_pool_, *iam_manager_, *catalog_manager_, *log_manager_, *txn_manager_);
+  table_manager_ = std::make_unique<TableManager>(*buffer_pool_, *catalog_manager_, *log_manager_, *txn_manager_,* page_allocator_);
   executor_ = std::make_unique<Executor>(*catalog_manager_, *table_manager_, *txn_manager_, *checkpoint_manager_);
   inspector_ = std::make_unique<StorageInspector>(
-      *buffer_pool_, *extent_manager_, *iam_manager_, *catalog_manager_);
+      *buffer_pool_, *catalog_manager_);
 }
 
-DatabaseEngine::~DatabaseEngine() = default;
+DatabaseEngine::~DatabaseEngine() {
+  if (checkpoint_manager_) {
+    checkpoint_manager_->run_checkpoint();
+  }
+}
 
 Executor& DatabaseEngine::get_executor() { return *executor_; }
 StorageInspector& DatabaseEngine::get_inspector() { return *inspector_; }
@@ -53,4 +55,4 @@ CatalogManager& DatabaseEngine::get_catalog() { return *catalog_manager_; }
 BufferPoolManager& DatabaseEngine::get_buffer_pool() { return *buffer_pool_; }
 CheckpointManager& DatabaseEngine::get_checkpoint_manager() { return *checkpoint_manager_; }
 
-} // namespace letty
+}

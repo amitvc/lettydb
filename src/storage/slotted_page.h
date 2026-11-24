@@ -9,35 +9,26 @@ namespace letty {
 class Page;
 
 /**
- * @struct SlottedPageHeader
- * @brief Fixed-size metadata stored at byte 0 of every slotted data page.
+ * @struct SlotDirectoryHeader
+ * @brief Fixed-size slotted-page metadata stored at byte 0 of a page's body
+ *        (immediately after the 20-byte PageHeader).
  *
- * This struct is laid out directly on disk. Any change to field order, types,
- * or total size (currently 20 bytes) will corrupt existing database files.
- * The static_assert in slotted_page.cpp enforces the size at compile time.
+ * This struct is laid out directly on disk (4 bytes). The static_assert in
+ * slotted_page.cpp enforces the size at compile time.
  *
- * Explicit packing stores the 8-byte LSN, two 4-byte page IDs, and two
- * 2-byte fields in exactly 20 bytes, without padding.
- *
- * The header tracks the two moving boundaries inside the page:
- * - the slot directory grows forward from the beginning of the page
- * - tuple bytes grow backward from the end of the page
+ * The header tracks the two moving boundaries inside the 4076-byte body:
+ * - the slot directory grows forward from byte 4 of the body
+ * - tuple bytes grow backward from PAGE_BODY_SIZE (4076)
  *
  * The space between those two regions is available for future inserts.
  */
 #pragma pack(push, 1)
-struct SlottedPageHeader {
-  // Log Sequence Number
-  lsn_t page_lsn = 0;
-  // Logical page linkage. Reserved for future full-table sequential scans that
-  // bypass the IAM chain (e.g., when the IAM is known to be stale).
-  page_id_t next_page_id = INVALID_PAGE_ID;
-  page_id_t prev_page_id = INVALID_PAGE_ID;
+struct SlotDirectoryHeader {
   // Number of slot entries in the directory. Shrinks when trailing slots are
   // deleted; grows when a new slot must be appended beyond the current count.
   uint16_t num_slots = 0;
-  // First byte of the tuple payload region. Decreases as tuples are inserted.
-  uint16_t free_space_pointer = PAGE_SIZE;
+  // First byte of the tuple payload region (relative to body start). Decreases as tuples are inserted.
+  uint16_t free_space_pointer = PAGE_BODY_SIZE;
 };
 
 /**
@@ -67,29 +58,29 @@ struct Slot {
 
 /**
  * @class SlottedPage
- * @brief Non-owning view over a PAGE_SIZE buffer that provides variable-length
- *        tuple storage via a slot directory.
+ * @brief Non-owning view over a PAGE_BODY_SIZE buffer (Page::get_body()) that provides
+ *        variable-length tuple storage via a slot directory.
  *
  * Tables store rows of different sizes. SlottedPage separates **what** a row is
  * (its bytes) from **where** a row is (its slot entry) so that neither changes
  * when the other moves.
  *
- * Layout (PAGE_SIZE bytes):
+ * Layout (PAGE_BODY_SIZE = 4076 bytes, starting at Page::get_body()):
  *
  * @verbatim
  *  +--------------------------------------------------------------+ 0
- *  | SlottedPageHeader (20 bytes)                                 |
- *  +--------------------------------------------------------------+ 20
- *  | Slot[0]  = {offset: 4091, length:  5}  ← "Alice"             |
- *  | Slot[1]  = {offset: 4088, length:  0}  ← tombstone (deleted) |
- *  | Slot[2]  = {offset: 4084, length:  4}  ← "Zara"              |
- *  +--------------------------------------------------------------+ ← end of slot directory (32)
+ *  | SlotDirectoryHeader (4 bytes: num_slots, free_space_pointer)   |
+ *  +--------------------------------------------------------------+ 4
+ *  | Slot[0]  = {offset: 4071, length:  5}  ← "Alice"             |
+ *  | Slot[1]  = {offset: 4068, length:  0}  ← tombstone (deleted) |
+ *  | Slot[2]  = {offset: 4064, length:  4}  ← "Zara"              |
+ *  +--------------------------------------------------------------+ ← end of slot directory (16)
  *  | Free space (contiguous gap)                                   |
- *  +--------------------------------------------------------------+ ← free_space_pointer (4084)
+ *  +--------------------------------------------------------------+ ← free_space_pointer (4064)
  *  | Tuple bytes, grow toward smaller offsets                      |
  *  |   ... bytes for Slot[2] (4 bytes) ...                         |
  *  |   ... bytes for Slot[0] (5 bytes) ...                         |
- *  +--------------------------------------------------------------+ 4096
+ *  +--------------------------------------------------------------+ 4076 (PAGE_BODY_SIZE)
  *  @endverbatim
  *
  * Growth rules:
@@ -99,13 +90,13 @@ struct Slot {
  *
  * Example (insert, insert, insert, delete):
  *
- *   insert "Alice" (5 bytes) → slot[0] = {4091, 5},    free_space_pointer = 4091
- *   insert "Bob"   (3 bytes) → slot[1] = {4088, 3},    free_space_pointer = 4088
- *   insert "Zara"  (4 bytes) → slot[2] = {4084, 4},    free_space_pointer = 4084
- *   delete slot 1             → slot[1] = {4088, 0},   num_slots still 3
+ *   insert "Alice" (5 bytes) → slot[0] = {4071, 5},    free_space_pointer = 4071
+ *   insert "Bob"   (3 bytes) → slot[1] = {4068, 3},    free_space_pointer = 4068
+ *   insert "Zara"  (4 bytes) → slot[2] = {4064, 4},    free_space_pointer = 4064
+ *   delete slot 1             → slot[1] = {4068, 0},   num_slots still 3
  *
  *   A subsequent insert reuses slot 1 before growing the directory:
- *   insert "Eve"   (3 bytes) → slot[1] = {4081, 3},    free_space_pointer = 4081
+ *   insert "Eve"   (3 bytes) → slot[1] = {4061, 3},    free_space_pointer = 4061
  *   (Slot 1 pointed at "Bob"'s orphaned bytes which are now overwritten.)
  *
  * Invariants:
@@ -133,18 +124,17 @@ class SlottedPage {
    * BufferPoolManager. Passing an uninitialized page will make the header fields
    * meaningless.
    *
-   * @param buffer Pointer to a PAGE_SIZE page buffer.
+   * @param buffer Pointer to a PAGE_BODY_SIZE body buffer (e.g., Page::get_body()).
    */
   explicit SlottedPage(Byte* buffer);
 
   /**
-   * @brief Format a buffer as an empty slotted page and return a view over it.
+   * @brief Format a page body buffer as an empty slotted page and return a view over it.
    *
-   * This zeroes the page, resets the page links, sets num_slots to 0, and moves
-   * free_space_pointer to PAGE_SIZE so tuple bytes can start growing backward
-   * from the end of the page.
+   * This zeroes the PAGE_BODY_SIZE body, sets num_slots to 0, and moves
+   * free_space_pointer to PAGE_BODY_SIZE so tuple bytes can grow backward.
    *
-   * @param buffer Pointer to a PAGE_SIZE page buffer.
+   * @param buffer Pointer to a PAGE_BODY_SIZE buffer (e.g., Page::get_body()).
    */
   static SlottedPage init(Byte* buffer);
 
@@ -236,12 +226,6 @@ class SlottedPage {
   bool set_slot(uint16_t slot_id, const Slot& slot);
 
   /**
-   * @brief Sets the page LSN and persists the header to the page buffer.
-   * @param lsn The new LSN value.
-   */
-  void set_page_lsn(lsn_t lsn);
-
-  /**
    * @brief Applies a WAL slot payload during Redo or Undo.
    *
    * When tuple_size is 0, deletes the tuple at slot_id. When tuple_size > 0,
@@ -256,15 +240,15 @@ class SlottedPage {
   bool apply_slot_payload(uint16_t slot_id, const Byte* tuple_data, uint32_t tuple_size);
 
   /**
-   * @brief Convenience helper to create a SlottedPage view from a Page pointer.
+   * @brief Convenience helper to create a SlottedPage view over a Page's body.
    */
   static SlottedPage from_page(Page* page);
 
   /**
-   * @brief Convenience helper to create a SlottedPage view from a PageGuard.
+   * @brief Convenience helper to create a SlottedPage view over a PageGuard's body.
    */
   static SlottedPage from_page(PageGuard& guard) {
-    return SlottedPage(reinterpret_cast<Byte*>(guard.get_data()));
+    return SlottedPage(reinterpret_cast<Byte*>(guard.get_body()));
   }
 
  private:
@@ -273,7 +257,7 @@ class SlottedPage {
   static size_t slot_data_offset(uint16_t slot_id);
 
   Byte* data_;
-  SlottedPageHeader header_;
+  SlotDirectoryHeader header_;
 };
 
 }

@@ -76,9 +76,24 @@ uint32_t Tuple::serialize(const Schema &schema, Byte *buf, uint32_t buf_size) co
 	}
 
 	switch (col.get_type()) {
+	  case DataType::TINYINT: {
+		buf[offset] = static_cast<Byte>(std::get<int8_t>(value));
+		offset += sizeof(int8_t);
+		break;
+	  }
+	  case DataType::SMALLINT: {
+		write_le16(buf + offset, static_cast<uint16_t>(std::get<int16_t>(value)));
+		offset += sizeof(int16_t);
+		break;
+	  }
 	  case DataType::INTEGER: {
 		write_le32(buf + offset, static_cast<uint32_t>(std::get<int32_t>(value)));
 		offset += sizeof(int32_t);
+		break;
+	  }
+	  case DataType::BIGINT: {
+		write_le64(buf + offset, static_cast<uint64_t>(std::get<int64_t>(value)));
+		offset += sizeof(int64_t);
 		break;
 	  }
 	  case DataType::DOUBLE: {
@@ -141,10 +156,28 @@ Tuple Tuple::deserialize(const Schema &schema, const Byte *data, uint32_t size) 
 	}
 
 	switch (col.get_type()) {
+	  case DataType::TINYINT: {
+		int8_t val = static_cast<int8_t>(data[offset]);
+		tuple.add_value(Value{val});
+		offset += sizeof(int8_t);
+		break;
+	  }
+	  case DataType::SMALLINT: {
+		int16_t val = static_cast<int16_t>(read_le16(data + offset));
+		tuple.add_value(Value{val});
+		offset += sizeof(int16_t);
+		break;
+	  }
 	  case DataType::INTEGER: {
 		int32_t int_val = static_cast<int32_t>(read_le32(data + offset));
 		tuple.add_value(Value{int_val});
 		offset += sizeof(int32_t);
+		break;
+	  }
+	  case DataType::BIGINT: {
+		int64_t val = static_cast<int64_t>(read_le64(data + offset));
+		tuple.add_value(Value{val});
+		offset += sizeof(int64_t);
 		break;
 	  }
 	  case DataType::DOUBLE: {

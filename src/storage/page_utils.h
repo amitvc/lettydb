@@ -78,41 +78,89 @@ inline uint32_t compute_crc32(const Byte* data, size_t length) {
   return ~crc;
 }
 
-inline SlottedPageHeader load_header_from_bytes(const Byte* data) {
-  SlottedPageHeader value{};
-  value.page_lsn = static_cast<lsn_t>(read_le64(data));
-  value.next_page_id = static_cast<page_id_t>(read_le32(data + 8));
-  value.prev_page_id = static_cast<page_id_t>(read_le32(data + 12));
-  value.num_slots = read_le16(data + 16);
-  value.free_space_pointer = read_le16(data + 18);
+inline PageHeader load_page_header_from_bytes(const Byte* data) {
+  const Byte* cursor = data;
+  PageHeader value{};
+  value.page_lsn = static_cast<lsn_t>(read_le64(cursor));
+  cursor += sizeof(uint64_t);
+
+  value.next_page_id = static_cast<page_id_t>(read_le32(cursor));
+  cursor += sizeof(uint32_t);
+
+  value.prev_page_id = static_cast<page_id_t>(read_le32(cursor));
+  cursor += sizeof(uint32_t);
+
+  value.table_id = read_le16(cursor);
+  cursor += sizeof(uint16_t);
+
+  value.page_type = static_cast<PageType>(*cursor);
+  cursor += sizeof(uint8_t);
+
+  value.reserved = static_cast<uint8_t>(*cursor);
   return value;
 }
 
-inline void store_header_to_bytes(Byte* data, const SlottedPageHeader& value) {
-  write_le64(data, static_cast<uint64_t>(value.page_lsn));
-  write_le32(data + 8, static_cast<uint32_t>(value.next_page_id));
-  write_le32(data + 12, static_cast<uint32_t>(value.prev_page_id));
-  write_le16(data + 16, value.num_slots);
-  write_le16(data + 18, value.free_space_pointer);
+inline void store_page_header_to_bytes(Byte* data, const PageHeader& value) {
+  Byte* cursor = data;
+  write_le64(cursor, static_cast<uint64_t>(value.page_lsn));
+  cursor += sizeof(uint64_t);
+
+  write_le32(cursor, static_cast<uint32_t>(value.next_page_id));
+  cursor += sizeof(uint32_t);
+
+  write_le32(cursor, static_cast<uint32_t>(value.prev_page_id));
+  cursor += sizeof(uint32_t);
+
+  write_le16(cursor, value.table_id);
+  cursor += sizeof(uint16_t);
+
+  *cursor = static_cast<Byte>(value.page_type);
+  cursor += sizeof(uint8_t);
+
+  *cursor = static_cast<Byte>(value.reserved);
+}
+
+inline SlotDirectoryHeader load_header_from_bytes(const Byte* data) {
+  const Byte* cursor = data;
+  SlotDirectoryHeader value{};
+  value.num_slots = read_le16(cursor);
+  cursor += sizeof(uint16_t);
+
+  value.free_space_pointer = read_le16(cursor);
+  return value;
+}
+
+inline void store_header_to_bytes(Byte* data, const SlotDirectoryHeader& value) {
+  Byte* cursor = data;
+  write_le16(cursor, value.num_slots);
+  cursor += sizeof(uint16_t);
+
+  write_le16(cursor, value.free_space_pointer);
 }
 
 inline Slot load_slot_from_bytes(const Byte* data) {
+  const Byte* cursor = data;
   Slot value{};
-  value.offset = read_le16(data);
-  value.length = read_le16(data + 2);
+  value.offset = read_le16(cursor);
+  cursor += sizeof(uint16_t);
+
+  value.length = read_le16(cursor);
   return value;
 }
 
 inline void store_slot_to_bytes(Byte* data, const Slot& value) {
-  write_le16(data, value.offset);
-  write_le16(data + 2, value.length);
+  Byte* cursor = data;
+  write_le16(cursor, value.offset);
+  cursor += sizeof(uint16_t);
+
+  write_le16(cursor, value.length);
 }
 
 /**
  * @brief Reads an on-disk struct from a page buffer at the given offset.
  *
  * Copies sizeof(T) bytes from the page into a local instance of T. This is the
- * safe way to read header-like structs (SlottedPageHeader, IAMPage, GAMPage,
+ * safe way to read header-like structs (PageHeader, SlottedPageHeader, Slot,
  * etc.) without relying on pointer casts into the buffer.
  *
  * @tparam T The on-disk struct type to read. Must be trivially copyable.
@@ -124,7 +172,7 @@ template <typename T>
 T load_page_layout(Page* page, size_t offset = 0) {
   static_assert(std::is_trivially_copyable_v<T>);
   assert(page != nullptr);
-  assert(offset + sizeof(T) <= PAGE_SIZE);
+  assert(offset + sizeof(T) <= DEFAULT_PAGE_SIZE);
 
   T value{};
   std::memcpy(&value, page->get_data() + offset, sizeof(T));
@@ -146,129 +194,146 @@ template <typename T>
 void store_page_layout(Page* page, const T& value, size_t offset = 0) {
   static_assert(std::is_trivially_copyable_v<T>);
   assert(page != nullptr);
-  assert(offset + sizeof(T) <= PAGE_SIZE);
+  assert(offset + sizeof(T) <= DEFAULT_PAGE_SIZE);
 
   std::memcpy(page->get_data() + offset, &value, sizeof(T));
 }
 
-template <> inline GAMPage load_page_layout<GAMPage>(Page* page, size_t offset) {
+template <> inline PageHeader load_page_layout<PageHeader>(Page* page, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(GAMPage) <= PAGE_SIZE);
-
-  const Byte* data = reinterpret_cast<const Byte*>(page->get_data()) + offset;
-
-  GAMPage value{};
-  value.page_lsn = static_cast<lsn_t>(read_le64(data));
-  value.next_page_id = static_cast<page_id_t>(read_le32(data + 8));
-  value.first_free_bit_hint = read_le16(data + 12);
-  std::memcpy(value.bitmap, data + 14, GAM_BITMAP_ARRAY_SIZE);
-  return value;
+  assert(offset + sizeof(PageHeader) <= DEFAULT_PAGE_SIZE);
+  return load_page_header_from_bytes(reinterpret_cast<const Byte*>(page->get_data()) + offset);
 }
 
-template <> inline void store_page_layout<GAMPage>(Page* page, const GAMPage& value, size_t offset) {
+template <> inline void store_page_layout<PageHeader>(Page* page, const PageHeader& value, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(GAMPage) <= PAGE_SIZE);
-
-  Byte* data = reinterpret_cast<Byte*>(page->get_data()) + offset;
-
-  write_le64(data, static_cast<uint64_t>(value.page_lsn));
-  write_le32(data + 8, static_cast<uint32_t>(value.next_page_id));
-  write_le16(data + 12, value.first_free_bit_hint);
-  std::memcpy(data + 14, value.bitmap, GAM_BITMAP_ARRAY_SIZE);
+  assert(offset + sizeof(PageHeader) <= DEFAULT_PAGE_SIZE);
+  store_page_header_to_bytes(reinterpret_cast<Byte*>(page->get_data()) + offset, value);
 }
 
-
-template <> inline IAMPage load_page_layout<IAMPage>(Page* page, size_t offset) {
+template <> inline SlotDirectoryHeader load_page_layout<SlotDirectoryHeader>(Page* page, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(IAMPage) <= PAGE_SIZE);
-
-  const Byte* data = reinterpret_cast<const Byte*>(page->get_data()) + offset;
-
-  IAMPage value{};
-  value.page_lsn = static_cast<lsn_t>(read_le64(data));
-  value.next_page_id = static_cast<page_id_t>(read_le32(data + 8));
-  value.extent_count = read_le16(data + 12);
-  value.reserved = read_le16(data + 14);
-  for (size_t i = 0; i < value.extent_count; ++i) {
-    value.extent_ids[i] = read_le32(data + 16 + i * sizeof(uint32_t));
-  }
-  return value;
-}
-
-template <> inline void store_page_layout<IAMPage>(Page* page, const IAMPage& value, size_t offset) {
-  assert(page != nullptr);
-  assert(offset + sizeof(IAMPage) <= PAGE_SIZE);
-
-  Byte* data = reinterpret_cast<Byte*>(page->get_data()) + offset;
-
-  write_le64(data, static_cast<uint64_t>(value.page_lsn));
-  write_le32(data + 8, static_cast<uint32_t>(value.next_page_id));
-  write_le16(data + 12, value.extent_count);
-  write_le16(data + 14, value.reserved);
-  for (size_t i = 0; i < value.extent_count; ++i) {
-    write_le32(data + 16 + i * sizeof(uint32_t), value.extent_ids[i]);
-  }
-}
-
-template <> inline DatabaseHeader load_page_layout<DatabaseHeader>(Page* page, size_t offset) {
-  assert(page != nullptr);
-  assert(offset + sizeof(DatabaseHeader) <= PAGE_SIZE);
-
-  const Byte* data = reinterpret_cast<const Byte*>(page->get_data()) + offset;
-
-  DatabaseHeader value{};
-  std::memcpy(value.signature, data, sizeof(value.signature));
-  value.version = read_le32(data + 8);
-  value.page_size = read_le32(data + 12);
-  value.gam_page_id = static_cast<page_id_t>(read_le32(data + 16));
-  value.page_lsn = static_cast<lsn_t>(read_le64(data + 20));
-  value.sys_tables_iam_page = static_cast<page_id_t>(read_le32(data + 28));
-  value.sys_columns_iam_page = static_cast<page_id_t>(read_le32(data + 32));
-  value.next_table_oid = read_le16(data + 36);
-  std::memcpy(value.padding, data + 38, sizeof(value.padding));
-  return value;
-}
-
-template <> inline void store_page_layout<DatabaseHeader>(Page* page, const DatabaseHeader& value, size_t offset) {
-  assert(page != nullptr);
-  assert(offset + sizeof(DatabaseHeader) <= PAGE_SIZE);
-
-  Byte* data = reinterpret_cast<Byte*>(page->get_data()) + offset;
-
-  std::memcpy(data, value.signature, sizeof(value.signature));
-  write_le32(data + 8, value.version);
-  write_le32(data + 12, value.page_size);
-  write_le32(data + 16, static_cast<uint32_t>(value.gam_page_id));
-  write_le64(data + 20, static_cast<uint64_t>(value.page_lsn));
-  write_le32(data + 28, static_cast<uint32_t>(value.sys_tables_iam_page));
-  write_le32(data + 32, static_cast<uint32_t>(value.sys_columns_iam_page));
-  write_le16(data + 36, value.next_table_oid);
-  std::memcpy(data + 38, value.padding, sizeof(value.padding));
-}
-
-
-template <> inline SlottedPageHeader load_page_layout<SlottedPageHeader>(Page* page, size_t offset) {
-  assert(page != nullptr);
-  assert(offset + sizeof(SlottedPageHeader) <= PAGE_SIZE);
+  assert(offset + sizeof(SlotDirectoryHeader) <= DEFAULT_PAGE_SIZE);
   return load_header_from_bytes(reinterpret_cast<const Byte*>(page->get_data()) + offset);
 }
 
-template <> inline void store_page_layout<SlottedPageHeader>(Page* page, const SlottedPageHeader& value, size_t offset) {
+template <> inline void store_page_layout<SlotDirectoryHeader>(Page* page, const SlotDirectoryHeader& value, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(SlottedPageHeader) <= PAGE_SIZE);
+  assert(offset + sizeof(SlotDirectoryHeader) <= DEFAULT_PAGE_SIZE);
   store_header_to_bytes(reinterpret_cast<Byte*>(page->get_data()) + offset, value);
 }
 
 template <> inline Slot load_page_layout<Slot>(Page* page, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(Slot) <= PAGE_SIZE);
+  assert(offset + sizeof(Slot) <= DEFAULT_PAGE_SIZE);
   return load_slot_from_bytes(reinterpret_cast<const Byte*>(page->get_data()) + offset);
 }
 
 template <> inline void store_page_layout<Slot>(Page* page, const Slot& value, size_t offset) {
   assert(page != nullptr);
-  assert(offset + sizeof(Slot) <= PAGE_SIZE);
+  assert(offset + sizeof(Slot) <= DEFAULT_PAGE_SIZE);
   store_slot_to_bytes(reinterpret_cast<Byte*>(page->get_data()) + offset, value);
+}
+
+/** @brief Reads a body payload struct starting at PAGE_HEADER_SIZE (Page::get_body()). */
+template <typename T>
+T load_page_body(Page* page) {
+  return load_page_layout<T>(page, PAGE_HEADER_SIZE);
+}
+
+/** @brief Writes a body payload struct starting at PAGE_HEADER_SIZE (Page::get_body()). */
+template <typename T>
+void store_page_body(Page* page, const T& value) {
+  store_page_layout<T>(page, value, PAGE_HEADER_SIZE);
+}
+
+template <> inline DatabaseMetadata load_page_body<DatabaseMetadata>(Page* page) {
+  assert(page != nullptr);
+  const Byte* cursor = reinterpret_cast<const Byte*>(page->get_body());
+
+  DatabaseMetadata value{};
+  std::memcpy(value.signature, cursor, sizeof(value.signature));
+  cursor += sizeof(value.signature);
+
+  value.version = *cursor;
+  cursor += sizeof(uint8_t);
+
+  value.page_size = read_le32(cursor);
+  cursor += sizeof(uint32_t);
+
+  value.table_count = read_le16(cursor);
+  cursor += sizeof(uint16_t);
+
+  value.next_table_id = read_le16(cursor);
+  cursor += sizeof(uint16_t);
+
+  value.page_count = read_le32(cursor);
+  cursor += sizeof(uint32_t);
+
+  value.free_page_list_head_page = static_cast<page_id_t>(read_le32(cursor));
+  cursor += sizeof(uint32_t);
+
+  value.sys_tables_first_page = static_cast<page_id_t>(read_le32(cursor));
+  cursor += sizeof(uint32_t);
+
+  value.sys_columns_first_page = static_cast<page_id_t>(read_le32(cursor));
+  return value;
+}
+
+template <> inline void store_page_body<DatabaseMetadata>(Page* page, const DatabaseMetadata& value) {
+  assert(page != nullptr);
+  Byte* cursor = reinterpret_cast<Byte*>(page->get_body());
+
+  std::memcpy(cursor, value.signature, sizeof(value.signature));
+  cursor += sizeof(value.signature);
+
+  *cursor = value.version;
+  cursor += sizeof(uint8_t);
+
+  write_le32(cursor, value.page_size);
+  cursor += sizeof(uint32_t);
+
+  write_le16(cursor, value.table_count);
+  cursor += sizeof(uint16_t);
+
+  write_le16(cursor, value.next_table_id);
+  cursor += sizeof(uint16_t);
+
+  write_le32(cursor, value.page_count);
+  cursor += sizeof(uint32_t);
+
+  write_le32(cursor, static_cast<uint32_t>(value.free_page_list_head_page));
+  cursor += sizeof(uint32_t);
+
+  write_le32(cursor, static_cast<uint32_t>(value.sys_tables_first_page));
+  cursor += sizeof(uint32_t);
+
+  write_le32(cursor, static_cast<uint32_t>(value.sys_columns_first_page));
+}
+
+/** @brief Reads a body payload struct from a PageGuard starting at PAGE_HEADER_SIZE. */
+template <typename T>
+T load_page_body(const PageGuard& guard) {
+  assert(guard.is_valid());
+  return load_page_body<T>(const_cast<Page*>(guard.get_page()));
+}
+
+/** @brief Writes a body payload struct to a PageGuard starting at PAGE_HEADER_SIZE and marks dirty. */
+template <typename T>
+void store_page_body(PageGuard& guard, const T& value) {
+  assert(guard.is_valid());
+  store_page_body<T>(guard.get_page(), value);
+  guard.mark_dirty();
+}
+
+/** @brief Fetches a page, reads its body payload struct, and unpins. */
+template <typename T>
+std::optional<T> load_page_body_value(BufferPoolManager& buffer_pool, page_id_t page_id) {
+  PageGuard guard = buffer_pool.fetch_page_guard(page_id);
+  if (!guard) {
+    return std::nullopt;
+  }
+  return load_page_body<T>(guard);
 }
 
 /**

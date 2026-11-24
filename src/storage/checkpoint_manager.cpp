@@ -64,6 +64,16 @@ bool CheckpointManager::run_checkpoint() {
     return false;
   }
 
+  if (!log_manager_.flush_to_lsn(begin_checkpoint_lsn)) {
+	LOG_STORAGE_ERROR("Unable to flush WAL to the this LSN {}", begin_checkpoint_lsn);
+	return false;
+  }
+
+  if (!buffer_pool_.flush_pages_up_to_lsn(begin_checkpoint_lsn)) {
+	LOG_STORAGE_ERROR("Unable to flush dirty unpinned pages to disk upto lsn {}", begin_checkpoint_lsn);
+	return false;
+  }
+
   auto dpt = buffer_pool_.get_dirty_page_table();
   auto att = txn_manager_.get_active_transaction_table();
 

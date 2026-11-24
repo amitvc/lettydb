@@ -9,7 +9,7 @@
 #include "catalog/catalog_defs.h"
 #include "catalog/schema.h"
 #include "buffer/buffer_pool_manager.h"
-#include "storage/iam_manager.h"
+#include "storage/page_allocator.h"
 #include "storage/tuple.h"
 #include "transaction/transaction_manager.h"
 
@@ -33,12 +33,19 @@ struct TableMetadata {
   Schema schema;
 
   /**
-   * @brief Table's first IAM page id.
+   * @brief Table's first heap page ID.
    *
-   * The storage layer follows this chain to find the extents and data pages
-   * belonging to the table.
+   * The storage layer follows the doubly-linked next_page_id chain to traverse
+   * data pages belonging to the table.
    */
-  page_id_t iam_page_id;
+  page_id_t first_page_id{INVALID_PAGE_ID};
+
+  /**
+   * @brief Table's last heap page ID.
+   *
+   * Reduces the O(N) scanning of entire chain of pages to O(1) when a new page is allocated for the table.
+   */
+  page_id_t last_page_id{INVALID_PAGE_ID};
 };
 
 /**
@@ -49,8 +56,9 @@ struct TableMetadata {
 struct SysTableRecord {
   uint32_t table_id;
   std::string table_name;
-  page_id_t iam_page_id;
-  int32_t column_count;
+  page_id_t first_page_id{INVALID_PAGE_ID};
+  page_id_t last_page_id{INVALID_PAGE_ID};
+  int8_t status{0}; // 0 = ACTIVE, 1 = DELETED
 };
 
 /**
@@ -64,7 +72,7 @@ struct SysTableRecord {
  */
 class CatalogManager {
  public:
-  CatalogManager(BufferPoolManager& buffer_pool, IamManager& iam_manager, TransactionManager& txn_manager);
+  CatalogManager(BufferPoolManager& buffer_pool, PageAllocator& page_allocator, TransactionManager& txn_manager);
 
   /**
    * @brief Initializes the catalog manager.
@@ -86,7 +94,7 @@ class CatalogManager {
    * @param name The name of the table.
    * @return Pointer to TableMetadata if found, nullptr otherwise.
    */
-  const  std::optional<std::reference_wrapper<TableMetadata>> get_table(const std::string& name);
+  const std::optional<std::reference_wrapper<TableMetadata>> get_table(const std::string& name);
 
   /**
    * @brief Checks if a table with the given name exists.
@@ -97,7 +105,17 @@ class CatalogManager {
 
   bool delete_table(const std::string &name);
 
-  /** Schema for sys_tables: {oid INT, name VARCHAR(32), iam_page_id INT, column_count INT} */
+  /**
+   * @brief Updates cached and persisted boundary page IDs when table grows or compacts.
+   * @param name The name of the table.
+   * @param first_page_id New first page ID of the table chain.
+   * @param last_page_id New last page ID of the table chain.
+   * @param txn_id Transaction id for logging.
+   * @return true if updated successfully.
+   */
+  bool update_table_page_bounds(const std::string& name, page_id_t first_page_id, page_id_t last_page_id, uint64_t txn_id);
+
+  /** Schema for sys_tables: {oid INT, name VARCHAR(32), first_page_id INT, last_page_id INT, status TINYINT} */
   static Schema sys_tables_schema();
 
   /** Schema for sys_columns: {table_oid INT, name VARCHAR(32), type INT, length INT, offset INT} */
@@ -105,7 +123,7 @@ class CatalogManager {
 
  private:
   BufferPoolManager& buffer_pool_;
-  IamManager& iam_manager_;
+  PageAllocator& page_allocator_;
   TransactionManager& txn_manager_;
 
   /** In-memory cache of table metadata, keyed by table name.
@@ -115,10 +133,13 @@ class CatalogManager {
   std::unordered_map<std::string, TableMetadata> table_cache_;
   mutable std::mutex latch_;
 
-  /// Cached IAM page IDs for sys_tables and sys_columns.
-  /// Set once during init() or bootstrap() and never change.
-  page_id_t sys_tables_iam_ = INVALID_PAGE_ID;
-  page_id_t sys_columns_iam_ = INVALID_PAGE_ID;
+  /**
+   * We follow a convention that first system's table and system's column will go into page 1 and 2 respectively
+   */
+  page_id_t sys_tables_first_page_ = 1;
+  page_id_t sys_tables_last_page_ = 1;
+  page_id_t sys_columns_first_page_ = 2;
+  page_id_t sys_columns_last_page_ = 2;
 
   /**
    *  Will bootstrap the database by creating sys_tables and sys_columns
@@ -137,22 +158,17 @@ class CatalogManager {
   uint32_t get_next_table_id();
 
   /**
-   * @brief Formats every page in an allocated extent as an empty SlottedPage.
-   */
-  void initialize_data_extent(page_id_t extent_start_page);
-
-  /**
-   * @brief Inserts a tuple into a table, automatically finding a page with space.
+   * @brief Inserts a tuple into a table, automatically allocating a new page if full.
    *
-   * If no page has enough space, allocates a new extent for the table.
-   *
-   * @param iam_page_id The IAM page ID for the table.
+   * @param first_page_id The first page ID of the table chain.
+   * @param last_page_id The last page ID of the table chain (in/out, updated if new page linked).
    * @param data The tuple data to insert.
    * @param size The size of the tuple data.
+   * @param txn_id Transaction id.
    * @return true if successful.
    * @throws DbException if the insert cannot complete.
    */
-  bool insert_into_table(page_id_t iam_page_id, const Byte* data, uint32_t size, uint64_t txn_id);
+  bool insert_into_table(page_id_t first_page_id, page_id_t& last_page_id, const Byte* data, uint32_t size, uint64_t txn_id);
 
   /** @brief Helper to insert a record into sys_tables. */
   bool insert_sys_table_record(const SysTableRecord& record, uint64_t txn_id);
@@ -160,19 +176,18 @@ class CatalogManager {
   /** @brief Helper to insert a record into sys_columns. */
   bool insert_sys_column_record(uint32_t table_oid, const Column& col, uint64_t txn_id);
 
-
   /**
-   * @brief Scans a system table via its IAM chain and returns all tuples.
+   * @brief Scans a system table via its doubly-linked chain and returns all tuples.
    *
-   * Walks the IAM chain starting at iam_head, reads every SlottedPage in
-   * every extent, and deserializes each tuple using the given schema.
+   * Walks the page chain starting at first_page_id, reads every SlottedPage,
+   * and deserializes each tuple using the given schema.
    * System tables are small (tens of rows), so materializing is fine.
    *
-   * @param iam_head  IAM chain head page ID for the system table.
-   * @param schema    Schema used for tuple deserialization.
+   * @param first_page_id First page ID of the system table.
+   * @param schema Schema used for tuple deserialization.
    * @return All tuples found in the system table.
    */
-  std::vector<Tuple> scan_system_table(page_id_t iam_head, const Schema& schema);
+  std::vector<Tuple> scan_system_table(page_id_t first_page_id, const Schema& schema);
 };
 
 }

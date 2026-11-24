@@ -3,8 +3,6 @@
 #include "storage/disk_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
 #include "storage/log_manager.h"
 #include "transaction/transaction_manager.h"
 #include <cstdio>
@@ -21,9 +19,8 @@ class CatalogBootstrapTest : public ::testing::Test {
     log_manager = std::make_unique<LogManager>("test_catalog.db.wal");
     txn_manager = std::make_unique<TransactionManager>(*log_manager);
 
-    extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
-    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
+	page_allocator = std::make_unique<PageAllocator>(*bpm, *log_manager, *txn_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_manager);
   }
 
   void TearDown() override {
@@ -35,8 +32,7 @@ class CatalogBootstrapTest : public ::testing::Test {
   std::unique_ptr<BufferPoolManager> bpm;
   std::unique_ptr<LogManager> log_manager;
   std::unique_ptr<TransactionManager> txn_manager;
-  std::unique_ptr<ExtentManager> extent_manager;
-  std::unique_ptr<IamManager> iam_manager;
+  std::unique_ptr<PageAllocator> page_allocator;
   std::unique_ptr<CatalogManager> catalog_manager;
 };
 

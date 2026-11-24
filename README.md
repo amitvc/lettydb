@@ -1,8 +1,8 @@
 # LettyDB
 
-LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, write-ahead log (WAL), ARIES crash recovery, allocation maps, catalog, and query executor. Only external dependencies are added to support the CLI, logging, formatting, and tests. The core functionality of this database is implemented without any external libraries.
+LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, write-ahead log (WAL), ARIES crash recovery, page allocator, catalog, and query executor. Only external dependencies are added to support the CLI, logging, formatting, and tests. The core functionality of this database is implemented without any external libraries.
 
-**Current milestone: [`v0.6-wal`](https://github.com/amitvc/lettydb/tree/v0.6-wal).** You can create tables, insert and query rows, delete data, compact tables, inspect the underlying storage from the CLI, and recover automatically from process crashes with full WAL durability and transactional rollback.
+**Current milestone: [`v0.7-simplified-storage`](https://github.com/amitvc/lettydb/tree/v0.7-simplified-storage).** You can create tables, insert and query rows, delete data, compact tables, inspect the underlying storage from the CLI, and recover automatically from process crashes with full WAL durability and transactional rollback.
 
 ## Terminal demo
 
@@ -21,14 +21,14 @@ asciinema play demo.cast
 | Component | Current capabilities |
 | --- | --- |
 | SQL frontend | Handwritten lexer and recursive descent parser producing an abstract syntax tree (AST). |
-| Disk storage | 4 KiB pages with per-page LSNs, slotted pages for tuples, and allocation in extents of 8 pages. |
+| Disk storage | 4 KiB pages with a uniform 20-byte page header (LSN, prev/next links, table ID, page type) and slotted pages for tuples. |
 | Buffer pool | Steal/no-force page caching, pin/unpin tracking, dirty-page flushing, LRU eviction, and cache statistics. |
 | Write-ahead log (WAL) | Segmented WAL files, buffered log flushing, CRC32-checksummed records, and fuzzy checkpointing. |
 | Transactions & recovery | Per-statement transactions, rollback via Compensation Log Records (CLRs), and ARIES crash recovery (**Analysis → Redo → Undo**). |
-| Allocation maps | Global Allocation Maps (GAM) track free extents; Index Allocation Maps (IAM) track the extents owned by each table. |
+| Page allocation | `PageAllocator` manages single-page allocation, an on-disk LIFO freelist rooted at Page 0, and doubly-linked table page chains. |
 | Catalog | Persistent table definitions and schemas, loaded when reopening a database. |
 | Query execution | `CREATE TABLE`, multi-row `INSERT`, single-table `SELECT` with column projection and `WHERE`, and `DELETE` with optional filtering. |
-| Space reclamation | `COMPACT TABLE` repacks live tuples and releases unused extents for reuse. |
+| Space reclamation | `COMPACT TABLE` repacks live tuples and releases empty pages back to the freelist for reuse. |
 | CLI and inspection | Interactive SQL, command history, keyword completion, formatted results, and storage inspection commands. |
 
 ### Components
@@ -42,13 +42,11 @@ flowchart TD
 
     subgraph Storage["Storage & Recovery Engine"]
         Table[TableManager] --> Catalog[CatalogManager]
-        Table --> IAM[IamManager]
-        Catalog --> IAM
-        IAM --> Extent[ExtentManager]
+        Table --> Alloc[PageAllocator]
+        Catalog --> Alloc
         Table --> BPM[BufferPoolManager]
         Catalog --> BPM
-        IAM --> BPM
-        Extent --> BPM
+        Alloc --> BPM
         BPM --> Disk[DiskManager]
 
         Txn[TransactionManager] --> Log[LogManager]
@@ -61,10 +59,8 @@ flowchart TD
         Recovery[RecoveryManager] --> Log
         Recovery --> BPM
         Recovery --> Rollback
-        BPM --> Log
         Table --> Log
-        IAM --> Log
-        Extent --> Log
+        Alloc --> Log
     end
 
     Executor --> Table
@@ -72,12 +68,13 @@ flowchart TD
     Executor --> Txn
     Executor --> Checkpoint
     Inspector --> BPM
+    Inspector --> Catalog
     Disk --> File[(Database file)]
     Log --> WAL[(Segmented WAL files)]
     Checkpoint --> Marker[(Checkpoint marker)]
 ```
 
-The inspector also reads metadata from the catalog and allocation managers.
+The inspector reads page headers, Page 0 metadata, freelist chains, and table page chains through `BufferPoolManager` and `CatalogManager`.
 
 Durability and crash recovery follow the **ARIES** protocol over a **steal/no-force** buffer pool:
 - **Write-ahead rule (Steal / No-Force):** Dirty pages may be evicted before their transaction commits once the WAL is flushed through the page's `page_lsn`; transaction commit only flushes the WAL rather than forcing data pages to disk.
@@ -96,11 +93,12 @@ Each tag marks a working stage of the database's development.
 | [`v0.4-delete-query`](https://github.com/amitvc/lettydb/tree/v0.4-delete-query) | `DELETE` with `WHERE`, plus `IS NULL` and `IS NOT NULL` predicates. |
 | [`v0.5-compact-table`](https://github.com/amitvc/lettydb/tree/v0.5-compact-table) | Table compaction with tuple migration and extent reclamation through GAM. |
 | [`v0.6-wal`](https://github.com/amitvc/lettydb/tree/v0.6-wal) | Segmented write-ahead logging (WAL), transactional rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. |
+| [`v0.7-simplified-storage`](https://github.com/amitvc/lettydb/tree/v0.7-simplified-storage) | Single-page storage layout with uniform 20-byte page headers, `PageAllocator` LIFO freelist, doubly-linked table page chains, and checkpoint dirty-page flushing. |
 
 To explore a specific milestone, check out its tag before configuring and building:
 
 ```sh
-git checkout v0.6-wal
+git checkout v0.7-simplified-storage
 ```
 
 The usage examples below target the current milestone. Earlier tags have fewer capabilities.
@@ -152,7 +150,7 @@ COMPACT TABLE users;
 SELECT id, name FROM users;
 ```
 
-The filtered queries return Grace and Linus, respectively. After deletion and compaction, Ada and Grace remain. Compaction reports tuples migrated, extents freed, and pages reclaimed; a small table may have no extents to release. Freed extents are available for reuse within the database, rather than shrinking the database file.
+The filtered queries return Grace and Linus, respectively. After deletion and compaction, Ada and Grace remain. Compaction reports tuples migrated and pages freed; a small table may have no empty pages to release. Freed pages are pushed onto the freelist for reuse within the database, rather than shrinking the database file.
 
 Exit and reopen `demo.db`, then run `SELECT * FROM users;` to see the retained rows.
 
@@ -162,18 +160,18 @@ These are CLI commands, so enter them **without a trailing semicolon**:
 
 ```text
 INSPECT SUMMARY
-INSPECT GAM
+INSPECT FREELIST
 INSPECT TABLE users
 ```
 
-Use a data page ID from `INSPECT TABLE users` to inspect its contents. For example, if the reported range is `56–63`, run `INSPECT PAGE 56 users`.
+Use a data page ID from `INSPECT TABLE users` to inspect its contents. For example, if the table starts at page `3`, run `INSPECT PAGE 3 users`.
 
 | Command | Shows |
 | --- | --- |
-| `INSPECT SUMMARY` | Physical and logical storage sizes, extent allocation, and buffer-pool statistics. |
-| `INSPECT GAM` | Global extent allocation bitmap. |
-| `INSPECT TABLE users` | The table's IAM chain and owned extents. |
-| `INSPECT PAGE <page_id>` | Page details and a hex dump. |
+| `INSPECT SUMMARY` | Page counts (total, used, free), table count, freelist head, and buffer-pool statistics. |
+| `INSPECT FREELIST` | Free-page LIFO chain starting from Page 0. |
+| `INSPECT TABLE users` | The table's doubly-linked page chain, slot counts, and free space. |
+| `INSPECT PAGE <page_id>` | Page header, details, and a hex dump. |
 | `INSPECT PAGE <page_id> users` | Page details with tuples decoded using the table's schema; choose a data page belonging to that table. |
 
 ### IDE consoles and redirected input
@@ -218,7 +216,7 @@ Run the test suite after building:
 ctest --preset debug --output-on-failure
 ```
 
-The tests cover the SQL frontend and executor, catalog, storage pages, tuple serialization, buffer pool and LRU replacement, extent and IAM allocation, compaction, segmented WAL management, transaction rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. The suite also includes buffer-pool benchmarks and multi-threaded stress tests—verified up to 100 million rows (2.88 GB across 200 tables) under concurrent writer and reader threads (~51k rows/s with full SQL parsing and WAL durability).
+The tests cover the SQL frontend and executor, catalog, storage pages, tuple serialization, buffer pool and LRU replacement, single-page allocation and freelist management, compaction, segmented WAL management, transaction rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. The suite also includes buffer-pool benchmarks and multi-threaded stress tests—verified up to 100 million rows (2.87 GB across 200 tables) under 10 concurrent writer threads and 3 concurrent reader threads (~83k rows/s with 26k+ concurrent scans and full SQL parsing and WAL durability).
 
 With Doxygen and Graphviz installed before configuration, generate API documentation with:
 

@@ -220,6 +220,25 @@ bool BufferPoolManager::flush_page_internal(Page& page) {
   return true;
 }
 
+void BufferPoolManager::mark_page_dirty(page_id_t page_id) {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    pages_[it->second].set_dirty(true);
+  }
+}
+
+bool BufferPoolManager::is_page_dirty(page_id_t page_id) const {
+  std::lock_guard<std::mutex> lock(latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    return false;
+  }
+  return pages_[it->second].is_dirty();
+}
+
 void BufferPoolManager::force_flush() {
   flush_all_pages();
 }
@@ -266,6 +285,25 @@ bool BufferPoolManager::flush_all_pages() {
   }
 
   return failed_count == 0;
+}
+
+bool BufferPoolManager::flush_pages_up_to_lsn(lsn_t max_lsn) {
+  std::lock_guard<std::mutex> lock(latch_);
+  auto flushed_count = 0;
+  for (auto& [page_id, frame_id] : page_table_) {
+	Page& page = pages_[frame_id];
+	if (page.is_dirty() && page.get_pin_count() == 0 && page.get_page_lsn() <= max_lsn) {
+	  if (flush_page_internal(page)) {
+		++flushed_count;
+	  } else {
+		return false;
+	  }
+	}
+  }
+  if (flushed_count > 0 && !disk_manager_.sync()) {
+	return false;
+  }
+  return true;
 }
 
 bool BufferPoolManager::checkpoint() {

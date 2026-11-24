@@ -34,31 +34,28 @@ bool RollbackManager::build_undo_clr(const LogRecord& record, CompensationPatch&
       clr.payload = patch.before_payload;
       break;
     }
-    case LogRecordType::ALLOCATE_EXTENT:
-    case LogRecordType::DEALLOCATE_EXTENT: {
-      GamPatch patch{};
-      if (!deserialize_extent_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize extent patch during undo_transactions");
+    case LogRecordType::DB_METADATA_UPDATE: {
+      DbMetadataPatch patch{};
+      if (!deserialize_db_metadata_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize DbMetadataPatch during undo_transactions");
         return false;
       }
-      clr.page_id = patch.gam_page_id;
-      clr.kind = (record.header.type == LogRecordType::ALLOCATE_EXTENT)
-                     ? CompensationKind::GamClearBit : CompensationKind::GamSetBit;
-      clr.param = patch.bit_index;
+      clr.page_id = DATABASE_HEADER_PAGE_ID; // DatabaseMetadata page is always page 0.
+      clr.kind = CompensationKind::DbMetadataRestore;
+	  serialize_db_metadata_state(patch.before, clr.payload);
       break;
     }
-    case LogRecordType::IAM_ADD_EXTENT:
-    case LogRecordType::IAM_REMOVE_EXTENT: {
-      IamPatch patch{};
-      if (!deserialize_iam_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize IAM patch during undo_transactions");
+
+    case LogRecordType::PAGE_HEADER_UPDATE: {
+      PageHeaderPatch patch{};
+      if (!deserialize_page_header_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize PageHeaderPatch during undo_transactions");
         return false;
       }
-      clr.page_id = patch.iam_page_id;
-      clr.kind = (record.header.type == LogRecordType::IAM_ADD_EXTENT)
-                     ? CompensationKind::IamRemoveExtent : CompensationKind::IamAddExtent;
-      clr.param = patch.extent_id;
-      break;
+      clr.page_id = patch.page_id;
+      clr.kind = CompensationKind::PageHeaderRestore;
+	  serialize_page_header(patch.before, clr.payload);
+	  break;
     }
     default:
       return false;

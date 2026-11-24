@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
+#include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <random>
 #include <sstream>
 #include <string>
 #include <stdexcept>
@@ -12,13 +14,18 @@
 
 #include "database_engine.h"
 #include "buffer/lru_replacer.h"
+#include "catalog/catalog_manager.h"
+#include "monitoring/storage_inspector.h"
+#include "sql/executor.h"
+#include "sql/lexer.h"
+#include "sql/parser.h"
+#include "sql/token.h"
 #include "storage/disk_manager.h"
 #include "storage/log_manager.h"
-#include "sql/executor.h"
-#include "sql/parser.h"
-#include "sql/lexer.h"
-#include "sql/token.h"
-#include "monitoring/storage_inspector.h"
+#include "storage/page_allocator.h"
+#include "storage/rollback_manager.h"
+#include "storage/table_manager.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
 
@@ -673,25 +680,25 @@ TEST_F(StressTest, InspectSummaryReturnsValidJson) {
 
   auto j = nlohmann::json::parse(summary_json);
   EXPECT_TRUE(j.contains("total_pages")) << "Summary missing total_pages";
-  EXPECT_TRUE(j.contains("allocated_extents")) << "Summary missing allocated_extents";
+  EXPECT_TRUE(j.contains("used_pages")) << "Summary missing used_pages";
   EXPECT_TRUE(j.contains("percent_full")) << "Summary missing percent_full";
   EXPECT_GT(j["total_pages"].get<int>(), 0);
-  EXPECT_GT(j["allocated_extents"].get<int>(), 0);
+  EXPECT_GT(j["used_pages"].get<int>(), 0);
 }
 
-TEST_F(StressTest, InspectGamReturnsValidJson) {
+TEST_F(StressTest, InspectFreelistReturnsValidJson) {
   execute_sql("CREATE TABLE t (id INT, val VARCHAR(50))");
   for (int i = 0; i < 10; ++i) {
     execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + ", 'data')");
   }
 
-  std::string gam_json;
-  ASSERT_NO_THROW(gam_json = inspector_->get_gam());
-  EXPECT_FALSE(gam_json.empty());
+  std::string freelist_json;
+  ASSERT_NO_THROW(freelist_json = inspector_->get_freelist());
+  EXPECT_FALSE(freelist_json.empty());
 
-  auto j = nlohmann::json::parse(gam_json);
-  EXPECT_TRUE(j.is_array()) << "GAM should return a JSON array";
-  EXPECT_GT(j.size(), 0u);
+  auto j = nlohmann::json::parse(freelist_json);
+  EXPECT_TRUE(j.is_object()) << "Freelist should return a JSON object";
+  EXPECT_TRUE(j.contains("pages"));
 }
 
 TEST_F(StressTest, InspectPageDetailHeaderPage) {
@@ -700,10 +707,10 @@ TEST_F(StressTest, InspectPageDetailHeaderPage) {
   EXPECT_FALSE(detail.empty());
 
   auto j = nlohmann::json::parse(detail);
-  EXPECT_TRUE(j.contains("id")) << "Page detail missing 'id' field (note: field is 'id', not 'page_id')";
+  EXPECT_TRUE(j.contains("page_id")) << "Page detail missing 'page_id' field";
 }
 
-TEST_F(StressTest, InspectIamChainForTable) {
+TEST_F(StressTest, InspectTableChainForTable) {
   execute_sql("CREATE TABLE t (id INT, data VARCHAR(50))");
 
   std::ostringstream sql;
@@ -714,20 +721,21 @@ TEST_F(StressTest, InspectIamChainForTable) {
   }
   execute_sql(sql.str());
 
-  std::string iam_json;
-  ASSERT_NO_THROW(iam_json = inspector_->get_iam_chain("t"));
-  EXPECT_FALSE(iam_json.empty());
+  std::string chain_json;
+  ASSERT_NO_THROW(chain_json = inspector_->get_table_chain("t"));
+  EXPECT_FALSE(chain_json.empty());
 
-  auto j = nlohmann::json::parse(iam_json);
-  EXPECT_TRUE(j.is_array()) << "IAM chain should return a JSON array";
-  EXPECT_GT(j.size(), 0u);
+  auto j = nlohmann::json::parse(chain_json);
+  EXPECT_TRUE(j.contains("pages")) << "Table chain should contain pages array";
+  EXPECT_GT(j["pages"].size(), 0u);
 }
 
-TEST_F(StressTest, InspectIamChainNonExistentTable) {
-  std::string iam_json;
-  ASSERT_NO_THROW(iam_json = inspector_->get_iam_chain("no_such_table"));
-  EXPECT_FALSE(iam_json.empty());
-  // Should return error JSON or empty array, not crash
+TEST_F(StressTest, InspectTableChainNonExistentTable) {
+  std::string chain_json;
+  ASSERT_NO_THROW(chain_json = inspector_->get_table_chain("no_such_table"));
+  EXPECT_FALSE(chain_json.empty());
+  auto j = nlohmann::json::parse(chain_json);
+  EXPECT_TRUE(j.contains("error"));
 }
 
 TEST_F(StressTest, InspectCatalogReturnsValidJson) {
@@ -752,10 +760,8 @@ TEST_F(StressTest, InspectSummaryAfterManyTables) {
   ASSERT_NO_THROW(summary_json = inspector_->get_summary());
   auto j = nlohmann::json::parse(summary_json);
 
-  EXPECT_GT(j["allocated_extents"].get<int>(), 50)
-      << "50 tables should allocate at least 50 extents (each table needs 1+ data extents)";
-  // Note: total_pages reflects the on-disk file size which lags behind in-memory state
-  // until the BPM flushes dirty pages. Do not rely on it for in-memory operation counts.
+  EXPECT_GT(j["used_pages"].get<int>(), 50)
+      << "50 tables should allocate at least 50 pages";
 }
 
 // ——— SELECT Column Filtering Verification ———
@@ -830,25 +836,41 @@ TEST_F(StressTest, Create200TablesMillionSmallRows) {
   }
   std::cout << "[ScaleSmallRows] Created " << NUM_TABLES << " tables\n";
 
-  // ——— Phase 2: Insert rows in parallel (one thread per table) ———
+  // ——— Phase 2: Insert rows in parallel (striped across tables) + 3 chaos readers ———
+  const int NUM_CHAOS_READERS = 3;
+  const uint64_t batches_per_table = ROWS_PER_TABLE / BATCH_SIZE;
+  const uint64_t total_batches = static_cast<uint64_t>(NUM_TABLES) * batches_per_table;
+
   uint64_t total_rows = 0;
+  std::atomic<uint64_t> next_batch{0};
   std::atomic<uint64_t> atomic_rows{0};
+  std::atomic<uint64_t> chaos_queries{0};
+  std::atomic<bool> writers_done{false};
   {
-    std::vector<std::thread> threads;
-    std::mutex insert_err_mutex;
-    std::string insert_error;
-    for (int t = 0; t < NUM_TABLES; ++t) {
-      threads.emplace_back([&, t]() {
-        std::string table = "stbl_" + std::to_string(t);
+    std::vector<std::thread> writer_threads;
+    std::vector<std::thread> reader_threads;
+    std::mutex err_mutex;
+    std::string run_error;
+
+    for (int w = 0; w < NUM_THREADS; ++w) {
+      writer_threads.emplace_back([&]() {
         uint64_t local_count = 0;
-        for (int start = 0; start < ROWS_PER_TABLE; start += BATCH_SIZE) {
+        while (true) {
+          uint64_t batch_idx = next_batch.fetch_add(1);
+          if (batch_idx >= total_batches) {
+            break;
+          }
+          int t = static_cast<int>(batch_idx % NUM_TABLES);
+          int start = static_cast<int>((batch_idx / NUM_TABLES) * BATCH_SIZE);
           int count = std::min(BATCH_SIZE, ROWS_PER_TABLE - start);
+          std::string table = "stbl_" + std::to_string(t);
           auto result = execute_sql(build_batch_insert(table, start, count));
           if (!result.success) {
-            std::lock_guard<std::mutex> lock(insert_err_mutex);
-            if (insert_error.empty())
-              insert_error = "Table " + table + " batch " + std::to_string(start / BATCH_SIZE)
-                             + " failed: " + result.error_message;
+            std::lock_guard<std::mutex> lock(err_mutex);
+            if (run_error.empty()) {
+              run_error = "Table " + table + " batch " + std::to_string(start / BATCH_SIZE)
+                          + " failed: " + result.error_message;
+            }
             return;
           }
           local_count += result.affected_rows;
@@ -856,9 +878,34 @@ TEST_F(StressTest, Create200TablesMillionSmallRows) {
         atomic_rows.fetch_add(local_count);
       });
     }
-    for (auto& th : threads) th.join();
+
+    for (int r = 0; r < NUM_CHAOS_READERS; ++r) {
+      reader_threads.emplace_back([&, r]() {
+        std::mt19937 rng(42 + r);
+        std::uniform_int_distribution<int> tbl_dist(0, NUM_TABLES - 1);
+        std::uniform_int_distribution<int> id_dist(0, ROWS_PER_TABLE - 1);
+        while (!writers_done.load()) {
+          std::string sql = "SELECT * FROM stbl_" + std::to_string(tbl_dist(rng))
+                            + " WHERE id = " + std::to_string(id_dist(rng));
+          auto result = execute_sql(sql);
+          if (!result.success) {
+            std::lock_guard<std::mutex> lock(err_mutex);
+            if (run_error.empty()) {
+              run_error = "Chaos reader failed: " + result.error_message;
+            }
+            return;
+          }
+          chaos_queries.fetch_add(1);
+        }
+      });
+    }
+
+    for (auto& th : writer_threads) th.join();
+    writers_done.store(true);
+    for (auto& th : reader_threads) th.join();
+
     total_rows = atomic_rows.load();
-    ASSERT_TRUE(insert_error.empty()) << insert_error;
+    ASSERT_TRUE(run_error.empty()) << run_error;
   }
 
   double insert_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -867,6 +914,7 @@ TEST_F(StressTest, Create200TablesMillionSmallRows) {
   std::cout << "[ScaleSmallRows] Inserted " << total_rows << " rows across " << NUM_TABLES << " tables\n"
             << "[ScaleSmallRows] Threads: " << NUM_THREADS << "  Elapsed: " << insert_s << "s  ("
             << static_cast<int>(total_rows / insert_s) << " rows/s)\n"
+            << "[ScaleSmallRows] Chaos Readers: " << chaos_queries.load() << " queries executed\n"
             << "[ScaleSmallRows] DB file size: " << (db_bytes / (1024 * 1024)) << " MB\n";
 
   for (int t : {0, 50, 99, 150, 199}) {
@@ -877,10 +925,10 @@ TEST_F(StressTest, Create200TablesMillionSmallRows) {
   }
 
   auto summary = nlohmann::json::parse(inspector_->get_summary());
-  EXPECT_GT(summary["allocated_extents"].get<int>(), NUM_TABLES)
-      << "Expected at least " << NUM_TABLES << " allocated extents";
-  std::cout << "[ScaleSmallRows] allocated_extents = "
-            << summary["allocated_extents"].get<int>() << "\n";
+  EXPECT_GT(summary["used_pages"].get<int>(), NUM_TABLES)
+      << "Expected at least " << NUM_TABLES << " used pages";
+  std::cout << "[ScaleSmallRows] used_pages = "
+            << summary["used_pages"].get<int>() << "\n";
 }
 
 TEST_F(StressTest,  DISABLED_Create200TablesMillionsOfRows_1GB) {
@@ -940,10 +988,10 @@ TEST_F(StressTest,  DISABLED_Create200TablesMillionsOfRows_1GB) {
 
   // ——— Inspect at scale ———
   auto summary = nlohmann::json::parse(inspector_->get_summary());
-  EXPECT_GT(summary["allocated_extents"].get<int>(), NUM_TABLES)
-      << "Expected at least " << NUM_TABLES << " allocated extents";
-  std::cout << "[Scale1GB] allocated_extents = "
-            << summary["allocated_extents"].get<int>() << "\n";
+  EXPECT_GT(summary["used_pages"].get<int>(), NUM_TABLES)
+      << "Expected at least " << NUM_TABLES << " used pages";
+  std::cout << "[Scale1GB] used_pages = "
+            << summary["used_pages"].get<int>() << "\n";
 }
 
 TEST_F(StressTest, DISABLED_Create200TablesMillionsOfRows_10GB) {
@@ -1031,10 +1079,10 @@ TEST_F(StressTest, DISABLED_Create200TablesMillionsOfRows_10GB) {
 
   // ——— Inspect at scale ———
   auto summary = nlohmann::json::parse(inspector_->get_summary());
-  std::cout << "[Scale10GB] allocated_extents = "
-            << summary["allocated_extents"].get<int>() << "\n";
-  EXPECT_GT(summary["allocated_extents"].get<int>(), 250000)
-      << "~10 GB of wide rows should require hundreds of thousands of allocated extents";
+  std::cout << "[Scale10GB] used_pages = "
+            << summary["used_pages"].get<int>() << "\n";
+  EXPECT_GT(summary["used_pages"].get<int>(), 250000)
+      << "~10 GB of wide rows should require hundreds of thousands of used pages";
 }
 
 // ——— New Stress Tests ———
@@ -1048,12 +1096,12 @@ TEST_F(StressTest, SmallPoolForcesEvictions) {
   auto disk = std::make_unique<DiskManager>("stress_pool.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
   auto log_mgr = std::make_unique<LogManager>("stress_pool.db.wal");
-  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
-  auto ext_mgr = std::make_unique<ExtentManager>(*bpm, *log_mgr, *txn_mgr);
-  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr, *log_mgr, *txn_mgr);
-  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr, *txn_mgr);
+  auto rollback_mgr = std::make_unique<RollbackManager>(*log_mgr, *bpm, "stress_pool.db");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr, *rollback_mgr);
+  auto page_allocator = std::make_unique<PageAllocator>(*bpm, *log_mgr, *txn_mgr);
+  auto catalog = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *catalog, *log_mgr, *txn_mgr, *page_allocator);
   Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
@@ -1089,13 +1137,14 @@ TEST_F(StressTest, SmallPoolForcesEvictions) {
             << " dirty_evictions=" << stats.dirty_evictions
             << " hit_ratio=" << stats.hit_ratio() << "%" << std::endl;
 
-  bpm.reset();
   table_mgr.reset();
   catalog.reset();
-  iam_mgr.reset();
-  ext_mgr.reset();
+  page_allocator.reset();
+  txn_mgr.reset();
+  rollback_mgr.reset();
   bpm.reset();
   disk.reset();
+  log_mgr.reset();
   std::remove("stress_pool.db");
 }
 
@@ -1106,12 +1155,12 @@ TEST_F(StressTest, DirtyPagesSurviveEviction) {
   auto disk = std::make_unique<DiskManager>("stress_dirty.db");
   auto bpm = std::make_unique<BufferPoolManager>(*disk, 4, std::make_unique<LRUPageReplacer>());
   auto log_mgr = std::make_unique<LogManager>("stress_dirty.db.wal");
-  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr);
-  auto ext_mgr = std::make_unique<ExtentManager>(*bpm, *log_mgr, *txn_mgr);
-  auto iam_mgr = std::make_unique<IamManager>(*bpm, *ext_mgr, *log_mgr, *txn_mgr);
-  auto catalog = std::make_unique<CatalogManager>(*bpm, *iam_mgr, *txn_mgr);
+  auto rollback_mgr = std::make_unique<RollbackManager>(*log_mgr, *bpm, "stress_dirty.db");
+  auto txn_mgr = std::make_unique<TransactionManager>(*log_mgr, *rollback_mgr);
+  auto page_allocator = std::make_unique<PageAllocator>(*bpm, *log_mgr, *txn_mgr);
+  auto catalog = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_mgr);
   catalog->init();
-  auto table_mgr = std::make_unique<TableManager>(*bpm, *iam_mgr, *catalog, *log_mgr, *txn_mgr);
+  auto table_mgr = std::make_unique<TableManager>(*bpm, *catalog, *log_mgr, *txn_mgr, *page_allocator);
   Executor exec(*catalog, *table_mgr, *txn_mgr);
 
   auto run_sql = [&](const std::string& sql) {
@@ -1134,93 +1183,15 @@ TEST_F(StressTest, DirtyPagesSurviveEviction) {
   ASSERT_TRUE(sel.success);
   EXPECT_EQ(sel.rows.size(), 500u);
 
-  bpm.reset();
   table_mgr.reset();
   catalog.reset();
-  iam_mgr.reset();
-  ext_mgr.reset();
+  page_allocator.reset();
+  txn_mgr.reset();
+  rollback_mgr.reset();
+  bpm.reset();
   disk.reset();
+  log_mgr.reset();
   std::remove("stress_dirty.db");
-}
-
-// ---- IAM Chain Growth ----
-
-TEST_F(StressTest, DISABLED_IAMChainGrowthBeyondOnePage) {
-  // Each IAM page holds at most 1022 extent IDs. When a table exceeds
-  // 1022 extents, the IAM chain must grow to a second page.
-  //
-  // Each extent = 8 pages = ~32 KB. At ~100 bytes/row, that's ~320 rows/extent.
-  // 1023 extents = ~327,360 rows — this takes many minutes.
-  // Run manually: ./tests/lettydb_test --gtest_filter="StressTest.DISABLED_IAMChainGrowthBeyondOnePage"
-
-  const int ROWS_NEEDED = 330000;
-  const int BATCH_SIZE = 500;
-
-  execute_sql("CREATE TABLE iam_growth (id INT, val VARCHAR(50))");
-
-  int inserted = 0;
-  for (int batch = 0; inserted < ROWS_NEEDED; ++batch) {
-    std::ostringstream sql;
-    sql << "INSERT INTO iam_growth VALUES ";
-    for (int i = 0; i < BATCH_SIZE; ++i) {
-      if (i > 0) sql << ", ";
-      int id = inserted + i;
-      sql << "(" << id << ", 'v_" << id << "')";
-    }
-    auto result = execute_sql(sql.str());
-    ASSERT_TRUE(result.success) << "Batch " << batch << " failed: " << result.error_message;
-    inserted += result.affected_rows;
-
-    if ((batch + 1) % 20 == 0) {
-      auto iam_json = inspector_->get_iam_chain("iam_growth");
-      auto j = nlohmann::json::parse(iam_json);
-      int total_extents = 0;
-      for (auto& iam_page : j) {
-        if (iam_page.contains("extents")) {
-          total_extents += iam_page["extents"].size();
-        }
-      }
-      std::cout << "[IAMGrowth] rows=" << inserted << " extents=" << total_extents
-                << " iam_pages=" << j.size() << std::endl;
-      if (total_extents > 1022) {
-        break;  // IAM chain has grown beyond one page
-      }
-    }
-  }
-
-  auto iam_json = inspector_->get_iam_chain("iam_growth");
-  auto j = nlohmann::json::parse(iam_json);
-  EXPECT_GT(j.size(), 1u)
-      << "IAM chain should have grown beyond one page after >1022 extents";
-}
-
-// ---- GAM Expansion ----
-
-TEST_F(StressTest, GAMExpansionBeyondOnePage) {
-  // One GAM page tracks 32,720 extents = ~1 GB. We can't practically fill
-  // 1 GB in a unit test, but we can verify the GAM chain structure
-  // by inspecting it after moderate allocations.
-  for (int i = 0; i < 50; ++i) {
-    execute_sql("CREATE TABLE gam_tbl_" + std::to_string(i) + " (id INT, v VARCHAR(100))");
-    execute_sql("INSERT INTO gam_tbl_" + std::to_string(i) + " VALUES (1, 'data')");
-  }
-
-  auto gam_json = inspector_->get_gam();
-  auto j = nlohmann::json::parse(gam_json);
-  EXPECT_GE(j.size(), 1u);
-
-  // allocation is an array of 0/1 ints per GAM page
-  int total_allocated = 0;
-  for (auto& page : j) {
-    if (page.contains("allocation")) {
-      auto& arr = page["allocation"];
-      for (auto& bit : arr) {
-        if (bit.get<int>() == 1) total_allocated++;
-      }
-    }
-  }
-  EXPECT_GT(total_allocated, 50)
-      << "Expected >50 allocated extents after creating 50 tables";
 }
 
 // ---- WHERE Clause Filtering at Scale ----
@@ -1355,11 +1326,11 @@ TEST_F(StressTest, MixedReadWriteInterleaved) {
   EXPECT_EQ(final.rows.size(), 1000u);
 }
 
-// ---- Multiple Tables Concurrent IAM Growth ----
+// ---- Multiple Tables Concurrent Chain Growth ----
 
-TEST_F(StressTest, ManyTablesGrowIAMIndependently) {
+TEST_F(StressTest, ManyTablesGrowChainsIndependently) {
   // Create many tables, insert varying amounts of data into each,
-  // and verify each table's IAM chain is independent.
+  // and verify each table's page chain is independent.
   const int NUM_TABLES = 30;
   for (int t = 0; t < NUM_TABLES; ++t) {
     execute_sql("CREATE TABLE indep_" + std::to_string(t) + " (id INT, data VARCHAR(40))");
@@ -1387,12 +1358,12 @@ TEST_F(StressTest, ManyTablesGrowIAMIndependently) {
         << "Table indep_" << t << " expected " << expected << " rows, got " << sel.rows.size();
   }
 
-  // Verify IAM chains are all independent
+  // Verify table page chains are all independent
   for (int t = 0; t < NUM_TABLES; ++t) {
-    auto iam_json = inspector_->get_iam_chain("indep_" + std::to_string(t));
-    auto j = nlohmann::json::parse(iam_json);
-    // Every table should have at least one IAM page
-    EXPECT_GE(j.size(), 1u);
+    auto chain_json = inspector_->get_table_chain("indep_" + std::to_string(t));
+    auto j = nlohmann::json::parse(chain_json);
+    EXPECT_TRUE(j.contains("pages"));
+    EXPECT_GE(j["pages"].size(), 1u);
   }
 }
 
@@ -1404,7 +1375,7 @@ TEST_F(StressTest, ManyPagesFillPattern) {
   //
   // Row: id INT(4) + note VARCHAR(500) ≈ 506 bytes
   // Page free space ≈ 4080 bytes (after SlottedPageHeader)
-  // ~8 rows per page, ~64 rows per extent
+  // ~8 rows per page
   execute_sql("CREATE TABLE fill_test (id INT, note VARCHAR(500))");
 
   const int TARGET_ROWS = 10000;
@@ -1427,10 +1398,10 @@ TEST_F(StressTest, ManyPagesFillPattern) {
   EXPECT_EQ(sel.rows.size(), (size_t)TARGET_ROWS);
 
   auto summary = nlohmann::json::parse(inspector_->get_summary());
-  int allocated = summary["allocated_extents"].get<int>();
-  int expected_min_extents = TARGET_ROWS / 64;  // rough lower bound
-  EXPECT_GE(allocated, expected_min_extents)
-      << "Expected at least " << expected_min_extents << " extents for " << TARGET_ROWS << " wide rows";
+  int used = summary["used_pages"].get<int>();
+  int expected_min_pages = TARGET_ROWS / 8;  // rough lower bound
+  EXPECT_GE(used, expected_min_pages)
+      << "Expected at least " << expected_min_pages << " pages for " << TARGET_ROWS << " wide rows";
 }
 
 namespace {

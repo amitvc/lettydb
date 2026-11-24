@@ -171,22 +171,19 @@ void RecoveryManager::process_log_record(const LogRecord &record,
 								deserialize_page_patch);
 	  break;
 
-	case LogRecordType::ALLOCATE_EXTENT:
-	case LogRecordType::DEALLOCATE_EXTENT:
-	  process_update<GamPatch>(record,
+	case LogRecordType::DB_METADATA_UPDATE:
+	  process_update<DbMetadataPatch>(record,
 							   active_transaction_table,
 							   dirty_page_table,
-							   deserialize_extent_patch);
+									  deserialize_db_metadata_patch);
 	  break;
 
-	case LogRecordType::IAM_ADD_EXTENT:
-	case LogRecordType::IAM_REMOVE_EXTENT:
-	  process_update<IamPatch>(record,
-							   active_transaction_table,
-							   dirty_page_table,
-							   deserialize_iam_patch);
+	case LogRecordType::PAGE_HEADER_UPDATE:
+	  process_update<PageHeaderPatch>(record,
+									  active_transaction_table,
+									  dirty_page_table,
+									  deserialize_page_header_patch);
 	  break;
-
 	case LogRecordType::COMPENSATION:
 	  process_update<CompensationPatch>(record,
 										active_transaction_table,
@@ -234,19 +231,17 @@ page_id_t RecoveryManager::extract_page_id(const LogRecord& record) const {
       }
       break;
     }
-    case LogRecordType::ALLOCATE_EXTENT:
-    case LogRecordType::DEALLOCATE_EXTENT: {
-      GamPatch patch{};
-      if (deserialize_extent_patch(record.payload, patch)) {
-        return patch.gam_page_id;
+    case LogRecordType::DB_METADATA_UPDATE: {
+      DbMetadataPatch patch{};
+      if (deserialize_db_metadata_patch(record.payload, patch)) {
+        return DATABASE_HEADER_PAGE_ID;
       }
       break;
     }
-    case LogRecordType::IAM_ADD_EXTENT:
-    case LogRecordType::IAM_REMOVE_EXTENT: {
-      IamPatch patch{};
-      if (deserialize_iam_patch(record.payload, patch)) {
-        return patch.iam_page_id;
+    case LogRecordType::PAGE_HEADER_UPDATE: {
+      PageHeaderPatch patch{};
+      if (deserialize_page_header_patch(record.payload, patch)) {
+        return patch.page_id;
       }
       break;
     }
@@ -254,30 +249,6 @@ page_id_t RecoveryManager::extract_page_id(const LogRecord& record) const {
       break;
   }
   return INVALID_PAGE_ID;
-}
-
-void RecoveryManager::materialize_data_extent(uint32_t extent_id) {
-  page_id_t extent_start = static_cast<page_id_t>(extent_id * EXTENT_SIZE);
-  page_id_t file_pages = bpm_.get_file_size_in_pages();
-  for (uint8_t offset = 0; offset < EXTENT_SIZE; ++offset) {
-    page_id_t data_page_id = extent_start + offset;
-    if (data_page_id >= file_pages) {
-      PageGuard data_guard = bpm_.allocate_page_guard(data_page_id);
-      if (data_guard) {
-        SlottedPage::init(reinterpret_cast<Byte*>(data_guard.get_data()));
-        data_guard.mark_dirty();
-      }
-      continue;
-    }
-    PageGuard data_guard = bpm_.fetch_page_guard(data_page_id);
-    if (!data_guard) {
-      data_guard = bpm_.allocate_page_guard(data_page_id);
-      if (data_guard) {
-        SlottedPage::init(reinterpret_cast<Byte*>(data_guard.get_data()));
-        data_guard.mark_dirty();
-      }
-    }
-  }
 }
 
 bool RecoveryManager::redo_record(const LogRecord& record, Page* page) {
@@ -298,31 +269,21 @@ bool RecoveryManager::redo_record(const LogRecord& record, Page* page) {
       }
       return apply_compensation(page, patch);
     }
-    case LogRecordType::ALLOCATE_EXTENT:
-    case LogRecordType::DEALLOCATE_EXTENT: {
-      GamPatch patch{};
-      if (!deserialize_extent_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize extent patch");
+    case LogRecordType::DB_METADATA_UPDATE: {
+      DbMetadataPatch patch{};
+      if (!deserialize_db_metadata_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize DbMetadata patch");
         return false;
       }
-      return apply_gam_bit(page, patch.bit_index,
-                           record.header.type == LogRecordType::ALLOCATE_EXTENT);
+      return apply_db_metadata_state(page, patch.after);
     }
-    case LogRecordType::IAM_ADD_EXTENT:
-    case LogRecordType::IAM_REMOVE_EXTENT: {
-      IamPatch patch{};
-      if (!deserialize_iam_patch(record.payload, patch)) {
-        LOG_RECOVERY_MGR_ERROR("Failed to deserialize IAM patch");
+    case LogRecordType::PAGE_HEADER_UPDATE: {
+      PageHeaderPatch patch{};
+      if (!deserialize_page_header_patch(record.payload, patch)) {
+        LOG_RECOVERY_MGR_ERROR("Failed to deserialize PageHeaderPatch");
         return false;
       }
-      bool is_add = (record.header.type == LogRecordType::IAM_ADD_EXTENT);
-      if (!apply_iam_extent(page, patch.extent_id, is_add)) {
-        return false;
-      }
-      if (is_add) {
-        materialize_data_extent(patch.extent_id);
-      }
-      return true;
+      return apply_page_header_patch(page, patch.after);
     }
     default:
       return false;

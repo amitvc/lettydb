@@ -4,7 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include "storage/config.h"
-#include "storage/slotted_page.h"
+#include "storage/storage_def.h"
 
 namespace letty {
 
@@ -12,31 +12,66 @@ class BufferPoolManager;
 
 /**
  * @class Page
- * @brief Represents a single page in the buffer pool.
+ * @brief Represents a single 4 KB page frame in the buffer pool.
  *
- * A Page stores only frame metadata and a pointer to the frame's page bytes.
- * BufferPoolManager owns the actual page memory as one PAGE_SIZE-aligned slab.
+ * Every on-disk page in LettyDB has a fixed 20-byte PageHeader at byte 0
+ * followed by a 4076-byte body (PAGE_BODY_SIZE) whose format depends on
+ * PageHeader::page_type.
  *
- * Keeping the PAGE_SIZE buffer outside Page avoids making every Page object
- * PAGE_SIZE-aligned. If Page embedded `alignas(PAGE_SIZE) char data_[PAGE_SIZE]`
- * plus metadata, sizeof(Page) would be rounded up to the next PAGE_SIZE
- * multiple: 4096 bytes of data plus metadata would occupy 8192 bytes. With a
- * separate slab, each frame uses exactly one PAGE_SIZE data slice plus a small
- * Page metadata object.
+ * @verbatim
+ * Uniform 4 KB Page Layout (DEFAULT_PAGE_SIZE = 4096 bytes)
  *
- * The BufferPoolManager allocates a contiguous, PAGE_SIZE-aligned buffer of
- * pool_size * PAGE_SIZE bytes and assigns each frame's data_ pointer into it.
- * Each frame starts on a database page boundary and is used as byte-oriented
- * storage for page layouts loaded from or stored to disk.
+ *  +-------------------------------------------------------------------+ 0
+ *  | PageHeader (20 bytes — owned by Page)                             |
+ *  |   page_lsn (8) | next_page_id (4) | prev_page_id (4)              |
+ *  |   table_id (2) | page_type (1)    | reserved (1)                  |
+ *  +-------------------------------------------------------------------+ 20  ← get_body()
+ *  | Page Body (PAGE_BODY_SIZE = 4076 bytes)                           |
+ *  |                                                                   |
+ *  |   PageType::DATABASE_HEADER (Page 0):                             |
+ *  |     DatabaseMetadata (signature, version, free_list_head, ...)    |
+ *  |                                                                   |
+ *  |   PageType::DATA (Heap / Catalog Tables):                         |
+ *  |     SlottedPage { SlottedPageHeader (4B) -> Slots -> Tuples }     |
+ *  |                                                                   |
+ *  |   PageType::INDEX (B+Tree Nodes):                                 |
+ *  |     B+Tree internal / leaf node payload                           |
+ *  |                                                                   |
+ *  |   PageType::FREE (Freelist):                                      |
+ *  |     Unused; linked via PageHeader::next_page_id                   |
+ *  +-------------------------------------------------------------------+ 4096
+ * @endverbatim
+ *
+ * `Page` exposes `get_data()` (full 4 KB buffer for DiskManager I/O),
+ * `get_body()` (the 4076-byte payload for `DatabaseMetadata`, `SlottedPage`,
+ * etc.), and direct accessors for all `PageHeader` fields. Payload classes
+ * never read or modify `PageHeader` directly.
+ *
+ * Memory model: A `Page` stores only frame metadata and a pointer into
+ * BufferPoolManager's contiguous DEFAULT_PAGE_SIZE-aligned slab. Keeping the
+ * 4 KB buffer outside `Page` avoids inflating `sizeof(Page)` to 8192 bytes due
+ * to alignment rounding.
  */
 class Page {
  public:
   Page() = default;
 
-  /** @brief Returns a mutable pointer to the raw page data. */
+  /** @brief Returns a mutable pointer to the raw 4 KB page buffer (header + body). */
   char* get_data() {
     assert(data_ != nullptr && "Page data_ is null — Page must be used through BufferPoolManager");
     return data_;
+  }
+
+  /** @brief Returns a mutable pointer to the page body (after PageHeader, PAGE_BODY_SIZE bytes). */
+  char* get_body() {
+    assert(data_ != nullptr && "Page data_ is null — Page must be used through BufferPoolManager");
+    return data_ + PAGE_HEADER_SIZE;
+  }
+
+  /** @brief Returns a read-only pointer to the page body (after PageHeader, PAGE_BODY_SIZE bytes). */
+  const char* get_body() const {
+    assert(data_ != nullptr && "Page data_ is null — Page must be used through BufferPoolManager");
+    return data_ + PAGE_HEADER_SIZE;
   }
 
   /** @brief Returns the page ID of this page, or INVALID_PAGE_ID if empty. */
@@ -48,16 +83,66 @@ class Page {
   /** @brief Returns true if the in-memory content differs from what is on disk. */
   bool is_dirty() const { return is_dirty_; }
 
-  /** @brief Returns the page LSN (log sequence number) from page data. */
-  lsn_t get_page_lsn() const {
-    auto header = reinterpret_cast<const SlottedPageHeader*>(data_);
-    return header->page_lsn;
+  PageHeader get_header() const {
+    assert(data_ != nullptr);
+    PageHeader header{};
+    std::memcpy(&header, data_, PAGE_HEADER_SIZE);
+    return header;
   }
 
-  /** @brief Sets the page LSN (log sequence number) in page data. */
+  void set_header(const PageHeader& header) {
+    assert(data_ != nullptr);
+    std::memcpy(data_, &header, PAGE_HEADER_SIZE);
+  }
+
+  lsn_t get_page_lsn() const {
+    return get_header().page_lsn;
+  }
+
   void set_page_lsn(lsn_t lsn) {
-    auto header = reinterpret_cast<SlottedPageHeader*>(data_);
-    header->page_lsn = lsn;
+    PageHeader header = get_header();
+    header.page_lsn = lsn;
+    set_header(header);
+  }
+
+  page_id_t get_next_page_id() const {
+    return get_header().next_page_id;
+  }
+
+  void set_next_page_id(page_id_t next_page_id) {
+    PageHeader header = get_header();
+    header.next_page_id = next_page_id;
+    set_header(header);
+  }
+
+  page_id_t get_prev_page_id() const {
+    return get_header().prev_page_id;
+  }
+
+  void set_prev_page_id(page_id_t prev_page_id) {
+    PageHeader header = get_header();
+    header.prev_page_id = prev_page_id;
+    set_header(header);
+  }
+
+  uint16_t get_table_id() const {
+    return get_header().table_id;
+  }
+
+  void set_table_id(uint16_t table_id) {
+    PageHeader header = get_header();
+    header.table_id = table_id;
+    set_header(header);
+  }
+
+  PageType get_page_type() const {
+    return get_header().page_type;
+  }
+
+  void set_page_type(PageType type) {
+    PageHeader header = get_header();
+    header.page_type = type;
+    set_header(header);
   }
 
  private:
@@ -66,7 +151,7 @@ class Page {
 
   /** @brief Resets the page to its initial empty state. Zeroes all data. */
   void reset() {
-    std::memset(data_, 0, PAGE_SIZE);
+    std::memset(data_, 0, DEFAULT_PAGE_SIZE);
     page_id_ = INVALID_PAGE_ID;
     pin_count_ = 0;
     is_dirty_ = false;

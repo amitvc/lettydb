@@ -8,8 +8,6 @@
 #include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
 #include "catalog/catalog_manager.h"
 #include "storage/table_manager.h"
 
@@ -24,11 +22,10 @@ class ExecutorTest : public ::testing::Test {
         *disk_manager, 64, std::make_unique<LRUPageReplacer>());
     log_manager = std::make_unique<LogManager>("test_executor.db.wal");
     txn_manager = std::make_unique<TransactionManager>(*log_manager);
-    extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
-    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
+	page_allocator = std::make_unique<PageAllocator>(*bpm, *log_manager, *txn_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_manager);
     catalog_manager->init();
-    table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager, *log_manager, *txn_manager);
+    table_manager = std::make_unique<TableManager>(*bpm, *catalog_manager, *log_manager, *txn_manager, *page_allocator);
     executor = std::make_unique<Executor>(*catalog_manager, *table_manager, *txn_manager);
   }
 
@@ -36,8 +33,6 @@ class ExecutorTest : public ::testing::Test {
     executor.reset();
     table_manager.reset();
     catalog_manager.reset();
-    iam_manager.reset();
-    extent_manager.reset();
     txn_manager.reset();
     log_manager.reset();
     bpm.reset();
@@ -59,8 +54,7 @@ class ExecutorTest : public ::testing::Test {
   std::unique_ptr<BufferPoolManager> bpm;
   std::unique_ptr<LogManager> log_manager;
   std::unique_ptr<TransactionManager> txn_manager;
-  std::unique_ptr<ExtentManager> extent_manager;
-  std::unique_ptr<IamManager> iam_manager;
+  std::unique_ptr<PageAllocator> page_allocator;
   std::unique_ptr<CatalogManager> catalog_manager;
   std::unique_ptr<TableManager> table_manager;
   std::unique_ptr<Executor> executor;
@@ -189,12 +183,12 @@ TEST_F(ExecutorTest, SelectSystemTables) {
   auto result = execute_sql("SELECT * FROM sys_tables");
   ASSERT_TRUE(result.success) << result.error_message;
   EXPECT_GE(result.rows.size(), 2);  // sys_tables + sys_columns
-  EXPECT_EQ(result.column_names.size(), 4);  // oid, name, iam_page_id, column_count
+  EXPECT_EQ(result.column_names.size(), 5);  // oid, name, first_page_id, last_page_id, status
 
-  // sys_columns should have columns for both system tables (4 + 5 = 9 total)
+  // sys_columns should have columns for both system tables (5 + 5 = 10 total)
   auto col_result = execute_sql("SELECT * FROM sys_columns");
   ASSERT_TRUE(col_result.success) << col_result.error_message;
-  EXPECT_GE(col_result.rows.size(), 9);
+  EXPECT_GE(col_result.rows.size(), 10);
   EXPECT_EQ(col_result.column_names.size(), 5);  // table_oid, name, type, length, offset
 }
 
@@ -647,7 +641,6 @@ TEST_F(ExecutorTest, CompactEmptyTable) {
   ASSERT_TRUE(compact.success);
   ASSERT_TRUE(compact.compaction_stats.has_value());
   EXPECT_EQ(compact.compaction_stats->tuples_migrated, 0u);
-  EXPECT_EQ(compact.compaction_stats->extents_freed, 0u);
 
   auto sel = execute_sql("SELECT * FROM t");
   ASSERT_TRUE(sel.success);
