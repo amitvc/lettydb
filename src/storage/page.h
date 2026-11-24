@@ -14,9 +14,9 @@ class BufferPoolManager;
  * @class Page
  * @brief Represents a single 4 KB page frame in the buffer pool.
  *
- * Every on-disk page in LettyDB follows a uniform **envelope + payload** layout:
- * a fixed 20-byte `PageHeader` at byte 0 followed by a 4076-byte body
- * (`PAGE_BODY_SIZE`) whose format depends on `PageHeader::page_type`.
+ * Every on-disk page in LettyDB has a fixed 20-byte PageHeader at byte 0
+ * followed by a 4076-byte body (PAGE_BODY_SIZE) whose format depends on
+ * PageHeader::page_type.
  *
  * @verbatim
  * Uniform 4 KB Page Layout (DEFAULT_PAGE_SIZE = 4096 bytes)
@@ -24,7 +24,7 @@ class BufferPoolManager;
  *  +-------------------------------------------------------------------+ 0
  *  | PageHeader (20 bytes — owned by Page)                             |
  *  |   page_lsn (8) | next_page_id (4) | prev_page_id (4)              |
- *  |   table_id (2) | page_type (1)    | status (1)                    |
+ *  |   table_id (2) | page_type (1)    | reserved (1)                  |
  *  +-------------------------------------------------------------------+ 20  ← get_body()
  *  | Page Body (PAGE_BODY_SIZE = 4076 bytes)                           |
  *  |                                                                   |
@@ -83,7 +83,6 @@ class Page {
   /** @brief Returns true if the in-memory content differs from what is on disk. */
   bool is_dirty() const { return is_dirty_; }
 
-  /** @brief Returns a copy of the page's common PageHeader. */
   PageHeader get_header() const {
     assert(data_ != nullptr);
     PageHeader header{};
@@ -91,66 +90,55 @@ class Page {
     return header;
   }
 
-  /** @brief Overwrites the page's common PageHeader. */
   void set_header(const PageHeader& header) {
     assert(data_ != nullptr);
     std::memcpy(data_, &header, PAGE_HEADER_SIZE);
   }
 
-  /** @brief Returns the page LSN (log sequence number) from PageHeader. */
   lsn_t get_page_lsn() const {
     return get_header().page_lsn;
   }
 
-  /** @brief Sets the page LSN (log sequence number) in PageHeader. */
   void set_page_lsn(lsn_t lsn) {
     PageHeader header = get_header();
     header.page_lsn = lsn;
     set_header(header);
   }
 
-  /** @brief Returns the next page ID in this page's linked chain. */
   page_id_t get_next_page_id() const {
     return get_header().next_page_id;
   }
 
-  /** @brief Sets the next page ID in PageHeader. */
   void set_next_page_id(page_id_t next_page_id) {
     PageHeader header = get_header();
     header.next_page_id = next_page_id;
     set_header(header);
   }
 
-  /** @brief Returns the previous page ID in this page's linked chain. */
   page_id_t get_prev_page_id() const {
     return get_header().prev_page_id;
   }
 
-  /** @brief Sets the previous page ID in PageHeader. */
   void set_prev_page_id(page_id_t prev_page_id) {
     PageHeader header = get_header();
     header.prev_page_id = prev_page_id;
     set_header(header);
   }
 
-  /** @brief Returns the owning table ID from PageHeader. */
   uint16_t get_table_id() const {
     return get_header().table_id;
   }
 
-  /** @brief Sets the owning table ID in PageHeader. */
   void set_table_id(uint16_t table_id) {
     PageHeader header = get_header();
     header.table_id = table_id;
     set_header(header);
   }
 
-  /** @brief Returns the PageType from PageHeader. */
   PageType get_page_type() const {
     return get_header().page_type;
   }
 
-  /** @brief Sets the PageType in PageHeader. */
   void set_page_type(PageType type) {
     PageHeader header = get_header();
     header.page_type = type;

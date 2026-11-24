@@ -18,8 +18,6 @@
 #include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
 #include "catalog/catalog_manager.h"
 #include "storage/table_manager.h"
 
@@ -78,13 +76,12 @@ class BPMBenchmark : public ::testing::Test {
 	auto disk_manager = std::make_unique<DiskManager>(db_file);
 	auto bpm = std::make_unique<BufferPoolManager>(
 		*disk_manager, pool_size, std::make_unique<LRUPageReplacer>());
-	auto extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager ,*txn_manager);
-	auto iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
+	auto page_allocator = std::make_unique<PageAllocator>(*bpm, *log_manager ,*txn_manager);
     bpm->flush_all_pages();
 
-    auto catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
+    auto catalog_manager = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_manager);
     catalog_manager->init();
-    auto table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager, *log_manager, *txn_manager);
+    auto table_manager = std::make_unique<TableManager>(*bpm, *catalog_manager, *log_manager, *txn_manager, *page_allocator);
     auto executor = std::make_unique<Executor>(*catalog_manager, *table_manager, *txn_manager);
 
     // Helper to execute SQL
@@ -133,8 +130,6 @@ class BPMBenchmark : public ::testing::Test {
     executor.reset();
     table_manager.reset();
     catalog_manager.reset();
-    iam_manager.reset();
-    extent_manager.reset();
     bpm.reset();
     disk_manager.reset();
     std::remove(db_file.c_str());

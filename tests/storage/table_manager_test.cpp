@@ -6,8 +6,6 @@
 #include "transaction/transaction_manager.h"
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
 #include "catalog/catalog_manager.h"
 #include "common/db_exception.h"
 
@@ -22,18 +20,15 @@ class TableManagerTest : public ::testing::Test {
         *disk_manager, 64, std::make_unique<LRUPageReplacer>());
     log_manager = std::make_unique<LogManager>("test_table_manager.db.wal");
     txn_manager = std::make_unique<TransactionManager>(*log_manager);
-    extent_manager = std::make_unique<ExtentManager>(*bpm, *log_manager, *txn_manager);
-    iam_manager = std::make_unique<IamManager>(*bpm, *extent_manager, *log_manager, *txn_manager);
-    catalog_manager = std::make_unique<CatalogManager>(*bpm, *iam_manager, *txn_manager);
+    page_allocator = std::make_unique<PageAllocator>(*bpm, *log_manager, *txn_manager);
+    catalog_manager = std::make_unique<CatalogManager>(*bpm, *page_allocator, *txn_manager);
     catalog_manager->init();
-    table_manager = std::make_unique<TableManager>(*bpm, *iam_manager, *catalog_manager, *log_manager, *txn_manager);
+    table_manager = std::make_unique<TableManager>(*bpm, *catalog_manager, *log_manager, *txn_manager, *page_allocator);
   }
 
   void TearDown() override {
     table_manager.reset();
     catalog_manager.reset();
-    iam_manager.reset();
-    extent_manager.reset();
     txn_manager.reset();
     log_manager.reset();
     bpm.reset();
@@ -47,8 +42,7 @@ class TableManagerTest : public ::testing::Test {
   std::unique_ptr<BufferPoolManager> bpm;
   std::unique_ptr<LogManager> log_manager;
   std::unique_ptr<TransactionManager> txn_manager;
-  std::unique_ptr<ExtentManager> extent_manager;
-  std::unique_ptr<IamManager> iam_manager;
+  std::unique_ptr<PageAllocator> page_allocator;
   std::unique_ptr<CatalogManager> catalog_manager;
   std::unique_ptr<TableManager> table_manager;
 };
@@ -168,4 +162,4 @@ TEST_F(TableManagerTest, MultipleInsertsFillPage) {
   EXPECT_EQ(results.size(), 100);
 }
 
-} // namespace letty
+}

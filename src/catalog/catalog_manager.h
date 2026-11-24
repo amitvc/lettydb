@@ -115,7 +115,7 @@ class CatalogManager {
    */
   bool update_table_page_bounds(const std::string& name, page_id_t first_page_id, page_id_t last_page_id, uint64_t txn_id);
 
-  /** Schema for sys_tables: {oid INT, name VARCHAR(32), first_page_id INT, last_page_id INT, status INT} */
+  /** Schema for sys_tables: {oid INT, name VARCHAR(32), first_page_id INT, last_page_id INT, status TINYINT} */
   static Schema sys_tables_schema();
 
   /** Schema for sys_columns: {table_oid INT, name VARCHAR(32), type INT, length INT, offset INT} */

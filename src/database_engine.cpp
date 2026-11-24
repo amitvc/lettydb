@@ -43,7 +43,11 @@ DatabaseEngine::DatabaseEngine(const std::string& db_path) {
       *buffer_pool_, *catalog_manager_);
 }
 
-DatabaseEngine::~DatabaseEngine() = default;
+DatabaseEngine::~DatabaseEngine() {
+  if (checkpoint_manager_) {
+    checkpoint_manager_->run_checkpoint();
+  }
+}
 
 Executor& DatabaseEngine::get_executor() { return *executor_; }
 StorageInspector& DatabaseEngine::get_inspector() { return *inspector_; }

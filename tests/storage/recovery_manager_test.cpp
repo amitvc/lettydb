@@ -23,10 +23,9 @@
 #include "sql/parser.h"
 #include "storage/checkpoint_manager.h"
 #include "storage/disk_manager.h"
-#include "storage/extent_manager.h"
-#include "storage/iam_manager.h"
 #include "storage/log_manager.h"
 #include "storage/log_record.h"
+#include "storage/page_allocator.h"
 #include "storage/rollback_manager.h"
 #include "storage/slotted_page.h"
 #include "storage/storage_def.h"
@@ -79,55 +78,6 @@ class RecoveryManagerTest : public ::testing::Test {
       txn_mgr_->record_lsn(txn_id, assigned_lsn);
     }
     return assigned_lsn;
-  }
-
-  lsn_t append_gam_update(uint64_t txn_id, page_id_t gam_page_id, uint16_t bit_index,
-                          LogRecordType type = LogRecordType::ALLOCATE_EXTENT) {
-    GamPatch patch{};
-    patch.gam_page_id = gam_page_id;
-    patch.bit_index = bit_index;
-
-    LogRecord record{};
-    build_extent_record(type, txn_id, patch, record);
-    if (txn_id != INVALID_TXN_ID) {
-      record.header.prev_lsn = txn_mgr_->get_last_lsn(txn_id);
-    }
-    lsn_t assigned_lsn = log_mgr_->append_record(record);
-    if (txn_id != INVALID_TXN_ID) {
-      txn_mgr_->record_lsn(txn_id, assigned_lsn);
-    }
-    return assigned_lsn;
-  }
-
-  lsn_t append_iam_update(uint64_t txn_id, page_id_t iam_page_id, uint32_t extent_id,
-                          LogRecordType type = LogRecordType::IAM_ADD_EXTENT) {
-    IamPatch patch{};
-    patch.iam_page_id = iam_page_id;
-    patch.extent_id = extent_id;
-
-    LogRecord record{};
-    build_iam_extent_record(type, txn_id, patch, record);
-    if (txn_id != INVALID_TXN_ID) {
-      record.header.prev_lsn = txn_mgr_->get_last_lsn(txn_id);
-    }
-    lsn_t assigned_lsn = log_mgr_->append_record(record);
-    if (txn_id != INVALID_TXN_ID) {
-      txn_mgr_->record_lsn(txn_id, assigned_lsn);
-    }
-    return assigned_lsn;
-  }
-
-  bool gam_bit_set(page_id_t gam_page_id, uint16_t bit_index) {
-    PageGuard guard = bpm_->fetch_page_guard(gam_page_id);
-    GAMPage gam = load_page_layout<GAMPage>(guard.get_page());
-    Bitmap bitmap(gam.bitmap, GAM_MAX_BITS);
-    return bitmap.is_set(bit_index);
-  }
-
-  bool iam_has_extent(page_id_t iam_page_id, uint32_t extent_id) {
-    PageGuard guard = bpm_->fetch_page_guard(iam_page_id);
-    IAMPage iam = load_page_layout<IAMPage>(guard.get_page());
-    return iam.contains_extent(extent_id);
   }
 
   bool wal_has_compensation(CompensationKind kind) {
@@ -291,19 +241,6 @@ TEST_F(RecoveryManagerTest, AnalysisPreservesEarliestRecLsnOnMultipleUpdatesToSa
   EXPECT_EQ(result.dirty_page_table[5], first_lsn);
 }
 
-TEST_F(RecoveryManagerTest, AnalysisHandlesGamAndIamUpdates) {
-  uint64_t txn1 = txn_mgr_->begin();
-  lsn_t gam_lsn = append_gam_update(txn1, 0, 1);
-  lsn_t iam_lsn = append_iam_update(txn1, 1, 100);
-
-  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
-  AnalysisResult result = recovery.analyze();
-
-  EXPECT_EQ(result.active_transactions[txn1], iam_lsn);
-  EXPECT_EQ(result.dirty_page_table[0], gam_lsn);
-  EXPECT_EQ(result.dirty_page_table[1], iam_lsn);
-  EXPECT_EQ(result.min_rec_lsn, gam_lsn);
-}
 
 TEST_F(RecoveryManagerTest, AnalysisHandlesCompensationLogRecord) {
   uint64_t txn1 = txn_mgr_->begin();
@@ -365,7 +302,7 @@ TEST_F(RecoveryManagerTest, RedoAppliesPagePatchToDirtiedPage) {
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
     ASSERT_NE(pg.get_page(), nullptr);
-    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     Byte initial[] = {'A', 'B', 'C'};
     ASSERT_EQ(sp.insert_tuple(initial, 3), 0u);
   }
@@ -416,7 +353,7 @@ TEST_F(RecoveryManagerTest, RedoSkipsAlreadyAppliedChanges) {
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
     ASSERT_NE(pg.get_page(), nullptr);
-    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     Byte val[] = {0xFF};
     ASSERT_EQ(sp.insert_tuple(val, 1), 0u);
   }
@@ -470,7 +407,7 @@ TEST_F(RecoveryManagerTest, RedoAppliesCompensationPatch) {
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
     ASSERT_NE(pg.get_page(), nullptr);
-    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
   }
 
   lsn_t update_lsn = append_page_update(txn1, page_id, 0);
@@ -518,7 +455,7 @@ TEST_F(RecoveryManagerTest, RedoAppliesMultiplePatchesToSamePage) {
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
     ASSERT_NE(pg.get_page(), nullptr);
-    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
   }
 
   PagePatch patch1{};
@@ -578,7 +515,7 @@ TEST_F(RecoveryManagerTest, RedoMaintainsPageLsnOrdering) {
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
     ASSERT_NE(pg.get_page(), nullptr);
-    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
   }
 
   PagePatch patch1{};
@@ -634,8 +571,8 @@ TEST_F(RecoveryManagerTest, RedoFullRecoveryIntegration) {
     PageGuard pg2 = bpm_->fetch_page_guard(page_id2);
     ASSERT_NE(pg1.get_page(), nullptr);
     ASSERT_NE(pg2.get_page(), nullptr);
-    SlottedPage sp1 = SlottedPage::init(reinterpret_cast<Byte*>(pg1.get_data()));
-    SlottedPage sp2 = SlottedPage::init(reinterpret_cast<Byte*>(pg2.get_data()));
+    SlottedPage sp1 = SlottedPage::init(reinterpret_cast<Byte*>(pg1.get_body()));
+    SlottedPage sp2 = SlottedPage::init(reinterpret_cast<Byte*>(pg2.get_body()));
     Byte init1[] = {0xAA};
     Byte init2[] = {0xBB};
     ASSERT_EQ(sp1.insert_tuple(init1, 1), 0u);
@@ -706,124 +643,6 @@ TEST_F(RecoveryManagerTest, RedoFullRecoveryIntegration) {
   EXPECT_GT(pg2_recovered.get_page()->get_page_lsn(), lsn2);
 }
 
-TEST_F(RecoveryManagerTest, UndoAllocateExtentClearsGamBit) {
-  page_id_t gam_page = 8;
-  uint16_t bit = 5;
-  bpm_->new_page(gam_page);
-
-  uint64_t txn1 = txn_mgr_->begin();
-  lsn_t alloc_lsn = append_gam_update(txn1, gam_page, bit, LogRecordType::ALLOCATE_EXTENT);
-
-  // Put the page in its post-allocate state (bit set, page_lsn at the record) so
-  // redo treats it as already applied and undo is the sole actor.
-  {
-    PageGuard guard = bpm_->fetch_page_guard(gam_page);
-    GAMPage gam = load_page_layout<GAMPage>(guard.get_page());
-    Bitmap bitmap(gam.bitmap, GAM_MAX_BITS);
-    bitmap.set(bit);
-    gam.page_lsn = alloc_lsn;
-    store_page_layout(guard.get_page(), gam);
-    guard.mark_dirty();
-  }
-  bpm_->update_dirtied_page_lsn(gam_page, alloc_lsn);
-  ASSERT_TRUE(log_mgr_->flush_to_lsn(alloc_lsn));
-
-  ASSERT_TRUE(gam_bit_set(gam_page, bit));
-
-  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
-  recovery.analyze();
-
-  EXPECT_FALSE(gam_bit_set(gam_page, bit));
-  EXPECT_TRUE(wal_has_compensation(CompensationKind::GamClearBit));
-}
-
-TEST_F(RecoveryManagerTest, UndoDeallocateExtentResetsGamBit) {
-  page_id_t gam_page = 8;
-  uint16_t bit = 5;
-  bpm_->new_page(gam_page);
-
-  uint64_t txn1 = txn_mgr_->begin();
-  lsn_t dealloc_lsn = append_gam_update(txn1, gam_page, bit, LogRecordType::DEALLOCATE_EXTENT);
-
-  // Post-deallocate state: bit cleared, page_lsn at the record.
-  {
-    PageGuard guard = bpm_->fetch_page_guard(gam_page);
-    GAMPage gam = load_page_layout<GAMPage>(guard.get_page());
-    Bitmap bitmap(gam.bitmap, GAM_MAX_BITS);
-    bitmap.clear(bit);
-    gam.page_lsn = dealloc_lsn;
-    store_page_layout(guard.get_page(), gam);
-    guard.mark_dirty();
-  }
-  bpm_->update_dirtied_page_lsn(gam_page, dealloc_lsn);
-  ASSERT_TRUE(log_mgr_->flush_to_lsn(dealloc_lsn));
-
-  ASSERT_FALSE(gam_bit_set(gam_page, bit));
-
-  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
-  recovery.analyze();
-
-  EXPECT_TRUE(gam_bit_set(gam_page, bit));
-  EXPECT_TRUE(wal_has_compensation(CompensationKind::GamSetBit));
-}
-
-TEST_F(RecoveryManagerTest, UndoIamAddExtentRemovesEntry) {
-  page_id_t iam_page = 16;
-  uint32_t extent = 42;
-  bpm_->new_page(iam_page);
-
-  uint64_t txn1 = txn_mgr_->begin();
-  lsn_t add_lsn = append_iam_update(txn1, iam_page, extent, LogRecordType::IAM_ADD_EXTENT);
-
-  // Post-add state: extent present, page_lsn at the record.
-  {
-    PageGuard guard = bpm_->fetch_page_guard(iam_page);
-    IAMPage iam = load_page_layout<IAMPage>(guard.get_page());
-    iam.add_extent(extent);
-    iam.page_lsn = add_lsn;
-    store_page_layout(guard.get_page(), iam);
-    guard.mark_dirty();
-  }
-  bpm_->update_dirtied_page_lsn(iam_page, add_lsn);
-  ASSERT_TRUE(log_mgr_->flush_to_lsn(add_lsn));
-
-  ASSERT_TRUE(iam_has_extent(iam_page, extent));
-
-  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
-  recovery.analyze();
-
-  EXPECT_FALSE(iam_has_extent(iam_page, extent));
-  EXPECT_TRUE(wal_has_compensation(CompensationKind::IamRemoveExtent));
-}
-
-TEST_F(RecoveryManagerTest, UndoIamRemoveExtentReAddsEntry) {
-  page_id_t iam_page = 16;
-  uint32_t extent = 42;
-  bpm_->new_page(iam_page);
-
-  uint64_t txn1 = txn_mgr_->begin();
-  lsn_t remove_lsn = append_iam_update(txn1, iam_page, extent, LogRecordType::IAM_REMOVE_EXTENT);
-
-  // Post-remove state: extent absent (fresh page), page_lsn at the record.
-  {
-    PageGuard guard = bpm_->fetch_page_guard(iam_page);
-    IAMPage iam = load_page_layout<IAMPage>(guard.get_page());
-    iam.page_lsn = remove_lsn;
-    store_page_layout(guard.get_page(), iam);
-    guard.mark_dirty();
-  }
-  bpm_->update_dirtied_page_lsn(iam_page, remove_lsn);
-  ASSERT_TRUE(log_mgr_->flush_to_lsn(remove_lsn));
-
-  ASSERT_FALSE(iam_has_extent(iam_page, extent));
-
-  RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
-  recovery.analyze();
-
-  EXPECT_TRUE(iam_has_extent(iam_page, extent));
-  EXPECT_TRUE(wal_has_compensation(CompensationKind::IamAddExtent));
-}
-
 TEST_F(RecoveryManagerTest, RollbackTransactionUndoesUpdateAndWritesEnd) {
   page_id_t page_id = 120;
   bpm_->new_page(page_id);
@@ -832,7 +651,7 @@ TEST_F(RecoveryManagerTest, RollbackTransactionUndoesUpdateAndWritesEnd) {
 
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
-    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     Byte updated_tuple[] = {0xEE, 0xEF};
     ASSERT_EQ(sp.insert_tuple(updated_tuple, 2), 0u);
     pg.mark_dirty();
@@ -871,7 +690,7 @@ TEST_F(RecoveryManagerTest, SlottedPageRedoAndUndoInsertRowPatches) {
   bpm_->new_page(page_id);
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
-    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     pg.mark_dirty();
   }
   bpm_->unpin_page(page_id, false);
@@ -927,7 +746,7 @@ TEST_F(RecoveryManagerTest, SlottedPageRedoAndUndoDeleteRowPatches) {
 
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
-    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     Byte row0[] = {'R', 'o', 'w', '0'};
     Byte row1[] = {'R', 'o', 'w', '1'};
     ASSERT_EQ(sp.insert_tuple(row0, 4), 0u);
@@ -1061,7 +880,7 @@ TEST_F(RecoveryManagerTest, RecoveryResumesInterruptedRollbackSkippingCompensate
   // Page reflects both inserts with slot 1 already compensated, stamped at the CLR LSN.
   {
     PageGuard pg = bpm_->fetch_page_guard(page_id);
-    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_data()));
+    SlottedPage sp = SlottedPage::init(reinterpret_cast<Byte*>(pg.get_body()));
     Byte a[] = {'A', 'A'};
     Byte b[] = {'B', 'B'};
     sp.insert_tuple(a, 2);
@@ -1196,11 +1015,10 @@ class FaultInjectionRecoveryE2ETest : public ::testing::Test {
     log_mgr_ = std::make_unique<LogManager>(wal_prefix_, wal_segment_size_, 60000);
     rollback_mgr_ = std::make_unique<RollbackManager>(*log_mgr_, *bpm_, db_path_);
     txn_mgr_ = std::make_unique<TransactionManager>(*log_mgr_, *rollback_mgr_);
-    extent_mgr_ = std::make_unique<ExtentManager>(*bpm_, *log_mgr_, *txn_mgr_);
-    iam_mgr_ = std::make_unique<IamManager>(*bpm_, *extent_mgr_, *log_mgr_, *txn_mgr_);
-    catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *iam_mgr_, *txn_mgr_);
+    page_allocator_ = std::make_unique<PageAllocator>(*bpm_, *log_mgr_, *txn_mgr_);
+    catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *page_allocator_, *txn_mgr_);
     catalog_mgr_->init();
-    table_mgr_ = std::make_unique<TableManager>(*bpm_, *iam_mgr_, *catalog_mgr_, *log_mgr_, *txn_mgr_);
+    table_mgr_ = std::make_unique<TableManager>(*bpm_, *catalog_mgr_, *log_mgr_, *txn_mgr_, *page_allocator_);
     executor_ = std::make_unique<Executor>(*catalog_mgr_, *table_mgr_, *txn_mgr_);
   }
 
@@ -1208,8 +1026,7 @@ class FaultInjectionRecoveryE2ETest : public ::testing::Test {
     executor_.reset();
     table_mgr_.reset();
     catalog_mgr_.reset();
-    iam_mgr_.reset();
-    extent_mgr_.reset();
+    page_allocator_.reset();
     txn_mgr_.reset();
     rollback_mgr_.reset();
     bpm_.reset();
@@ -1278,11 +1095,10 @@ class FaultInjectionRecoveryE2ETest : public ::testing::Test {
     RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
     recovery.analyze();
 
-    extent_mgr_ = std::make_unique<ExtentManager>(*bpm_, *log_mgr_, *txn_mgr_);
-    iam_mgr_ = std::make_unique<IamManager>(*bpm_, *extent_mgr_, *log_mgr_, *txn_mgr_);
-    catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *iam_mgr_, *txn_mgr_);
+    page_allocator_ = std::make_unique<PageAllocator>(*bpm_, *log_mgr_, *txn_mgr_);
+    catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *page_allocator_, *txn_mgr_);
     catalog_mgr_->init();
-    table_mgr_ = std::make_unique<TableManager>(*bpm_, *iam_mgr_, *catalog_mgr_, *log_mgr_, *txn_mgr_);
+    table_mgr_ = std::make_unique<TableManager>(*bpm_, *catalog_mgr_, *log_mgr_, *txn_mgr_, *page_allocator_);
     executor_ = std::make_unique<Executor>(*catalog_mgr_, *table_mgr_, *txn_mgr_);
   }
 
@@ -1321,8 +1137,7 @@ class FaultInjectionRecoveryE2ETest : public ::testing::Test {
   std::unique_ptr<LogManager> log_mgr_;
   std::unique_ptr<RollbackManager> rollback_mgr_;
   std::unique_ptr<TransactionManager> txn_mgr_;
-  std::unique_ptr<ExtentManager> extent_mgr_;
-  std::unique_ptr<IamManager> iam_mgr_;
+  std::unique_ptr<PageAllocator> page_allocator_;
   std::unique_ptr<CatalogManager> catalog_mgr_;
   std::unique_ptr<TableManager> table_mgr_;
   std::unique_ptr<Executor> executor_;
@@ -1437,11 +1252,10 @@ TEST_F(FaultInjectionRecoveryE2ETest, TornWalTailAndDiskWriteFaultRecoversPriorC
   RecoveryManager recovery(db_path_, *log_mgr_, *bpm_, *rollback_mgr_);
   recovery.analyze();
 
-  extent_mgr_ = std::make_unique<ExtentManager>(*bpm_, *log_mgr_, *txn_mgr_);
-  iam_mgr_ = std::make_unique<IamManager>(*bpm_, *extent_mgr_, *log_mgr_, *txn_mgr_);
-  catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *iam_mgr_, *txn_mgr_);
+  page_allocator_ = std::make_unique<PageAllocator>(*bpm_, *log_mgr_, *txn_mgr_);
+  catalog_mgr_ = std::make_unique<CatalogManager>(*bpm_, *page_allocator_, *txn_mgr_);
   catalog_mgr_->init();
-  table_mgr_ = std::make_unique<TableManager>(*bpm_, *iam_mgr_, *catalog_mgr_, *log_mgr_, *txn_mgr_);
+  table_mgr_ = std::make_unique<TableManager>(*bpm_, *catalog_mgr_, *log_mgr_, *txn_mgr_, *page_allocator_);
 
   auto rows = scan_users();
   ASSERT_EQ(rows.size(), 2u);
@@ -1491,7 +1305,7 @@ TEST_F(FaultInjectionRecoveryE2ETest, VoluntaryAbortRollsBackInsertsViaScan) {
   EXPECT_EQ(rows[0], std::make_pair(int32_t(1), std::string("Keeper")));
 }
 
-TEST_F(FaultInjectionRecoveryE2ETest, SqlStress500RowsMultiExtentMultiSegmentSmallPoolCrashAndRecover) {
+TEST_F(FaultInjectionRecoveryE2ETest, SqlStress500RowsMultiSegmentSmallPoolCrashAndRecover) {
   reconfigure_and_restart(6, 4096);
 
   auto create_res = execute_sql(

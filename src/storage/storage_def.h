@@ -7,15 +7,12 @@
  * LettyDB writes all data to a single database file with a .db extension.
  * The file is divided into fixed-size blocks called Pages (DEFAULT_PAGE_SIZE = 4096 bytes).
  *
- * Every page in the database begins with a fixed 20-byte PageHeader, placing
- * page_lsn, page linkages, table identifier, and page type/status at fixed, uniform
- * byte offsets across the entire database file.
+ * Every page starts with a 20-byte PageHeader holding page_lsn, prev/next
+ * page links, table_id, and page_type at fixed offsets across the file.
  *
- * Page 0 holds the DatabaseMetadata in its body:
- * - Fixed entry point of the database file.
- * - Stores signature, format version, table count, next available table OID,
- *   total pages, free page list head, and first page references for system catalog
- *   tables (sys_tables and sys_columns).
+ * Page 0 holds DatabaseMetadata in its body: signature, version, table_count,
+ * next_table_id, page_count, free_page_list_head_page, and the first page IDs
+ * for sys_tables and sys_columns.
  *
  * @verbatim
  * High-Level Directory Layout

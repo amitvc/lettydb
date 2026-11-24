@@ -1,36 +1,38 @@
 #include <gtest/gtest.h>
-#include "storage/iam_manager.h"
-#include "storage/disk_manager.h"
-#include "storage/log_manager.h"
-#include "transaction/transaction_manager.h"
+#include <filesystem>
+#include <vector>
+
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
-#include "storage/extent_manager.h"
-#include "storage/table_manager.h"
 #include "catalog/catalog_manager.h"
-#include "catalog/schema.h"
 #include "catalog/column.h"
-#include "storage/tuple.h"
-#include "storage/storage_def.h"
+#include "catalog/schema.h"
 #include "common/logger.h"
+#include "storage/disk_manager.h"
+#include "storage/log_manager.h"
+#include "storage/page_allocator.h"
 #include "storage/page_utils.h"
+#include "storage/rollback_manager.h"
 #include "storage/slotted_page.h"
-#include <filesystem>
+#include "storage/storage_def.h"
+#include "storage/table_manager.h"
+#include "storage/table_scanner.h"
+#include "storage/tuple.h"
+#include "transaction/transaction_manager.h"
 
 namespace letty {
 
-TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
+TEST(CompactionTest, DeleteAllAndCompactFreesEmptyPages) {
   auto test_db_file = std::filesystem::temp_directory_path() / "compaction_test.db";
 
   try {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 64, std::make_unique<LRUPageReplacer>());
     LogManager log_manager(test_db_file.string() + ".wal");
-    TransactionManager txn_manager(log_manager);
-    ExtentManager extent_manager(bpm, log_manager, txn_manager);
-    bpm.flush_all_pages();
-    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
-    CatalogManager catalog(bpm, iam_manager, txn_manager);
+    RollbackManager rollback_manager(log_manager, bpm, test_db_file.string());
+    TransactionManager txn_manager(log_manager, rollback_manager);
+    PageAllocator page_allocator(bpm, log_manager, txn_manager);
+    CatalogManager catalog(bpm, page_allocator, txn_manager);
     catalog.init();
 
     Schema schema({
@@ -41,9 +43,8 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     auto meta = catalog.get_table("test");
     ASSERT_TRUE(meta.has_value());
 
-    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
+    TableManager table_manager(bpm, catalog, log_manager, txn_manager, page_allocator);
 
-    // Insert 500 rows across multiple extents.
     const int kRowCount = 500;
     uint64_t txn_id = txn_manager.begin();
     for (int i = 0; i < kRowCount; ++i) {
@@ -54,22 +55,18 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     }
     txn_manager.commit(txn_id);
 
-    // Count extents before
-    page_id_t iam_head = meta->get().iam_page_id;
-    int extent_count_before = 0;
-    page_id_t cur = iam_head;
+    int page_count_before = 0;
+    page_id_t cur = meta->get().first_page_id;
     while (cur != INVALID_PAGE_ID) {
-      auto iam_page = load_page_value<IAMPage>(bpm, cur);
-      ASSERT_TRUE(iam_page.has_value());
-      extent_count_before += iam_page->extent_count;
-      cur = iam_page->next_page_id;
+      auto page_header = load_page_value<PageHeader>(bpm, cur);
+      ASSERT_TRUE(page_header.has_value());
+      page_count_before++;
+      cur = page_header->next_page_id;
     }
-    EXPECT_GE(extent_count_before, 1);
-    LOG_STORAGE_INFO("Table has {} extents before compaction", extent_count_before);
+    EXPECT_GT(page_count_before, 1);
 
-    // Delete ALL rows via scanner
     uint64_t delete_txn_id = txn_manager.begin();
-    TableScanner scanner(bpm, meta->get().iam_page_id);
+    TableScanner scanner = table_manager.scan_table(meta->get().name);
     int deleted = 0;
     while (scanner.next()) {
       table_manager.delete_row(meta->get(), scanner.current_page_id(), scanner.current_slot_id(), delete_txn_id);
@@ -77,29 +74,21 @@ TEST(CompactionTest, DeleteAllAndCompactFreesAllExtents) {
     }
     txn_manager.commit(delete_txn_id);
     EXPECT_EQ(deleted, kRowCount);
-    LOG_STORAGE_INFO("Deleted {} rows", deleted);
 
-    // Run compaction
-    table_manager.compact_extents(meta->get());
+    CompactionStats stats = table_manager.compact_table(meta->get());
+    EXPECT_GT(stats.pages_freed, 0u);
 
-    // Count extents after — should be 0 or 1 (IAM chain may still have the head page)
-    int extent_count_after = 0;
-    cur = iam_head;
+    int page_count_after = 0;
+    cur = meta->get().first_page_id;
     while (cur != INVALID_PAGE_ID) {
-      auto iam_page = load_page_value<IAMPage>(bpm, cur);
-      ASSERT_TRUE(iam_page.has_value());
-      extent_count_after += iam_page->extent_count;
-      cur = iam_page->next_page_id;
+      auto page_header = load_page_value<PageHeader>(bpm, cur);
+      ASSERT_TRUE(page_header.has_value());
+      page_count_after++;
+      cur = page_header->next_page_id;
     }
+    EXPECT_EQ(page_count_after, 1);
 
-    LOG_STORAGE_INFO("Table has {} extents after compaction (before={})", extent_count_after, extent_count_before);
-    // After deleting all rows, all extents should be freed.
-    // The IAM head page itself lives in its own extent, but its extent_count should be 0.
-    EXPECT_EQ(extent_count_after, 0)
-        << "Expected 0 extents after deleting all rows and compacting";
-
-    // Verify table is empty
-    TableScanner scanner2(bpm, meta->get().iam_page_id);
+    TableScanner scanner2 = table_manager.scan_table(meta->get().name);
     int surviving = 0;
     while (scanner2.next()) surviving++;
     EXPECT_EQ(surviving, 0);
@@ -125,19 +114,16 @@ TEST(CompactionTest, CompactNonExistentTableDoesNotCrash) {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
     LogManager log_manager(test_db_file.string() + ".wal");
-    TransactionManager txn_manager(log_manager);
-    ExtentManager extent_manager(bpm, log_manager, txn_manager);
-    bpm.flush_all_pages();
-    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
-    CatalogManager catalog(bpm, iam_manager, txn_manager);
+    RollbackManager rollback_manager(log_manager, bpm, test_db_file.string());
+    TransactionManager txn_manager(log_manager, rollback_manager);
+    PageAllocator page_allocator(bpm, log_manager, txn_manager);
+    CatalogManager catalog(bpm, page_allocator, txn_manager);
     catalog.init();
 
-    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
+    TableManager table_manager(bpm, catalog, log_manager, txn_manager, page_allocator);
 
     auto meta = catalog.get_table("does_not_exist");
     EXPECT_FALSE(meta.has_value());
-
-    LOG_STORAGE_INFO("Compact non-existent table test passed");
 
   } catch (...) {
     if (std::filesystem::exists(test_db_file)) {
@@ -160,11 +146,10 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     DiskManager disk_manager(test_db_file.string());
     BufferPoolManager bpm(disk_manager, 16, std::make_unique<LRUPageReplacer>());
     LogManager log_manager(test_db_file.string() + ".wal");
-    TransactionManager txn_manager(log_manager);
-    ExtentManager extent_manager(bpm, log_manager, txn_manager);
-    bpm.flush_all_pages();
-    IamManager iam_manager(bpm, extent_manager, log_manager, txn_manager);
-    CatalogManager catalog(bpm, iam_manager, txn_manager);
+    RollbackManager rollback_manager(log_manager, bpm, test_db_file.string());
+    TransactionManager txn_manager(log_manager, rollback_manager);
+    PageAllocator page_allocator(bpm, log_manager, txn_manager);
+    CatalogManager catalog(bpm, page_allocator, txn_manager);
     catalog.init();
 
     Schema schema({
@@ -173,7 +158,7 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     catalog.create_table("t", schema);
     auto meta = catalog.get_table("t");
     ASSERT_TRUE(meta.has_value());
-    TableManager table_manager(bpm, iam_manager, catalog, log_manager, txn_manager);
+    TableManager table_manager(bpm, catalog, log_manager, txn_manager, page_allocator);
 
     uint64_t txn_id = txn_manager.begin();
     for (int i = 0; i < 100; ++i) {
@@ -184,35 +169,34 @@ TEST(CompactionTest, CompactOnCleanTableIsNoOp) {
     }
     txn_manager.commit(txn_id);
 
-    page_id_t iam_head = meta->get().iam_page_id;
-    int extent_count_before = 0;
-    page_id_t cur = iam_head;
+    int page_count_before = 0;
+    page_id_t cur = meta->get().first_page_id;
     while (cur != INVALID_PAGE_ID) {
-      auto iam_page = load_page_value<IAMPage>(bpm, cur);
-      ASSERT_TRUE(iam_page.has_value());
-      extent_count_before += iam_page->extent_count;
-      cur = iam_page->next_page_id;
+      auto page_header = load_page_value<PageHeader>(bpm, cur);
+      ASSERT_TRUE(page_header.has_value());
+      page_count_before++;
+      cur = page_header->next_page_id;
     }
 
-    table_manager.compact_extents(meta->get());
+    CompactionStats stats = table_manager.compact_table(meta->get());
+    EXPECT_EQ(stats.pages_freed, 0u);
+    EXPECT_EQ(stats.tuples_migrated, 0u);
 
-    int extent_count_after = 0;
-    cur = iam_head;
+    int page_count_after = 0;
+    cur = meta->get().first_page_id;
     while (cur != INVALID_PAGE_ID) {
-      auto iam_page = load_page_value<IAMPage>(bpm, cur);
-      ASSERT_TRUE(iam_page.has_value());
-      extent_count_after += iam_page->extent_count;
-      cur = iam_page->next_page_id;
+      auto page_header = load_page_value<PageHeader>(bpm, cur);
+      ASSERT_TRUE(page_header.has_value());
+      page_count_after++;
+      cur = page_header->next_page_id;
     }
 
-    EXPECT_EQ(extent_count_after, extent_count_before);
+    EXPECT_EQ(page_count_after, page_count_before);
 
     int count = 0;
-    TableScanner scanner(bpm, meta->get().iam_page_id);
+    TableScanner scanner = table_manager.scan_table(meta->get().name);
     while (scanner.next()) count++;
     EXPECT_EQ(count, 100);
-
-    LOG_STORAGE_INFO("Compact on clean table test passed");
 
   } catch (...) {
     if (std::filesystem::exists(test_db_file)) {

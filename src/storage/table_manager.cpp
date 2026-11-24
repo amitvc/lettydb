@@ -148,16 +148,12 @@ CompactionStats TableManager::compact_table(const TableMetadata& tbl_meta_data) 
   CompactionStats stats;
   std::vector<PageStats> pages;
   survey_pages(tbl_meta_data.first_page_id, tbl_meta_data.name, pages);
-  if (pages.empty()) {
-    return stats;
+  if (!pages.empty()) {
+    std::sort(pages.begin(), pages.end(), [](const PageStats& a, const PageStats& b) {
+      return a.live_count < b.live_count;
+    });
+    stats.tuples_migrated = migrate_tuples(pages);
   }
-
-  // Sort the PageStats in ascending order.
-  std::sort(pages.begin(), pages.end(), [](const PageStats& a, const PageStats& b) {
-    return a.live_count < b.live_count;
-  });
-
-  stats.tuples_migrated = migrate_tuples(pages);
 
   page_id_t current_page_id = tbl_meta_data.first_page_id;
   while (current_page_id != INVALID_PAGE_ID) {

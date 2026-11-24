@@ -160,7 +160,7 @@ static constexpr auto DB_METADATA_PATCH_SIZE = DB_METADATA_STATE_SIZE * 2; // 24
  * @brief LogRecord payload representing changes to a page's PageHeader.
  *
  * Captures mutable fields of PageHeader (next_page_id, prev_page_id, table_id,
- * page_type, status) before and after mutation. page_lsn is managed by ARIES
+ * page_type, reserved) before and after mutation. page_lsn is managed by ARIES
  * redo/undo and is not serialized in this patch.
  */
 struct PageHeaderPatch {
@@ -168,7 +168,7 @@ struct PageHeaderPatch {
   PageHeader before;
   PageHeader after;
 };
-static constexpr auto PAGE_HEADER_MUTABLE_SIZE = 12; // next(4) + prev(4) + table_id(2) + type(1) + status(1)
+static constexpr auto PAGE_HEADER_MUTABLE_SIZE = 12; // next(4) + prev(4) + table_id(2) + type(1) + reserved(1)
 static constexpr auto PAGE_HEADER_PATCH_SIZE = 4 + (PAGE_HEADER_MUTABLE_SIZE * 2); // page_id(4) + before(12) + after(12) = 28 bytes
 
 /**

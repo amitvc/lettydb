@@ -205,6 +205,13 @@ class BufferPoolManager {
   bool flush_all_pages();
 
   /**
+   * @brief Writes all dirty unpinned pages whose LSN is <= the max_lsn passed to this function
+   * @param max_lsn
+   * @return true if every dirty unpinned page is flushed to disk or else return false.
+   */
+  bool flush_pages_up_to_lsn(lsn_t max_lsn);
+
+  /**
    * @brief Flush all dirty pages and sync to stable storage.
    * @return true if all dirty pages were flushed and the disk sync succeeded.
    *         false if one or more dirty pages failed to flush, or sync failed.
