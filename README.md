@@ -1,6 +1,6 @@
 # LettyDB
 
-LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, write-ahead log (WAL), ARIES crash recovery, page allocator, catalog, and query executor. Only external dependencies are added to support the CLI, logging, formatting, and tests. The core functionality of this database is implemented without any external libraries.
+LettyDB is a disk-based relational database written from scratch in C++17 to explore how databases work internally. It implements its own SQL frontend, page storage, buffer pool, write-ahead log (WAL), ARIES crash recovery, page allocator, catalog, and query executor. External dependencies are used only for the CLI, logging, formatting, and tests; the core database engine is written without external libraries.
 
 **Current milestone: [`v0.7-simplified-storage`](https://github.com/amitvc/lettydb/tree/v0.7-simplified-storage).** You can create tables, insert and query rows, delete data, compact tables, inspect the underlying storage from the CLI, and recover automatically from process crashes with full WAL durability and transactional rollback.
 
@@ -210,11 +210,13 @@ Longer-term goals include:
 
 ## Tests and API documentation
 
-Run the test suite after building:
+Run the unit test suite after building (excluding the long-running stress tests):
 
 ```sh
-ctest --preset debug --output-on-failure
+ctest --preset debug -E StressTest --output-on-failure
 ```
+
+To include the multi-threaded stress tests as well, run `ctest --preset debug --output-on-failure`.
 
 The tests cover the SQL frontend and executor, catalog, storage pages, tuple serialization, buffer pool and LRU replacement, single-page allocation and freelist management, compaction, segmented WAL management, transaction rollback with CLRs, fuzzy checkpointing, and ARIES crash recovery. The suite also includes buffer-pool benchmarks and multi-threaded stress tests—verified up to 100 million rows (2.87 GB across 200 tables) under 10 concurrent writer threads and 3 concurrent reader threads (~83k rows/s with 26k+ concurrent scans and full SQL parsing and WAL durability).
 
@@ -225,3 +227,7 @@ cmake --build --preset docs
 ```
 
 Open `cmake-build-debug/docs/html/index.html` to browse it.
+
+## Development process and use of AI
+
+LettyDB is a learning and systems-engineering project. I wrote much of the initial codebase by hand; over the last few months, my workflow has shifted to using AI coding agents to write code in small steps while I review each change. I use AI for whiteboarding and bouncing design ideas, checking edge cases and race conditions, writing incremental implementation steps, and generating most unit tests. Architecture decisions, code reviews, and debugging stay with me.
